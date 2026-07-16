@@ -1,0 +1,54 @@
+{
+  "additionalProperties": false,
+  "description": "Mutable session cursor constrained by the exact tutoring FSM.",
+  "properties": {
+    "completed_action_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Completed Action Ids",
+      "type": "array"
+    },
+    "current_state": {
+      "enum": [
+        "S0",
+        "S1",
+        "S2",
+        "S3",
+        "S4",
+        "S5"
+      ],
+      "title": "Current State",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "session_id": {
+      "minLength": 1,
+      "title": "Session Id",
+      "type": "string"
+    },
+    "turn_count": {
+      "minimum": 0,
+      "title": "Turn Count",
+      "type": "integer"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "session_id",
+    "current_state",
+    "turn_count",
+    "completed_action_ids",
+    "updated_at"
+  ],
+  "title": "SessionStateSnapshot",
+  "type": "object"
+}

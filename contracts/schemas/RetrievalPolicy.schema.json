@@ -1,0 +1,56 @@
+{
+  "additionalProperties": false,
+  "description": "Versioned M2 lexical/vector/hybrid retrieval policy.",
+  "properties": {
+    "lexical_weight": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Lexical Weight",
+      "type": "number"
+    },
+    "policy_id": {
+      "minLength": 1,
+      "title": "Policy Id",
+      "type": "string"
+    },
+    "rerank": {
+      "title": "Rerank",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "strategy": {
+      "enum": [
+        "lexical",
+        "vector",
+        "hybrid"
+      ],
+      "title": "Strategy",
+      "type": "string"
+    },
+    "top_k": {
+      "minimum": 1,
+      "title": "Top K",
+      "type": "integer"
+    },
+    "vector_weight": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Vector Weight",
+      "type": "number"
+    }
+  },
+  "required": [
+    "policy_id",
+    "strategy",
+    "top_k",
+    "lexical_weight",
+    "vector_weight",
+    "rerank"
+  ],
+  "title": "RetrievalPolicy",
+  "type": "object"
+}

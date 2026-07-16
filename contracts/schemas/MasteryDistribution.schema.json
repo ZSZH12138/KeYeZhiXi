@@ -1,0 +1,36 @@
+{
+  "additionalProperties": false,
+  "description": "Normalized class proportions across the three mastery bands.",
+  "properties": {
+    "consolidating": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Consolidating",
+      "type": "number"
+    },
+    "mastered": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Mastered",
+      "type": "number"
+    },
+    "priority_support": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Priority Support",
+      "type": "number"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "mastered",
+    "consolidating",
+    "priority_support"
+  ],
+  "title": "MasteryDistribution",
+  "type": "object"
+}

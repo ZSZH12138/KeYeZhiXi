@@ -1,0 +1,52 @@
+{
+  "additionalProperties": false,
+  "description": "Teacher-maintained concept node used across assessment and diagnosis.",
+  "properties": {
+    "aliases": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Aliases",
+      "type": "array"
+    },
+    "chapter_id": {
+      "minLength": 1,
+      "title": "Chapter Id",
+      "type": "string"
+    },
+    "concept_id": {
+      "minLength": 1,
+      "title": "Concept Id",
+      "type": "string"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "minLength": 1,
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "concept_id",
+    "name",
+    "chapter_id",
+    "description",
+    "aliases",
+    "status"
+  ],
+  "title": "KnowledgeConcept",
+  "type": "object"
+}

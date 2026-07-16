@@ -1,0 +1,744 @@
+{
+  "$defs": {
+    "AssessmentBlueprint": {
+      "additionalProperties": false,
+      "description": "Versioned teacher constraint set for comparable personalized papers.",
+      "properties": {
+        "blueprint_id": {
+          "minLength": 1,
+          "title": "Blueprint Id",
+          "type": "string"
+        },
+        "course_id": {
+          "minLength": 1,
+          "title": "Course Id",
+          "type": "string"
+        },
+        "duration_minutes": {
+          "exclusiveMinimum": 0,
+          "title": "Duration Minutes",
+          "type": "integer"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sections": {
+          "items": {
+            "$ref": "#/$defs/BlueprintSection"
+          },
+          "title": "Sections",
+          "type": "array"
+        },
+        "status": {
+          "minLength": 1,
+          "title": "Status",
+          "type": "string"
+        },
+        "total_score": {
+          "minimum": 0.0,
+          "title": "Total Score",
+          "type": "number"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "blueprint_id",
+        "version",
+        "course_id",
+        "sections",
+        "total_score",
+        "duration_minutes",
+        "status"
+      ],
+      "title": "AssessmentBlueprint",
+      "type": "object"
+    },
+    "BlueprintSection": {
+      "additionalProperties": false,
+      "description": "One score, type, concept, and difficulty constraint group.",
+      "properties": {
+        "anchor_item_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Anchor Item Ids",
+          "type": "array"
+        },
+        "concept_weights": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Concept Weights",
+          "type": "object"
+        },
+        "difficulty_range": {
+          "maxItems": 2,
+          "minItems": 2,
+          "prefixItems": [
+            {
+              "type": "integer"
+            },
+            {
+              "type": "integer"
+            }
+          ],
+          "title": "Difficulty Range",
+          "type": "array"
+        },
+        "item_count": {
+          "minimum": 0,
+          "title": "Item Count",
+          "type": "integer"
+        },
+        "item_types": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Item Types",
+          "type": "array"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "score": {
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "section_id": {
+          "minLength": 1,
+          "title": "Section Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "section_id",
+        "name",
+        "item_count",
+        "score",
+        "item_types",
+        "concept_weights",
+        "difficulty_range",
+        "anchor_item_ids"
+      ],
+      "title": "BlueprintSection",
+      "type": "object"
+    },
+    "ItemCard": {
+      "additionalProperties": false,
+      "description": "Versioned course item with concept, misconception, and evidence links.",
+      "properties": {
+        "answer_key": {
+          "additionalProperties": true,
+          "title": "Answer Key",
+          "type": "object"
+        },
+        "cognitive_level": {
+          "minLength": 1,
+          "title": "Cognitive Level",
+          "type": "string"
+        },
+        "concept_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Concept Ids",
+          "type": "array"
+        },
+        "difficulty_level": {
+          "minimum": 0,
+          "title": "Difficulty Level",
+          "type": "integer"
+        },
+        "item_id": {
+          "minLength": 1,
+          "title": "Item Id",
+          "type": "string"
+        },
+        "item_type": {
+          "minLength": 1,
+          "title": "Item Type",
+          "type": "string"
+        },
+        "misconception_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Misconception Ids",
+          "type": "array"
+        },
+        "parameter_rules": {
+          "items": {
+            "$ref": "#/$defs/ParameterRule"
+          },
+          "title": "Parameter Rules",
+          "type": "array"
+        },
+        "rubric_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Rubric Id"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Evidence Ids",
+          "type": "array"
+        },
+        "status": {
+          "minLength": 1,
+          "title": "Status",
+          "type": "string"
+        },
+        "stem": {
+          "minLength": 1,
+          "title": "Stem",
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "version",
+        "stem",
+        "item_type",
+        "concept_ids",
+        "misconception_ids",
+        "difficulty_level",
+        "cognitive_level",
+        "parameter_rules",
+        "answer_key",
+        "rubric_id",
+        "source_evidence_ids",
+        "status"
+      ],
+      "title": "ItemCard",
+      "type": "object"
+    },
+    "KnowledgeConcept": {
+      "additionalProperties": false,
+      "description": "Teacher-maintained concept node used across assessment and diagnosis.",
+      "properties": {
+        "aliases": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Aliases",
+          "type": "array"
+        },
+        "chapter_id": {
+          "minLength": 1,
+          "title": "Chapter Id",
+          "type": "string"
+        },
+        "concept_id": {
+          "minLength": 1,
+          "title": "Concept Id",
+          "type": "string"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "minLength": 1,
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "concept_id",
+        "name",
+        "chapter_id",
+        "description",
+        "aliases",
+        "status"
+      ],
+      "title": "KnowledgeConcept",
+      "type": "object"
+    },
+    "MisconceptionTag": {
+      "additionalProperties": false,
+      "description": "Course-defined misconception linked to one or more concepts.",
+      "properties": {
+        "concept_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Concept Ids",
+          "type": "array"
+        },
+        "description": {
+          "title": "Description",
+          "type": "string"
+        },
+        "evidence_rules": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Evidence Rules",
+          "type": "array"
+        },
+        "misconception_id": {
+          "minLength": 1,
+          "title": "Misconception Id",
+          "type": "string"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "misconception_id",
+        "name",
+        "description",
+        "concept_ids",
+        "evidence_rules"
+      ],
+      "title": "MisconceptionTag",
+      "type": "object"
+    },
+    "ParameterRule": {
+      "additionalProperties": false,
+      "description": "Bounded parameter vocabulary for a teacher-reviewed item template.",
+      "properties": {
+        "choices": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Choices",
+          "type": "array"
+        },
+        "constraints": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Constraints",
+          "type": "array"
+        },
+        "maximum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Maximum"
+        },
+        "minimum": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Minimum"
+        },
+        "name": {
+          "minLength": 1,
+          "title": "Name",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "value_type": {
+          "minLength": 1,
+          "title": "Value Type",
+          "type": "string"
+        }
+      },
+      "required": [
+        "name",
+        "value_type",
+        "minimum",
+        "maximum",
+        "choices",
+        "constraints"
+      ],
+      "title": "ParameterRule",
+      "type": "object"
+    },
+    "PrerequisiteRelation": {
+      "additionalProperties": false,
+      "description": "Directed concept relation where ``from`` precedes ``to``.",
+      "properties": {
+        "from_concept_id": {
+          "minLength": 1,
+          "title": "From Concept Id",
+          "type": "string"
+        },
+        "relation_type": {
+          "enum": [
+            "prerequisite",
+            "related"
+          ],
+          "title": "Relation Type",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "strength": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Strength",
+          "type": "number"
+        },
+        "to_concept_id": {
+          "minLength": 1,
+          "title": "To Concept Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "from_concept_id",
+        "to_concept_id",
+        "relation_type",
+        "strength"
+      ],
+      "title": "PrerequisiteRelation",
+      "type": "object"
+    },
+    "QMatrixEntry": {
+      "additionalProperties": false,
+      "description": "Weighted item-version to concept relation in the Q matrix.",
+      "properties": {
+        "concept_id": {
+          "minLength": 1,
+          "title": "Concept Id",
+          "type": "string"
+        },
+        "item_id": {
+          "minLength": 1,
+          "title": "Item Id",
+          "type": "string"
+        },
+        "item_version": {
+          "minLength": 1,
+          "title": "Item Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "weight": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Weight",
+          "type": "number"
+        }
+      },
+      "required": [
+        "item_id",
+        "item_version",
+        "concept_id",
+        "weight"
+      ],
+      "title": "QMatrixEntry",
+      "type": "object"
+    },
+    "ReviewPolicy": {
+      "additionalProperties": false,
+      "description": "Thresholds that route uncertain or divergent scores to review.",
+      "properties": {
+        "double_score_disagreement_threshold": {
+          "minimum": 0.0,
+          "title": "Double Score Disagreement Threshold",
+          "type": "number"
+        },
+        "low_confidence_threshold": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Low Confidence Threshold",
+          "type": "number"
+        },
+        "require_evidence_for_positive_score": {
+          "title": "Require Evidence For Positive Score",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "low_confidence_threshold",
+        "double_score_disagreement_threshold",
+        "require_evidence_for_positive_score"
+      ],
+      "title": "ReviewPolicy",
+      "type": "object"
+    },
+    "Rubric": {
+      "additionalProperties": false,
+      "description": "Versioned scoring rubric whose criterion maxima equal its total.",
+      "properties": {
+        "criteria": {
+          "items": {
+            "$ref": "#/$defs/RubricCriterion"
+          },
+          "title": "Criteria",
+          "type": "array"
+        },
+        "review_policy": {
+          "$ref": "#/$defs/ReviewPolicy"
+        },
+        "rubric_id": {
+          "minLength": 1,
+          "title": "Rubric Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "minLength": 1,
+          "title": "Status",
+          "type": "string"
+        },
+        "total_score": {
+          "minimum": 0.0,
+          "title": "Total Score",
+          "type": "number"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rubric_id",
+        "version",
+        "total_score",
+        "criteria",
+        "review_policy",
+        "status"
+      ],
+      "title": "Rubric",
+      "type": "object"
+    },
+    "RubricCriterion": {
+      "additionalProperties": false,
+      "description": "One auditable scoring point in a teacher-approved rubric.",
+      "properties": {
+        "course_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Course Evidence Ids",
+          "type": "array"
+        },
+        "criterion_id": {
+          "minLength": 1,
+          "title": "Criterion Id",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "expected_student_evidence": {
+          "title": "Expected Student Evidence",
+          "type": "string"
+        },
+        "max_score": {
+          "minimum": 0.0,
+          "title": "Max Score",
+          "type": "number"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion_id",
+        "description",
+        "max_score",
+        "expected_student_evidence",
+        "course_evidence_ids"
+      ],
+      "title": "RubricCriterion",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Validated M3 output shared unchanged with M4, M5, M8, and M9.",
+  "properties": {
+    "blueprints": {
+      "items": {
+        "$ref": "#/$defs/AssessmentBlueprint"
+      },
+      "title": "Blueprints",
+      "type": "array"
+    },
+    "bundle_version": {
+      "minLength": 1,
+      "title": "Bundle Version",
+      "type": "string"
+    },
+    "concepts": {
+      "items": {
+        "$ref": "#/$defs/KnowledgeConcept"
+      },
+      "title": "Concepts",
+      "type": "array"
+    },
+    "course_id": {
+      "minLength": 1,
+      "title": "Course Id",
+      "type": "string"
+    },
+    "course_package_id": {
+      "minLength": 1,
+      "title": "Course Package Id",
+      "type": "string"
+    },
+    "items": {
+      "items": {
+        "$ref": "#/$defs/ItemCard"
+      },
+      "title": "Items",
+      "type": "array"
+    },
+    "knowledge_bundle_id": {
+      "minLength": 1,
+      "title": "Knowledge Bundle Id",
+      "type": "string"
+    },
+    "misconception_tags": {
+      "items": {
+        "$ref": "#/$defs/MisconceptionTag"
+      },
+      "title": "Misconception Tags",
+      "type": "array"
+    },
+    "prerequisite_relations": {
+      "items": {
+        "$ref": "#/$defs/PrerequisiteRelation"
+      },
+      "title": "Prerequisite Relations",
+      "type": "array"
+    },
+    "published_at": {
+      "anyOf": [
+        {
+          "format": "date-time",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Published At"
+    },
+    "q_matrix": {
+      "items": {
+        "$ref": "#/$defs/QMatrixEntry"
+      },
+      "title": "Q Matrix",
+      "type": "array"
+    },
+    "rubrics": {
+      "items": {
+        "$ref": "#/$defs/Rubric"
+      },
+      "title": "Rubrics",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "published"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "knowledge_bundle_id",
+    "course_package_id",
+    "course_id",
+    "bundle_version",
+    "concepts",
+    "prerequisite_relations",
+    "misconception_tags",
+    "items",
+    "rubrics",
+    "blueprints",
+    "q_matrix",
+    "status",
+    "published_at"
+  ],
+  "title": "KnowledgeBundle",
+  "type": "object"
+}

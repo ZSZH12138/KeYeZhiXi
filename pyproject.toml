@@ -1,0 +1,13 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "course-insight"
+version = "0.1.0"
+description = "课业智析无 HTTP 模块化单体框架"
+requires-python = ">=3.11"
+dependencies = ["pydantic>=2.10,<3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

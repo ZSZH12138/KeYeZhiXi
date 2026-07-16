@@ -1,0 +1,48 @@
+{
+  "additionalProperties": false,
+  "description": "DeepSeek-only model declaration with an environment-key name.",
+  "properties": {
+    "api_key_env": {
+      "const": "DEEPSEEK_API_KEY",
+      "default": "DEEPSEEK_API_KEY",
+      "title": "Api Key Env",
+      "type": "string"
+    },
+    "model_name": {
+      "minLength": 1,
+      "title": "Model Name",
+      "type": "string"
+    },
+    "model_version": {
+      "minLength": 1,
+      "title": "Model Version",
+      "type": "string"
+    },
+    "provider": {
+      "const": "deepseek",
+      "default": "deepseek",
+      "title": "Provider",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "empty",
+        "configured"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "model_name",
+    "model_version",
+    "status"
+  ],
+  "title": "LLMModelRef",
+  "type": "object"
+}

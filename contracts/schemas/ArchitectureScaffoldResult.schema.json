@@ -1,0 +1,968 @@
+{
+  "$defs": {
+    "AbilityEstimate": {
+      "additionalProperties": false,
+      "description": "Learner ability estimate bound to one IRT parameter set.",
+      "properties": {
+        "estimate_id": {
+          "minLength": 1,
+          "title": "Estimate Id",
+          "type": "string"
+        },
+        "estimated_at": {
+          "format": "date-time",
+          "title": "Estimated At",
+          "type": "string"
+        },
+        "learner_id": {
+          "minLength": 1,
+          "title": "Learner Id",
+          "type": "string"
+        },
+        "parameter_set_id": {
+          "minLength": 1,
+          "title": "Parameter Set Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "standard_error": {
+          "anyOf": [
+            {
+              "exclusiveMinimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Standard Error"
+        },
+        "status": {
+          "enum": [
+            "empty",
+            "estimated",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "theta": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Theta"
+        }
+      },
+      "required": [
+        "estimate_id",
+        "learner_id",
+        "parameter_set_id",
+        "status",
+        "estimated_at"
+      ],
+      "title": "AbilityEstimate",
+      "type": "object"
+    },
+    "AdaptiveSelectionResult": {
+      "additionalProperties": false,
+      "description": "M8 item selection output; empty until IRT is configured.",
+      "properties": {
+        "ability_estimate": {
+          "anyOf": [
+            {
+              "$ref": "#/$defs/AbilityEstimate"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null
+        },
+        "item_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Item Ids",
+          "type": "array"
+        },
+        "learner_id": {
+          "minLength": 1,
+          "title": "Learner Id",
+          "type": "string"
+        },
+        "policy_id": {
+          "minLength": 1,
+          "title": "Policy Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "selected_at": {
+          "format": "date-time",
+          "title": "Selected At",
+          "type": "string"
+        },
+        "selection_id": {
+          "minLength": 1,
+          "title": "Selection Id",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "empty",
+            "selected",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "selection_id",
+        "policy_id",
+        "learner_id",
+        "item_ids",
+        "status",
+        "selected_at"
+      ],
+      "title": "AdaptiveSelectionResult",
+      "type": "object"
+    },
+    "AsyncJobStatus": {
+      "additionalProperties": false,
+      "description": "Portable status for a future M0 background job.",
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "error_code": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Error Code"
+        },
+        "finished_at": {
+          "anyOf": [
+            {
+              "format": "date-time",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Finished At"
+        },
+        "job_id": {
+          "minLength": 1,
+          "title": "Job Id",
+          "type": "string"
+        },
+        "job_type": {
+          "enum": [
+            "django_frontend",
+            "vector_index",
+            "llm_generation",
+            "learning_model",
+            "calibration"
+          ],
+          "title": "Job Type",
+          "type": "string"
+        },
+        "progress": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Progress",
+          "type": "number"
+        },
+        "result_ref": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result Ref"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "succeeded",
+            "failed",
+            "skipped"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id",
+        "job_type",
+        "status",
+        "progress",
+        "created_at"
+      ],
+      "title": "AsyncJobStatus",
+      "type": "object"
+    },
+    "CalibrationRunResult": {
+      "additionalProperties": false,
+      "description": "M8 shadow-calibration result awaiting M9 review.",
+      "properties": {
+        "converged": {
+          "title": "Converged",
+          "type": "boolean"
+        },
+        "generated_at": {
+          "format": "date-time",
+          "title": "Generated At",
+          "type": "string"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Metrics",
+          "type": "object"
+        },
+        "parameter_set": {
+          "$ref": "#/$defs/IRTParameterSet"
+        },
+        "run_id": {
+          "minLength": 1,
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "empty",
+            "shadow",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "parameter_set",
+        "converged",
+        "metrics",
+        "status",
+        "generated_at"
+      ],
+      "title": "CalibrationRunResult",
+      "type": "object"
+    },
+    "CognitiveDiagnosisResult": {
+      "additionalProperties": false,
+      "description": "Versioned DINA-family output; empty until the engine is configured.",
+      "properties": {
+        "concept_mastery": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Concept Mastery",
+          "type": "object"
+        },
+        "generated_at": {
+          "format": "date-time",
+          "title": "Generated At",
+          "type": "string"
+        },
+        "learner_id": {
+          "minLength": 1,
+          "title": "Learner Id",
+          "type": "string"
+        },
+        "model_type": {
+          "enum": [
+            "DINA",
+            "DINO",
+            "GDINA",
+            "NCDM"
+          ],
+          "title": "Model Type",
+          "type": "string"
+        },
+        "model_version": {
+          "minLength": 1,
+          "title": "Model Version",
+          "type": "string"
+        },
+        "observation_count": {
+          "minimum": 0,
+          "title": "Observation Count",
+          "type": "integer"
+        },
+        "run_id": {
+          "minLength": 1,
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "empty",
+            "estimated",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "learner_id",
+        "model_type",
+        "model_version",
+        "concept_mastery",
+        "observation_count",
+        "status",
+        "generated_at"
+      ],
+      "title": "CognitiveDiagnosisResult",
+      "type": "object"
+    },
+    "EvidenceIndexRef": {
+      "additionalProperties": false,
+      "description": "Persistent identity and readiness metadata for an M2 index.",
+      "properties": {
+        "backend": {
+          "default": "lexical",
+          "enum": [
+            "lexical",
+            "pgvector"
+          ],
+          "title": "Backend",
+          "type": "string"
+        },
+        "built_at": {
+          "format": "date-time",
+          "title": "Built At",
+          "type": "string"
+        },
+        "checksum": {
+          "minLength": 1,
+          "title": "Checksum",
+          "type": "string"
+        },
+        "chunk_count": {
+          "minimum": 0,
+          "title": "Chunk Count",
+          "type": "integer"
+        },
+        "course_package_id": {
+          "minLength": 1,
+          "title": "Course Package Id",
+          "type": "string"
+        },
+        "embedding_model_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Embedding Model Id"
+        },
+        "index_id": {
+          "minLength": 1,
+          "title": "Index Id",
+          "type": "string"
+        },
+        "index_version": {
+          "minLength": 1,
+          "title": "Index Version",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_count": {
+          "minimum": 0,
+          "title": "Source Count",
+          "type": "integer"
+        },
+        "status": {
+          "enum": [
+            "building",
+            "ready",
+            "failed",
+            "empty"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "storage_ref": {
+          "minLength": 1,
+          "title": "Storage Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "index_id",
+        "course_package_id",
+        "index_version",
+        "storage_ref",
+        "source_count",
+        "chunk_count",
+        "built_at",
+        "checksum",
+        "status"
+      ],
+      "title": "EvidenceIndexRef",
+      "type": "object"
+    },
+    "IRTItemParameters": {
+      "additionalProperties": false,
+      "description": "Versioned IRT parameters for one immutable item version.",
+      "properties": {
+        "difficulty": {
+          "title": "Difficulty",
+          "type": "number"
+        },
+        "discrimination": {
+          "exclusiveMinimum": 0.0,
+          "title": "Discrimination",
+          "type": "number"
+        },
+        "guessing": {
+          "exclusiveMaximum": 1.0,
+          "minimum": 0.0,
+          "title": "Guessing",
+          "type": "number"
+        },
+        "item_id": {
+          "minLength": 1,
+          "title": "Item Id",
+          "type": "string"
+        },
+        "item_version": {
+          "minLength": 1,
+          "title": "Item Version",
+          "type": "string"
+        },
+        "sample_size": {
+          "minimum": 1,
+          "title": "Sample Size",
+          "type": "integer"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_id",
+        "item_version",
+        "discrimination",
+        "difficulty",
+        "guessing",
+        "sample_size"
+      ],
+      "title": "IRTItemParameters",
+      "type": "object"
+    },
+    "IRTParameterSet": {
+      "additionalProperties": false,
+      "description": "M8-owned append-only IRT parameter snapshot.",
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "item_parameters": {
+          "items": {
+            "$ref": "#/$defs/IRTItemParameters"
+          },
+          "title": "Item Parameters",
+          "type": "array"
+        },
+        "model_type": {
+          "enum": [
+            "1PL",
+            "2PL",
+            "3PL"
+          ],
+          "title": "Model Type",
+          "type": "string"
+        },
+        "parameter_set_id": {
+          "minLength": 1,
+          "title": "Parameter Set Id",
+          "type": "string"
+        },
+        "sample_size": {
+          "minimum": 0,
+          "title": "Sample Size",
+          "type": "integer"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "empty",
+            "shadow",
+            "approved",
+            "rejected"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "parameter_set_id",
+        "model_type",
+        "version",
+        "item_parameters",
+        "sample_size",
+        "status",
+        "created_at"
+      ],
+      "title": "IRTParameterSet",
+      "type": "object"
+    },
+    "KnowledgeTraceSnapshot": {
+      "additionalProperties": false,
+      "description": "Versioned BKT-family trace; empty until sequence data is available.",
+      "properties": {
+        "concept_probabilities": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Concept Probabilities",
+          "type": "object"
+        },
+        "learner_id": {
+          "minLength": 1,
+          "title": "Learner Id",
+          "type": "string"
+        },
+        "model_type": {
+          "enum": [
+            "BKT",
+            "BKT_FORGETTING",
+            "DKT"
+          ],
+          "title": "Model Type",
+          "type": "string"
+        },
+        "model_version": {
+          "minLength": 1,
+          "title": "Model Version",
+          "type": "string"
+        },
+        "observation_count": {
+          "minimum": 0,
+          "title": "Observation Count",
+          "type": "integer"
+        },
+        "observation_watermark": {
+          "minLength": 1,
+          "title": "Observation Watermark",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "empty",
+            "estimated",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "trace_id": {
+          "minLength": 1,
+          "title": "Trace Id",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "trace_id",
+        "learner_id",
+        "model_type",
+        "model_version",
+        "concept_probabilities",
+        "observation_watermark",
+        "observation_count",
+        "status",
+        "updated_at"
+      ],
+      "title": "KnowledgeTraceSnapshot",
+      "type": "object"
+    },
+    "LLMGenerationResult": {
+      "additionalProperties": false,
+      "description": "Structured DeepSeek output or an explicit empty placeholder.",
+      "properties": {
+        "citation_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Citation Ids",
+          "type": "array"
+        },
+        "content": {
+          "title": "Content",
+          "type": "string"
+        },
+        "finish_reason": {
+          "enum": [
+            "not_run",
+            "stop",
+            "error",
+            "blocked"
+          ],
+          "title": "Finish Reason",
+          "type": "string"
+        },
+        "generated_at": {
+          "format": "date-time",
+          "title": "Generated At",
+          "type": "string"
+        },
+        "provider": {
+          "const": "deepseek",
+          "default": "deepseek",
+          "title": "Provider",
+          "type": "string"
+        },
+        "request_id": {
+          "minLength": 1,
+          "title": "Request Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "empty",
+            "succeeded",
+            "failed",
+            "blocked"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "structured_output": {
+          "additionalProperties": true,
+          "title": "Structured Output",
+          "type": "object"
+        }
+      },
+      "required": [
+        "request_id",
+        "status",
+        "content",
+        "structured_output",
+        "citation_ids",
+        "finish_reason",
+        "generated_at"
+      ],
+      "title": "LLMGenerationResult",
+      "type": "object"
+    },
+    "LearningModelRun": {
+      "additionalProperties": false,
+      "description": "Atomic M5 DINA and BKT placeholder run.",
+      "properties": {
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "diagnosis": {
+          "$ref": "#/$defs/CognitiveDiagnosisResult"
+        },
+        "knowledge_trace": {
+          "$ref": "#/$defs/KnowledgeTraceSnapshot"
+        },
+        "observation_count": {
+          "minimum": 0,
+          "title": "Observation Count",
+          "type": "integer"
+        },
+        "run_id": {
+          "minLength": 1,
+          "title": "Run Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "empty",
+            "completed",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "run_id",
+        "diagnosis",
+        "knowledge_trace",
+        "observation_count",
+        "status",
+        "created_at"
+      ],
+      "title": "LearningModelRun",
+      "type": "object"
+    },
+    "ModelQualityReport": {
+      "additionalProperties": false,
+      "description": "M9 evidence gate for a model or parameter version.",
+      "properties": {
+        "generated_at": {
+          "format": "date-time",
+          "title": "Generated At",
+          "type": "string"
+        },
+        "metrics": {
+          "additionalProperties": {
+            "type": "number"
+          },
+          "title": "Metrics",
+          "type": "object"
+        },
+        "observation_count": {
+          "minimum": 0,
+          "title": "Observation Count",
+          "type": "integer"
+        },
+        "report_id": {
+          "minLength": 1,
+          "title": "Report Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "insufficient_data",
+            "ready",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        },
+        "subject_ref": {
+          "minLength": 1,
+          "title": "Subject Ref",
+          "type": "string"
+        }
+      },
+      "required": [
+        "report_id",
+        "subject_ref",
+        "metrics",
+        "observation_count",
+        "status",
+        "generated_at"
+      ],
+      "title": "ModelQualityReport",
+      "type": "object"
+    },
+    "RetrievalAudit": {
+      "additionalProperties": false,
+      "description": "M2 retrieval trace without raw query text or host paths.",
+      "properties": {
+        "audit_id": {
+          "minLength": 1,
+          "title": "Audit Id",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "index_id": {
+          "minLength": 1,
+          "title": "Index Id",
+          "type": "string"
+        },
+        "policy_id": {
+          "minLength": 1,
+          "title": "Policy Id",
+          "type": "string"
+        },
+        "query_id": {
+          "minLength": 1,
+          "title": "Query Id",
+          "type": "string"
+        },
+        "retrieved_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Retrieved Evidence Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "enum": [
+            "empty",
+            "succeeded",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "audit_id",
+        "query_id",
+        "index_id",
+        "policy_id",
+        "retrieved_evidence_ids",
+        "status",
+        "created_at"
+      ],
+      "title": "RetrievalAudit",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "End-to-end empty result proving the v2 architecture is wired.",
+  "properties": {
+    "adaptive_selection_result": {
+      "$ref": "#/$defs/AdaptiveSelectionResult"
+    },
+    "calibration_result": {
+      "$ref": "#/$defs/CalibrationRunResult"
+    },
+    "completed_at": {
+      "format": "date-time",
+      "title": "Completed At",
+      "type": "string"
+    },
+    "learning_model_run": {
+      "$ref": "#/$defs/LearningModelRun"
+    },
+    "model_quality_report": {
+      "$ref": "#/$defs/ModelQualityReport"
+    },
+    "retrieval_audit": {
+      "$ref": "#/$defs/RetrievalAudit"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scoring_generation": {
+      "$ref": "#/$defs/LLMGenerationResult"
+    },
+    "status": {
+      "const": "empty",
+      "default": "empty",
+      "title": "Status",
+      "type": "string"
+    },
+    "teacher_generation": {
+      "$ref": "#/$defs/LLMGenerationResult"
+    },
+    "vector_index": {
+      "$ref": "#/$defs/EvidenceIndexRef"
+    },
+    "web_job_status": {
+      "$ref": "#/$defs/AsyncJobStatus"
+    }
+  },
+  "required": [
+    "web_job_status",
+    "vector_index",
+    "retrieval_audit",
+    "scoring_generation",
+    "teacher_generation",
+    "learning_model_run",
+    "calibration_result",
+    "adaptive_selection_result",
+    "model_quality_report",
+    "completed_at"
+  ],
+  "title": "ArchitectureScaffoldResult",
+  "type": "object"
+}

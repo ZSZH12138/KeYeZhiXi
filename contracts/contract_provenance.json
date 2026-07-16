@@ -1,0 +1,547 @@
+{
+  "allowed_self_history": [
+    {
+      "consumer": {
+        "input_path": "$",
+        "method": "M5.update_state",
+        "parameter": "previous_class_state_snapshot"
+      },
+      "contract_name": "ClassStateSnapshot",
+      "producer": {
+        "method": "M5.update_state",
+        "output_path": "return.class_state_snapshot"
+      }
+    },
+    {
+      "consumer": {
+        "input_path": "$",
+        "method": "M5.update_state",
+        "parameter": "previous_learner_state_snapshot"
+      },
+      "contract_name": "LearnerStateSnapshot",
+      "producer": {
+        "method": "M5.update_state",
+        "output_path": "return.learner_state_snapshot"
+      }
+    },
+    {
+      "consumer": {
+        "input_path": "$",
+        "method": "M6.decide_next_action",
+        "parameter": "previous_session_state_snapshot"
+      },
+      "contract_name": "SessionStateSnapshot",
+      "producer": {
+        "method": "M6.decide_next_action",
+        "output_path": "return.session_state_snapshot"
+      }
+    }
+  ],
+  "contracts": {
+    "ArchitectureScaffoldResult": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "external.deployment_smoke",
+          "parameter": "architecture_scaffold_result"
+        }
+      ],
+      "producers": [
+        {
+          "method": "AppCoordinator.run_intelligence_architecture",
+          "output_path": "return"
+        }
+      ]
+    },
+    "AssessmentPaper": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M8.prepare_scoring",
+          "parameter": "assessment_paper"
+        },
+        {
+          "input_path": "$",
+          "method": "external.student",
+          "parameter": "assessment_paper"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M8.generate_paper",
+          "output_path": "return"
+        }
+      ]
+    },
+    "ClassStateSnapshot": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$.class_state_snapshot",
+          "method": "M9.build_teacher_analytics",
+          "parameter": "state_update_result"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M5.update_state",
+          "output_path": "return.class_state_snapshot"
+        }
+      ]
+    },
+    "CoursePackage": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M2.build_index",
+          "parameter": "course_package"
+        },
+        {
+          "input_path": "$",
+          "method": "M3.build_knowledge_bundle",
+          "parameter": "course_package"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M1.import_course",
+          "output_path": "return"
+        }
+      ]
+    },
+    "DiagnosisResult": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M8.generate_paper",
+          "parameter": "diagnosis_result"
+        },
+        {
+          "input_path": "$.diagnosis_result",
+          "method": "M6.decide_next_action",
+          "parameter": "state_update_result"
+        },
+        {
+          "input_path": "$.diagnosis_result",
+          "method": "M9.build_teacher_analytics",
+          "parameter": "state_update_result"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M5.update_state",
+          "output_path": "return.diagnosis_result"
+        }
+      ]
+    },
+    "EventAck": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "external.app_coordinator",
+          "parameter": "event_ack"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M0.append_learning_events",
+          "output_path": "return"
+        }
+      ]
+    },
+    "EvidenceBundle": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M7.generate_student_feedback",
+          "parameter": "evidence_bundle"
+        },
+        {
+          "input_path": "$",
+          "method": "M7.score_subjective_answer",
+          "parameter": "evidence_bundle"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M2.retrieve",
+          "output_path": "return"
+        }
+      ]
+    },
+    "EvidenceIndexRef": {
+      "allow_multiple_producers": true,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M2.empty_retrieval_audit",
+          "parameter": "index_ref"
+        },
+        {
+          "input_path": "$",
+          "method": "M2.retrieve",
+          "parameter": "evidence_index_ref"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M2.build_index",
+          "output_path": "return"
+        },
+        {
+          "method": "M2.initialize_vector_store",
+          "output_path": "return"
+        }
+      ]
+    },
+    "EvidenceQuery": {
+      "allow_multiple_producers": true,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M2.retrieve",
+          "parameter": "evidence_query"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M6.decide_next_action",
+          "output_path": "return.evidence_query"
+        },
+        {
+          "method": "M8.prepare_scoring",
+          "output_path": "return.evidence_queries[]"
+        }
+      ]
+    },
+    "FeedbackGenerationTask": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M7.generate_student_feedback",
+          "parameter": "feedback_generation_task"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M6.decide_next_action",
+          "output_path": "return.feedback_generation_task"
+        }
+      ]
+    },
+    "KnowledgeBundle": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M4.create_task_plan",
+          "parameter": "knowledge_bundle"
+        },
+        {
+          "input_path": "$",
+          "method": "M5.update_state",
+          "parameter": "knowledge_bundle"
+        },
+        {
+          "input_path": "$",
+          "method": "M8.generate_paper",
+          "parameter": "knowledge_bundle"
+        },
+        {
+          "input_path": "$",
+          "method": "M8.prepare_scoring",
+          "parameter": "knowledge_bundle"
+        },
+        {
+          "input_path": "$",
+          "method": "M9.build_teacher_analytics",
+          "parameter": "knowledge_bundle"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M3.build_knowledge_bundle",
+          "output_path": "return"
+        }
+      ]
+    },
+    "LearnerStateSnapshot": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M4.create_task_plan",
+          "parameter": "learner_state_snapshot"
+        },
+        {
+          "input_path": "$",
+          "method": "M8.generate_paper",
+          "parameter": "learner_state_snapshot"
+        },
+        {
+          "input_path": "$.learner_state_snapshot",
+          "method": "M6.decide_next_action",
+          "parameter": "state_update_result"
+        },
+        {
+          "input_path": "$.learner_state_snapshot",
+          "method": "M9.build_teacher_analytics",
+          "parameter": "state_update_result"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M5.update_state",
+          "output_path": "return.learner_state_snapshot"
+        }
+      ]
+    },
+    "RubricScoringResult": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$[]",
+          "method": "M8.finalize_scoring",
+          "parameter": "rubric_scoring_results"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M7.score_subjective_answer",
+          "output_path": "return"
+        }
+      ]
+    },
+    "RubricScoringTask": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M7.score_subjective_answer",
+          "parameter": "rubric_scoring_task"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M8.prepare_scoring",
+          "output_path": "return.rubric_scoring_tasks[]"
+        }
+      ]
+    },
+    "ScoringPreparationResult": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M2.consume_scoring_preparation",
+          "parameter": "scoring_preparation_result"
+        },
+        {
+          "input_path": "$.evidence_queries[]",
+          "method": "M2.retrieve",
+          "parameter": "evidence_query"
+        },
+        {
+          "input_path": "$",
+          "method": "M7.consume_scoring_preparation",
+          "parameter": "scoring_preparation_result"
+        },
+        {
+          "input_path": "$.rubric_scoring_tasks[]",
+          "method": "M7.score_subjective_answer",
+          "parameter": "rubric_scoring_task"
+        },
+        {
+          "input_path": "$",
+          "method": "M8.finalize_scoring",
+          "parameter": "scoring_preparation_result"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M8.prepare_scoring",
+          "output_path": "return"
+        }
+      ]
+    },
+    "ScoringResultBundle": {
+      "allow_multiple_producers": true,
+      "consumers": [
+        {
+          "input_path": "$.learning_events",
+          "method": "M0.append_learning_events",
+          "parameter": "events"
+        },
+        {
+          "input_path": "$",
+          "method": "M0.consume_scoring_result",
+          "parameter": "scoring_result_bundle"
+        },
+        {
+          "input_path": "$",
+          "method": "M5.update_state",
+          "parameter": "scoring_result_bundle"
+        },
+        {
+          "input_path": "$",
+          "method": "M6.decide_next_action",
+          "parameter": "scoring_result_bundle"
+        },
+        {
+          "input_path": "$",
+          "method": "M8.apply_teacher_review",
+          "parameter": "current_scoring_result_bundle"
+        },
+        {
+          "input_path": "$",
+          "method": "M9.build_teacher_analytics",
+          "parameter": "scoring_result_bundle"
+        },
+        {
+          "input_path": "$",
+          "method": "M9.record_teacher_review",
+          "parameter": "current_scoring_result_bundle"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M8.apply_teacher_review",
+          "output_path": "return"
+        },
+        {
+          "method": "M8.finalize_scoring",
+          "output_path": "return"
+        }
+      ]
+    },
+    "StateUpdateResult": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M6.decide_next_action",
+          "parameter": "state_update_result"
+        },
+        {
+          "input_path": "$",
+          "method": "M8.consume_state_update",
+          "parameter": "state_update_result"
+        },
+        {
+          "input_path": "$",
+          "method": "M9.build_teacher_analytics",
+          "parameter": "state_update_result"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M5.update_state",
+          "output_path": "return"
+        }
+      ]
+    },
+    "StudentFeedbackPackage": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "external.student",
+          "parameter": "student_feedback_package"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M7.generate_student_feedback",
+          "output_path": "return"
+        }
+      ]
+    },
+    "TaskPlan": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M6.decide_next_action",
+          "parameter": "task_plan"
+        },
+        {
+          "input_path": "$",
+          "method": "M8.generate_paper",
+          "parameter": "task_plan"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M4.create_task_plan",
+          "output_path": "return"
+        }
+      ]
+    },
+    "TeacherAnalyticsBundle": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "external.teacher",
+          "parameter": "teacher_analytics_bundle"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M9.build_teacher_analytics",
+          "output_path": "return"
+        }
+      ]
+    },
+    "TeacherReviewDecision": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$",
+          "method": "M8.apply_teacher_review",
+          "parameter": "teacher_review_decision"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M9.record_teacher_review",
+          "output_path": "return"
+        }
+      ]
+    },
+    "TutoringControlResult": {
+      "allow_multiple_producers": false,
+      "consumers": [
+        {
+          "input_path": "$.evidence_query",
+          "method": "M2.retrieve",
+          "parameter": "evidence_query"
+        },
+        {
+          "input_path": "$",
+          "method": "M4.consume_tutoring_control",
+          "parameter": "tutoring_control_result"
+        },
+        {
+          "input_path": "$.feedback_generation_task",
+          "method": "M7.generate_student_feedback",
+          "parameter": "feedback_generation_task"
+        }
+      ],
+      "producers": [
+        {
+          "method": "M6.decide_next_action",
+          "output_path": "return"
+        }
+      ]
+    }
+  },
+  "schema_version": "1.0.0"
+}

@@ -1,0 +1,236 @@
+{
+  "$defs": {
+    "ContentChunk": {
+      "additionalProperties": false,
+      "description": "Traceable text slice produced from a governed source document.",
+      "properties": {
+        "chunk_id": {
+          "minLength": 1,
+          "title": "Chunk Id",
+          "type": "string"
+        },
+        "concept_hints": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Concept Hints",
+          "type": "array"
+        },
+        "locator": {
+          "minLength": 1,
+          "title": "Locator",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sha256": {
+          "minLength": 1,
+          "title": "Sha256",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "chunk_id",
+        "source_id",
+        "text",
+        "locator",
+        "concept_hints",
+        "sha256"
+      ],
+      "title": "ContentChunk",
+      "type": "object"
+    },
+    "SourceAuthorization": {
+      "additionalProperties": false,
+      "description": "Authorization evidence for one governed course source.",
+      "properties": {
+        "authorized_at": {
+          "format": "date-time",
+          "title": "Authorized At",
+          "type": "string"
+        },
+        "authorized_by": {
+          "minLength": 1,
+          "title": "Authorized By",
+          "type": "string"
+        },
+        "license_note": {
+          "minLength": 1,
+          "title": "License Note",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "authorized_by",
+        "license_note",
+        "authorized_at"
+      ],
+      "title": "SourceAuthorization",
+      "type": "object"
+    },
+    "SourceDocument": {
+      "additionalProperties": false,
+      "description": "Metadata and immutable content identity for an imported file.",
+      "properties": {
+        "file_name": {
+          "minLength": 1,
+          "title": "File Name",
+          "type": "string"
+        },
+        "media_type": {
+          "minLength": 1,
+          "title": "Media Type",
+          "type": "string"
+        },
+        "page_count": {
+          "anyOf": [
+            {
+              "minimum": 1,
+              "type": "integer"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Page Count"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "sha256": {
+          "minLength": 1,
+          "title": "Sha256",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "title": {
+          "minLength": 1,
+          "title": "Title",
+          "type": "string"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "source_id",
+        "file_name",
+        "media_type",
+        "sha256",
+        "page_count",
+        "title",
+        "version"
+      ],
+      "title": "SourceDocument",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Validated M1 output consumed directly by M2 and M3.",
+  "properties": {
+    "checksum": {
+      "minLength": 1,
+      "title": "Checksum",
+      "type": "string"
+    },
+    "content_chunks": {
+      "items": {
+        "$ref": "#/$defs/ContentChunk"
+      },
+      "title": "Content Chunks",
+      "type": "array"
+    },
+    "course_id": {
+      "minLength": 1,
+      "title": "Course Id",
+      "type": "string"
+    },
+    "course_package_id": {
+      "minLength": 1,
+      "title": "Course Package Id",
+      "type": "string"
+    },
+    "imported_at": {
+      "format": "date-time",
+      "title": "Imported At",
+      "type": "string"
+    },
+    "package_version": {
+      "minLength": 1,
+      "title": "Package Version",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_authorizations": {
+      "items": {
+        "$ref": "#/$defs/SourceAuthorization"
+      },
+      "title": "Source Authorizations",
+      "type": "array"
+    },
+    "source_documents": {
+      "items": {
+        "$ref": "#/$defs/SourceDocument"
+      },
+      "title": "Source Documents",
+      "type": "array"
+    },
+    "status": {
+      "enum": [
+        "draft",
+        "ready",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "course_package_id",
+    "course_id",
+    "package_version",
+    "source_documents",
+    "content_chunks",
+    "source_authorizations",
+    "imported_at",
+    "status",
+    "checksum"
+  ],
+  "title": "CoursePackage",
+  "type": "object"
+}

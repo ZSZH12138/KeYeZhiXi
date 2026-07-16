@@ -1,0 +1,591 @@
+{
+  "$defs": {
+    "ClassConceptStatus": {
+      "additionalProperties": false,
+      "description": "Aggregated class evidence for one concept.",
+      "properties": {
+        "concept_id": {
+          "minLength": 1,
+          "title": "Concept Id",
+          "type": "string"
+        },
+        "mastery_distribution": {
+          "$ref": "#/$defs/MasteryDistribution"
+        },
+        "mastery_trend_delta": {
+          "anyOf": [
+            {
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Mastery Trend Delta"
+        },
+        "mean_confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Mean Confidence",
+          "type": "number"
+        },
+        "mean_mastery_probability": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Mean Mastery Probability",
+          "type": "number"
+        },
+        "sample_count": {
+          "minimum": 0,
+          "title": "Sample Count",
+          "type": "integer"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "trend_comparable": {
+          "title": "Trend Comparable",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "concept_id",
+        "mastery_distribution",
+        "mean_mastery_probability",
+        "mean_confidence",
+        "mastery_trend_delta",
+        "trend_comparable",
+        "sample_count"
+      ],
+      "title": "ClassConceptStatus",
+      "type": "object"
+    },
+    "ClassMisconceptionSummary": {
+      "additionalProperties": false,
+      "description": "Aggregated prevalence of one misconception in assessed learners.",
+      "properties": {
+        "affected_count": {
+          "minimum": 0,
+          "title": "Affected Count",
+          "type": "integer"
+        },
+        "affected_rate_among_assessed": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Affected Rate Among Assessed",
+          "type": "number"
+        },
+        "evidence_attempts": {
+          "minimum": 0,
+          "title": "Evidence Attempts",
+          "type": "integer"
+        },
+        "misconception_id": {
+          "minLength": 1,
+          "title": "Misconception Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "misconception_id",
+        "affected_count",
+        "affected_rate_among_assessed",
+        "evidence_attempts"
+      ],
+      "title": "ClassMisconceptionSummary",
+      "type": "object"
+    },
+    "ClassStateSnapshot": {
+      "additionalProperties": false,
+      "description": "Versioned class aggregate with explicit evidence sufficiency.",
+      "properties": {
+        "aggregation_policy_version": {
+          "minLength": 1,
+          "title": "Aggregation Policy Version",
+          "type": "string"
+        },
+        "assessed_count": {
+          "minimum": 0,
+          "title": "Assessed Count",
+          "type": "integer"
+        },
+        "class_id": {
+          "minLength": 1,
+          "title": "Class Id",
+          "type": "string"
+        },
+        "class_size": {
+          "minimum": 0,
+          "title": "Class Size",
+          "type": "integer"
+        },
+        "concept_status": {
+          "items": {
+            "$ref": "#/$defs/ClassConceptStatus"
+          },
+          "title": "Concept Status",
+          "type": "array"
+        },
+        "course_id": {
+          "minLength": 1,
+          "title": "Course Id",
+          "type": "string"
+        },
+        "coverage_rate": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Coverage Rate",
+          "type": "number"
+        },
+        "evidence_status": {
+          "enum": [
+            "sufficient",
+            "insufficient"
+          ],
+          "title": "Evidence Status",
+          "type": "string"
+        },
+        "misconception_summary": {
+          "items": {
+            "$ref": "#/$defs/ClassMisconceptionSummary"
+          },
+          "title": "Misconception Summary",
+          "type": "array"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scope": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Scope",
+          "type": "object"
+        },
+        "snapshot_id": {
+          "minLength": 1,
+          "title": "Snapshot Id",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "course_id",
+        "class_id",
+        "aggregation_policy_version",
+        "scope",
+        "class_size",
+        "assessed_count",
+        "coverage_rate",
+        "concept_status",
+        "misconception_summary",
+        "evidence_status",
+        "updated_at"
+      ],
+      "title": "ClassStateSnapshot",
+      "type": "object"
+    },
+    "ConceptState": {
+      "additionalProperties": false,
+      "description": "Learner state for one course concept.",
+      "properties": {
+        "concept_id": {
+          "minLength": 1,
+          "title": "Concept Id",
+          "type": "string"
+        },
+        "evidence_count": {
+          "minimum": 0,
+          "title": "Evidence Count",
+          "type": "integer"
+        },
+        "hint_dependency": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Hint Dependency",
+          "type": "number"
+        },
+        "mastery_confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Mastery Confidence",
+          "type": "number"
+        },
+        "mastery_probability": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Mastery Probability",
+          "type": "number"
+        },
+        "misconceptions": {
+          "items": {
+            "$ref": "#/$defs/MisconceptionStrength"
+          },
+          "title": "Misconceptions",
+          "type": "array"
+        },
+        "recent_correction_rate": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Recent Correction Rate",
+          "type": "number"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "concept_id",
+        "mastery_probability",
+        "mastery_confidence",
+        "misconceptions",
+        "hint_dependency",
+        "recent_correction_rate",
+        "evidence_count",
+        "updated_at"
+      ],
+      "title": "ConceptState",
+      "type": "object"
+    },
+    "DiagnosisResult": {
+      "additionalProperties": false,
+      "description": "Attempt-wide diagnosis with ordered teaching priorities.",
+      "properties": {
+        "attempt_id": {
+          "minLength": 1,
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "diagnosis_id": {
+          "minLength": 1,
+          "title": "Diagnosis Id",
+          "type": "string"
+        },
+        "generated_at": {
+          "format": "date-time",
+          "title": "Generated At",
+          "type": "string"
+        },
+        "item_diagnoses": {
+          "items": {
+            "$ref": "#/$defs/ItemDiagnosis"
+          },
+          "minItems": 1,
+          "title": "Item Diagnoses",
+          "type": "array"
+        },
+        "learner_id": {
+          "minLength": 1,
+          "title": "Learner Id",
+          "type": "string"
+        },
+        "priority_concept_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Priority Concept Ids",
+          "type": "array"
+        },
+        "priority_misconception_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Priority Misconception Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "diagnosis_id",
+        "attempt_id",
+        "learner_id",
+        "item_diagnoses",
+        "priority_concept_ids",
+        "priority_misconception_ids",
+        "generated_at"
+      ],
+      "title": "DiagnosisResult",
+      "type": "object"
+    },
+    "ItemDiagnosis": {
+      "additionalProperties": false,
+      "description": "Diagnosis evidence and misconceptions for one attempted item.",
+      "properties": {
+        "concept_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Concept Ids",
+          "type": "array"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "error_type": {
+          "minLength": 1,
+          "title": "Error Type",
+          "type": "string"
+        },
+        "evidence_audit_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Evidence Audit Ids",
+          "type": "array"
+        },
+        "item_instance_id": {
+          "minLength": 1,
+          "title": "Item Instance Id",
+          "type": "string"
+        },
+        "misconception_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Misconception Ids",
+          "type": "array"
+        },
+        "prerequisite_gap_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Prerequisite Gap Ids",
+          "type": "array"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_instance_id",
+        "concept_ids",
+        "misconception_ids",
+        "error_type",
+        "confidence",
+        "evidence_audit_ids",
+        "prerequisite_gap_ids"
+      ],
+      "title": "ItemDiagnosis",
+      "type": "object"
+    },
+    "LearnerStateSnapshot": {
+      "additionalProperties": false,
+      "description": "Versioned learner-state snapshot consumed across later modules.",
+      "properties": {
+        "class_id": {
+          "minLength": 1,
+          "title": "Class Id",
+          "type": "string"
+        },
+        "concept_states": {
+          "items": {
+            "$ref": "#/$defs/ConceptState"
+          },
+          "title": "Concept States",
+          "type": "array"
+        },
+        "course_id": {
+          "minLength": 1,
+          "title": "Course Id",
+          "type": "string"
+        },
+        "evidence_count": {
+          "minimum": 0,
+          "title": "Evidence Count",
+          "type": "integer"
+        },
+        "learner_id": {
+          "minLength": 1,
+          "title": "Learner Id",
+          "type": "string"
+        },
+        "overall_mastery": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Overall Mastery",
+          "type": "number"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "snapshot_id": {
+          "minLength": 1,
+          "title": "Snapshot Id",
+          "type": "string"
+        },
+        "state_version": {
+          "minimum": 1,
+          "title": "State Version",
+          "type": "integer"
+        },
+        "updated_at": {
+          "format": "date-time",
+          "title": "Updated At",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "course_id",
+        "class_id",
+        "learner_id",
+        "state_version",
+        "concept_states",
+        "overall_mastery",
+        "evidence_count",
+        "updated_at"
+      ],
+      "title": "LearnerStateSnapshot",
+      "type": "object"
+    },
+    "MasteryDistribution": {
+      "additionalProperties": false,
+      "description": "Normalized class proportions across the three mastery bands.",
+      "properties": {
+        "consolidating": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Consolidating",
+          "type": "number"
+        },
+        "mastered": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Mastered",
+          "type": "number"
+        },
+        "priority_support": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Priority Support",
+          "type": "number"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mastered",
+        "consolidating",
+        "priority_support"
+      ],
+      "title": "MasteryDistribution",
+      "type": "object"
+    },
+    "MisconceptionStrength": {
+      "additionalProperties": false,
+      "description": "Current evidence-weighted strength of one misconception.",
+      "properties": {
+        "evidence_count": {
+          "minimum": 0,
+          "title": "Evidence Count",
+          "type": "integer"
+        },
+        "last_seen_at": {
+          "format": "date-time",
+          "title": "Last Seen At",
+          "type": "string"
+        },
+        "misconception_id": {
+          "minLength": 1,
+          "title": "Misconception Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "strength": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Strength",
+          "type": "number"
+        }
+      },
+      "required": [
+        "misconception_id",
+        "strength",
+        "evidence_count",
+        "last_seen_at"
+      ],
+      "title": "MisconceptionStrength",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Atomic diagnosis plus learner and class state update result.",
+  "properties": {
+    "class_state_snapshot": {
+      "$ref": "#/$defs/ClassStateSnapshot"
+    },
+    "diagnosis_result": {
+      "$ref": "#/$defs/DiagnosisResult"
+    },
+    "learner_state_snapshot": {
+      "$ref": "#/$defs/LearnerStateSnapshot"
+    },
+    "processed_audit_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Processed Audit Ids",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "updated_at": {
+      "format": "date-time",
+      "title": "Updated At",
+      "type": "string"
+    }
+  },
+  "required": [
+    "diagnosis_result",
+    "learner_state_snapshot",
+    "class_state_snapshot",
+    "processed_audit_ids",
+    "updated_at"
+  ],
+  "title": "StateUpdateResult",
+  "type": "object"
+}

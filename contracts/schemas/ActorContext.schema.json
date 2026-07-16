@@ -1,0 +1,54 @@
+{
+  "additionalProperties": false,
+  "description": "Pseudonymous actor scope produced by the M0 Django boundary.",
+  "properties": {
+    "actor_id": {
+      "minLength": 1,
+      "title": "Actor Id",
+      "type": "string"
+    },
+    "class_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Class Ids",
+      "type": "array"
+    },
+    "course_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Course Ids",
+      "type": "array"
+    },
+    "issued_at": {
+      "format": "date-time",
+      "title": "Issued At",
+      "type": "string"
+    },
+    "role": {
+      "enum": [
+        "student",
+        "teacher",
+        "course_admin",
+        "system_admin"
+      ],
+      "title": "Role",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "actor_id",
+    "role",
+    "course_ids",
+    "class_ids",
+    "issued_at"
+  ],
+  "title": "ActorContext",
+  "type": "object"
+}

@@ -1,0 +1,29 @@
+{
+  "course_id": "example-course",
+  "database_path": "runtime/course_insight.db",
+  "runtime_dir": "runtime",
+  "log_level": "INFO",
+  "export_snapshots": true,
+  "persistence": {
+    "current_backend": "sqlite",
+    "target_backend": "postgresql",
+    "database_url_env": "DATABASE_URL"
+  },
+  "vector_retrieval": {
+    "target_backend": "pgvector",
+    "database_url_env": "VECTOR_DATABASE_URL",
+    "status": "empty"
+  },
+  "llm": {
+    "provider": "deepseek",
+    "model_env": "DEEPSEEK_MODEL",
+    "api_key_env": "DEEPSEEK_API_KEY",
+    "status": "empty"
+  },
+  "web": {
+    "framework": "django",
+    "secret_key_env": "DJANGO_SECRET_KEY",
+    "allowed_hosts_env": "DJANGO_ALLOWED_HOSTS",
+    "status": "empty"
+  }
+}

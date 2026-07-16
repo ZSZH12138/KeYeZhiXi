@@ -1,0 +1,149 @@
+{
+  "$defs": {
+    "CriterionScore": {
+      "additionalProperties": false,
+      "description": "One auditable rubric-criterion decision and its evidence.",
+      "properties": {
+        "course_evidence_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Course Evidence Id"
+        },
+        "criterion_id": {
+          "minLength": 1,
+          "title": "Criterion Id",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "score": {
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "student_evidence": {
+          "title": "Student Evidence",
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion_id",
+        "score",
+        "student_evidence",
+        "course_evidence_id",
+        "reason"
+      ],
+      "title": "CriterionScore",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Versioned M8 scoring record retained through teacher overrides.",
+  "properties": {
+    "attempt_id": {
+      "minLength": 1,
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "audit_id": {
+      "minLength": 1,
+      "title": "Audit Id",
+      "type": "string"
+    },
+    "audit_version": {
+      "minimum": 1,
+      "title": "Audit Version",
+      "type": "integer"
+    },
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "criterion_scores": {
+      "items": {
+        "$ref": "#/$defs/CriterionScore"
+      },
+      "title": "Criterion Scores",
+      "type": "array"
+    },
+    "item_instance_id": {
+      "minLength": 1,
+      "title": "Item Instance Id",
+      "type": "string"
+    },
+    "max_score": {
+      "minimum": 0.0,
+      "title": "Max Score",
+      "type": "number"
+    },
+    "review_reason": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Review Reason",
+      "type": "array"
+    },
+    "review_status": {
+      "minLength": 1,
+      "title": "Review Status",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "scoring_method": {
+      "enum": [
+        "rule",
+        "local_model",
+        "teacher_override"
+      ],
+      "title": "Scoring Method",
+      "type": "string"
+    },
+    "total_score": {
+      "minimum": 0.0,
+      "title": "Total Score",
+      "type": "number"
+    }
+  },
+  "required": [
+    "audit_id",
+    "audit_version",
+    "attempt_id",
+    "item_instance_id",
+    "criterion_scores",
+    "total_score",
+    "max_score",
+    "confidence",
+    "scoring_method",
+    "review_status",
+    "review_reason",
+    "created_at"
+  ],
+  "title": "ScoreAuditRecord",
+  "type": "object"
+}

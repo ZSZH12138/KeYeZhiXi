@@ -1,0 +1,61 @@
+{
+  "additionalProperties": false,
+  "description": "M9 teacher decision for an M8 shadow calibration run.",
+  "properties": {
+    "calibration_run_id": {
+      "minLength": 1,
+      "title": "Calibration Run Id",
+      "type": "string"
+    },
+    "decision": {
+      "enum": [
+        "approve",
+        "reject",
+        "defer"
+      ],
+      "title": "Decision",
+      "type": "string"
+    },
+    "decision_id": {
+      "minLength": 1,
+      "title": "Decision Id",
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "reviewed_at": {
+      "format": "date-time",
+      "title": "Reviewed At",
+      "type": "string"
+    },
+    "reviewer_id": {
+      "minLength": 1,
+      "title": "Reviewer Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "target_parameter_version": {
+      "minLength": 1,
+      "title": "Target Parameter Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "decision_id",
+    "calibration_run_id",
+    "reviewer_id",
+    "decision",
+    "target_parameter_version",
+    "reason",
+    "reviewed_at"
+  ],
+  "title": "CalibrationReviewDecision",
+  "type": "object"
+}

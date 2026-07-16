@@ -1,0 +1,43 @@
+{
+  "additionalProperties": false,
+  "description": "Directed concept relation where ``from`` precedes ``to``.",
+  "properties": {
+    "from_concept_id": {
+      "minLength": 1,
+      "title": "From Concept Id",
+      "type": "string"
+    },
+    "relation_type": {
+      "enum": [
+        "prerequisite",
+        "related"
+      ],
+      "title": "Relation Type",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "strength": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Strength",
+      "type": "number"
+    },
+    "to_concept_id": {
+      "minLength": 1,
+      "title": "To Concept Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "from_concept_id",
+    "to_concept_id",
+    "relation_type",
+    "strength"
+  ],
+  "title": "PrerequisiteRelation",
+  "type": "object"
+}

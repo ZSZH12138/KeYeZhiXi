@@ -1,0 +1,63 @@
+{
+  "additionalProperties": false,
+  "description": "M2 retrieval trace without raw query text or host paths.",
+  "properties": {
+    "audit_id": {
+      "minLength": 1,
+      "title": "Audit Id",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "index_id": {
+      "minLength": 1,
+      "title": "Index Id",
+      "type": "string"
+    },
+    "policy_id": {
+      "minLength": 1,
+      "title": "Policy Id",
+      "type": "string"
+    },
+    "query_id": {
+      "minLength": 1,
+      "title": "Query Id",
+      "type": "string"
+    },
+    "retrieved_evidence_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Retrieved Evidence Ids",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "status": {
+      "enum": [
+        "empty",
+        "succeeded",
+        "failed"
+      ],
+      "title": "Status",
+      "type": "string"
+    }
+  },
+  "required": [
+    "audit_id",
+    "query_id",
+    "index_id",
+    "policy_id",
+    "retrieved_evidence_ids",
+    "status",
+    "created_at"
+  ],
+  "title": "RetrievalAudit",
+  "type": "object"
+}

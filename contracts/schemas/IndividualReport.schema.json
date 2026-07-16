@@ -1,0 +1,56 @@
+{
+  "additionalProperties": false,
+  "description": "Teacher-facing learner summary for targeted follow-up.",
+  "properties": {
+    "active_misconception_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Active Misconception Ids",
+      "type": "array"
+    },
+    "learner_id": {
+      "minLength": 1,
+      "title": "Learner Id",
+      "type": "string"
+    },
+    "overall_mastery": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Overall Mastery",
+      "type": "number"
+    },
+    "recent_score": {
+      "minimum": 0.0,
+      "title": "Recent Score",
+      "type": "number"
+    },
+    "review_required_count": {
+      "minimum": 0,
+      "title": "Review Required Count",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "weak_concept_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Weak Concept Ids",
+      "type": "array"
+    }
+  },
+  "required": [
+    "learner_id",
+    "overall_mastery",
+    "weak_concept_ids",
+    "active_misconception_ids",
+    "recent_score",
+    "review_required_count"
+  ],
+  "title": "IndividualReport",
+  "type": "object"
+}

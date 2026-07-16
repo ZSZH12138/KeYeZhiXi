@@ -1,0 +1,52 @@
+{
+  "additionalProperties": false,
+  "description": "Traceable text slice produced from a governed source document.",
+  "properties": {
+    "chunk_id": {
+      "minLength": 1,
+      "title": "Chunk Id",
+      "type": "string"
+    },
+    "concept_hints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Concept Hints",
+      "type": "array"
+    },
+    "locator": {
+      "minLength": 1,
+      "title": "Locator",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "sha256": {
+      "minLength": 1,
+      "title": "Sha256",
+      "type": "string"
+    },
+    "source_id": {
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    },
+    "text": {
+      "title": "Text",
+      "type": "string"
+    }
+  },
+  "required": [
+    "chunk_id",
+    "source_id",
+    "text",
+    "locator",
+    "concept_hints",
+    "sha256"
+  ],
+  "title": "ContentChunk",
+  "type": "object"
+}

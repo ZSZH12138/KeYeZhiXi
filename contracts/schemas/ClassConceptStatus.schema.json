@@ -1,0 +1,100 @@
+{
+  "$defs": {
+    "MasteryDistribution": {
+      "additionalProperties": false,
+      "description": "Normalized class proportions across the three mastery bands.",
+      "properties": {
+        "consolidating": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Consolidating",
+          "type": "number"
+        },
+        "mastered": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Mastered",
+          "type": "number"
+        },
+        "priority_support": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Priority Support",
+          "type": "number"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "mastered",
+        "consolidating",
+        "priority_support"
+      ],
+      "title": "MasteryDistribution",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "Aggregated class evidence for one concept.",
+  "properties": {
+    "concept_id": {
+      "minLength": 1,
+      "title": "Concept Id",
+      "type": "string"
+    },
+    "mastery_distribution": {
+      "$ref": "#/$defs/MasteryDistribution"
+    },
+    "mastery_trend_delta": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Mastery Trend Delta"
+    },
+    "mean_confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Mean Confidence",
+      "type": "number"
+    },
+    "mean_mastery_probability": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Mean Mastery Probability",
+      "type": "number"
+    },
+    "sample_count": {
+      "minimum": 0,
+      "title": "Sample Count",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "trend_comparable": {
+      "title": "Trend Comparable",
+      "type": "boolean"
+    }
+  },
+  "required": [
+    "concept_id",
+    "mastery_distribution",
+    "mean_mastery_probability",
+    "mean_confidence",
+    "mastery_trend_delta",
+    "trend_comparable",
+    "sample_count"
+  ],
+  "title": "ClassConceptStatus",
+  "type": "object"
+}

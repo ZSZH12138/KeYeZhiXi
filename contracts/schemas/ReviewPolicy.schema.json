@@ -1,0 +1,33 @@
+{
+  "additionalProperties": false,
+  "description": "Thresholds that route uncertain or divergent scores to review.",
+  "properties": {
+    "double_score_disagreement_threshold": {
+      "minimum": 0.0,
+      "title": "Double Score Disagreement Threshold",
+      "type": "number"
+    },
+    "low_confidence_threshold": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Low Confidence Threshold",
+      "type": "number"
+    },
+    "require_evidence_for_positive_score": {
+      "title": "Require Evidence For Positive Score",
+      "type": "boolean"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "low_confidence_threshold",
+    "double_score_disagreement_threshold",
+    "require_evidence_for_positive_score"
+  ],
+  "title": "ReviewPolicy",
+  "type": "object"
+}

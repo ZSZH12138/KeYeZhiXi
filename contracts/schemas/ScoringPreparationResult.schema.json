@@ -1,0 +1,563 @@
+{
+  "$defs": {
+    "CriterionScore": {
+      "additionalProperties": false,
+      "description": "One auditable rubric-criterion decision and its evidence.",
+      "properties": {
+        "course_evidence_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Course Evidence Id"
+        },
+        "criterion_id": {
+          "minLength": 1,
+          "title": "Criterion Id",
+          "type": "string"
+        },
+        "reason": {
+          "minLength": 1,
+          "title": "Reason",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "score": {
+          "minimum": 0.0,
+          "title": "Score",
+          "type": "number"
+        },
+        "student_evidence": {
+          "title": "Student Evidence",
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion_id",
+        "score",
+        "student_evidence",
+        "course_evidence_id",
+        "reason"
+      ],
+      "title": "CriterionScore",
+      "type": "object"
+    },
+    "EvidenceQuery": {
+      "additionalProperties": false,
+      "description": "Bounded evidence request produced by M6 or M8.",
+      "properties": {
+        "concept_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Concept Ids",
+          "type": "array"
+        },
+        "course_package_id": {
+          "minLength": 1,
+          "title": "Course Package Id",
+          "type": "string"
+        },
+        "item_id": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Item Id"
+        },
+        "min_relevance": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Min Relevance",
+          "type": "number"
+        },
+        "query_id": {
+          "minLength": 1,
+          "title": "Query Id",
+          "type": "string"
+        },
+        "query_text": {
+          "minLength": 1,
+          "title": "Query Text",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "top_k": {
+          "minimum": 1,
+          "title": "Top K",
+          "type": "integer"
+        },
+        "use_case": {
+          "enum": [
+            "grading",
+            "feedback",
+            "qa"
+          ],
+          "title": "Use Case",
+          "type": "string"
+        }
+      },
+      "required": [
+        "query_id",
+        "course_package_id",
+        "query_text",
+        "concept_ids",
+        "item_id",
+        "use_case",
+        "top_k",
+        "min_relevance"
+      ],
+      "title": "EvidenceQuery",
+      "type": "object"
+    },
+    "ItemInstance": {
+      "additionalProperties": false,
+      "description": "Frozen paper item with resolved parameters, score, and evidence links.",
+      "properties": {
+        "concept_ids": {
+          "items": {
+            "type": "string"
+          },
+          "minItems": 1,
+          "title": "Concept Ids",
+          "type": "array"
+        },
+        "item_id": {
+          "minLength": 1,
+          "title": "Item Id",
+          "type": "string"
+        },
+        "item_instance_id": {
+          "minLength": 1,
+          "title": "Item Instance Id",
+          "type": "string"
+        },
+        "item_version": {
+          "minLength": 1,
+          "title": "Item Version",
+          "type": "string"
+        },
+        "max_score": {
+          "minimum": 0.0,
+          "title": "Max Score",
+          "type": "number"
+        },
+        "parameters": {
+          "additionalProperties": true,
+          "title": "Parameters",
+          "type": "object"
+        },
+        "rubric_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Rubric Id"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Source Evidence Ids",
+          "type": "array"
+        },
+        "stem": {
+          "minLength": 1,
+          "title": "Stem",
+          "type": "string"
+        }
+      },
+      "required": [
+        "item_instance_id",
+        "item_id",
+        "item_version",
+        "stem",
+        "parameters",
+        "concept_ids",
+        "rubric_id",
+        "max_score",
+        "source_evidence_ids"
+      ],
+      "title": "ItemInstance",
+      "type": "object"
+    },
+    "ReviewPolicy": {
+      "additionalProperties": false,
+      "description": "Thresholds that route uncertain or divergent scores to review.",
+      "properties": {
+        "double_score_disagreement_threshold": {
+          "minimum": 0.0,
+          "title": "Double Score Disagreement Threshold",
+          "type": "number"
+        },
+        "low_confidence_threshold": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Low Confidence Threshold",
+          "type": "number"
+        },
+        "require_evidence_for_positive_score": {
+          "title": "Require Evidence For Positive Score",
+          "type": "boolean"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "low_confidence_threshold",
+        "double_score_disagreement_threshold",
+        "require_evidence_for_positive_score"
+      ],
+      "title": "ReviewPolicy",
+      "type": "object"
+    },
+    "Rubric": {
+      "additionalProperties": false,
+      "description": "Versioned scoring rubric whose criterion maxima equal its total.",
+      "properties": {
+        "criteria": {
+          "items": {
+            "$ref": "#/$defs/RubricCriterion"
+          },
+          "title": "Criteria",
+          "type": "array"
+        },
+        "review_policy": {
+          "$ref": "#/$defs/ReviewPolicy"
+        },
+        "rubric_id": {
+          "minLength": 1,
+          "title": "Rubric Id",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "status": {
+          "minLength": 1,
+          "title": "Status",
+          "type": "string"
+        },
+        "total_score": {
+          "minimum": 0.0,
+          "title": "Total Score",
+          "type": "number"
+        },
+        "version": {
+          "minLength": 1,
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rubric_id",
+        "version",
+        "total_score",
+        "criteria",
+        "review_policy",
+        "status"
+      ],
+      "title": "Rubric",
+      "type": "object"
+    },
+    "RubricCriterion": {
+      "additionalProperties": false,
+      "description": "One auditable scoring point in a teacher-approved rubric.",
+      "properties": {
+        "course_evidence_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Course Evidence Ids",
+          "type": "array"
+        },
+        "criterion_id": {
+          "minLength": 1,
+          "title": "Criterion Id",
+          "type": "string"
+        },
+        "description": {
+          "minLength": 1,
+          "title": "Description",
+          "type": "string"
+        },
+        "expected_student_evidence": {
+          "title": "Expected Student Evidence",
+          "type": "string"
+        },
+        "max_score": {
+          "minimum": 0.0,
+          "title": "Max Score",
+          "type": "number"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "criterion_id",
+        "description",
+        "max_score",
+        "expected_student_evidence",
+        "course_evidence_ids"
+      ],
+      "title": "RubricCriterion",
+      "type": "object"
+    },
+    "RubricScoringTask": {
+      "additionalProperties": false,
+      "description": "M8 subjective-answer task passed unchanged to M7.",
+      "properties": {
+        "attempt_id": {
+          "minLength": 1,
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "evidence_query_id": {
+          "minLength": 1,
+          "title": "Evidence Query Id",
+          "type": "string"
+        },
+        "item_instance": {
+          "$ref": "#/$defs/ItemInstance"
+        },
+        "paper_id": {
+          "minLength": 1,
+          "title": "Paper Id",
+          "type": "string"
+        },
+        "rubric": {
+          "$ref": "#/$defs/Rubric"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scoring_task_id": {
+          "minLength": 1,
+          "title": "Scoring Task Id",
+          "type": "string"
+        },
+        "student_answer": {
+          "title": "Student Answer",
+          "type": "string"
+        }
+      },
+      "required": [
+        "scoring_task_id",
+        "attempt_id",
+        "paper_id",
+        "item_instance",
+        "student_answer",
+        "rubric",
+        "evidence_query_id",
+        "created_at"
+      ],
+      "title": "RubricScoringTask",
+      "type": "object"
+    },
+    "ScoreAuditRecord": {
+      "additionalProperties": false,
+      "description": "Versioned M8 scoring record retained through teacher overrides.",
+      "properties": {
+        "attempt_id": {
+          "minLength": 1,
+          "title": "Attempt Id",
+          "type": "string"
+        },
+        "audit_id": {
+          "minLength": 1,
+          "title": "Audit Id",
+          "type": "string"
+        },
+        "audit_version": {
+          "minimum": 1,
+          "title": "Audit Version",
+          "type": "integer"
+        },
+        "confidence": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Confidence",
+          "type": "number"
+        },
+        "created_at": {
+          "format": "date-time",
+          "title": "Created At",
+          "type": "string"
+        },
+        "criterion_scores": {
+          "items": {
+            "$ref": "#/$defs/CriterionScore"
+          },
+          "title": "Criterion Scores",
+          "type": "array"
+        },
+        "item_instance_id": {
+          "minLength": 1,
+          "title": "Item Instance Id",
+          "type": "string"
+        },
+        "max_score": {
+          "minimum": 0.0,
+          "title": "Max Score",
+          "type": "number"
+        },
+        "review_reason": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Review Reason",
+          "type": "array"
+        },
+        "review_status": {
+          "minLength": 1,
+          "title": "Review Status",
+          "type": "string"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "scoring_method": {
+          "enum": [
+            "rule",
+            "local_model",
+            "teacher_override"
+          ],
+          "title": "Scoring Method",
+          "type": "string"
+        },
+        "total_score": {
+          "minimum": 0.0,
+          "title": "Total Score",
+          "type": "number"
+        }
+      },
+      "required": [
+        "audit_id",
+        "audit_version",
+        "attempt_id",
+        "item_instance_id",
+        "criterion_scores",
+        "total_score",
+        "max_score",
+        "confidence",
+        "scoring_method",
+        "review_status",
+        "review_reason",
+        "created_at"
+      ],
+      "title": "ScoreAuditRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "M8 split of completed objective audits and pending rubric tasks.",
+  "properties": {
+    "attempt_id": {
+      "minLength": 1,
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "evidence_queries": {
+      "items": {
+        "$ref": "#/$defs/EvidenceQuery"
+      },
+      "title": "Evidence Queries",
+      "type": "array"
+    },
+    "learner_id": {
+      "minLength": 1,
+      "title": "Learner Id",
+      "type": "string"
+    },
+    "objective_audit_records": {
+      "items": {
+        "$ref": "#/$defs/ScoreAuditRecord"
+      },
+      "title": "Objective Audit Records",
+      "type": "array"
+    },
+    "paper_id": {
+      "minLength": 1,
+      "title": "Paper Id",
+      "type": "string"
+    },
+    "prepared_at": {
+      "format": "date-time",
+      "title": "Prepared At",
+      "type": "string"
+    },
+    "raw_answer_checksum": {
+      "minLength": 1,
+      "title": "Raw Answer Checksum",
+      "type": "string"
+    },
+    "rubric_scoring_tasks": {
+      "items": {
+        "$ref": "#/$defs/RubricScoringTask"
+      },
+      "title": "Rubric Scoring Tasks",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "attempt_id",
+    "paper_id",
+    "learner_id",
+    "objective_audit_records",
+    "rubric_scoring_tasks",
+    "evidence_queries",
+    "raw_answer_checksum",
+    "prepared_at"
+  ],
+  "title": "ScoringPreparationResult",
+  "type": "object"
+}

@@ -1,0 +1,129 @@
+{
+  "adaptive_selection_result": {
+    "ability_estimate": null,
+    "item_ids": [],
+    "learner_id": "pseudonym_001",
+    "policy_id": "architecture_empty_policy_1",
+    "schema_version": "1.0.0",
+    "selected_at": "2026-07-15T09:00:00+08:00",
+    "selection_id": "architecture_empty_selection_1",
+    "status": "empty"
+  },
+  "calibration_result": {
+    "converged": false,
+    "generated_at": "2026-07-15T09:00:00+08:00",
+    "metrics": {},
+    "parameter_set": {
+      "created_at": "2026-07-15T09:00:00+08:00",
+      "item_parameters": [],
+      "model_type": "2PL",
+      "parameter_set_id": "architecture_empty_irt_1",
+      "sample_size": 0,
+      "schema_version": "1.0.0",
+      "status": "empty",
+      "version": "unconfigured"
+    },
+    "run_id": "architecture_empty_calibration_1",
+    "schema_version": "1.0.0",
+    "status": "empty"
+  },
+  "completed_at": "2026-07-15T09:00:00+08:00",
+  "learning_model_run": {
+    "created_at": "2026-07-15T09:00:00+08:00",
+    "diagnosis": {
+      "concept_mastery": {},
+      "generated_at": "2026-07-15T09:00:00+08:00",
+      "learner_id": "pseudonym_001",
+      "model_type": "DINA",
+      "model_version": "unconfigured",
+      "observation_count": 0,
+      "run_id": "architecture_empty_dina_1",
+      "schema_version": "1.0.0",
+      "status": "empty"
+    },
+    "knowledge_trace": {
+      "concept_probabilities": {},
+      "learner_id": "pseudonym_001",
+      "model_type": "BKT",
+      "model_version": "unconfigured",
+      "observation_count": 0,
+      "observation_watermark": "empty",
+      "schema_version": "1.0.0",
+      "status": "empty",
+      "trace_id": "architecture_empty_bkt_1",
+      "updated_at": "2026-07-15T09:00:00+08:00"
+    },
+    "observation_count": 0,
+    "run_id": "architecture_empty_learning_model_1",
+    "schema_version": "1.0.0",
+    "status": "empty"
+  },
+  "model_quality_report": {
+    "generated_at": "2026-07-15T09:00:00+08:00",
+    "metrics": {},
+    "observation_count": 0,
+    "report_id": "architecture_empty_quality_1",
+    "schema_version": "1.0.0",
+    "status": "insufficient_data",
+    "subject_ref": "architecture_empty_irt_1"
+  },
+  "retrieval_audit": {
+    "audit_id": "architecture_empty_retrieval_1",
+    "created_at": "2026-07-15T09:00:00+08:00",
+    "index_id": "architecture_empty_index_1",
+    "policy_id": "architecture_empty_policy_1",
+    "query_id": "architecture_empty_query_1",
+    "retrieved_evidence_ids": [],
+    "schema_version": "1.0.0",
+    "status": "empty"
+  },
+  "schema_version": "1.0.0",
+  "scoring_generation": {
+    "citation_ids": [],
+    "content": "",
+    "finish_reason": "not_run",
+    "generated_at": "2026-07-15T09:00:00+08:00",
+    "provider": "deepseek",
+    "request_id": "architecture_empty_scoring_1",
+    "schema_version": "1.0.0",
+    "status": "empty",
+    "structured_output": {}
+  },
+  "status": "empty",
+  "teacher_generation": {
+    "citation_ids": [],
+    "content": "",
+    "finish_reason": "not_run",
+    "generated_at": "2026-07-15T09:00:00+08:00",
+    "provider": "deepseek",
+    "request_id": "architecture_empty_teacher_1",
+    "schema_version": "1.0.0",
+    "status": "empty",
+    "structured_output": {}
+  },
+  "vector_index": {
+    "backend": "pgvector",
+    "built_at": "2026-07-15T09:00:00+08:00",
+    "checksum": "empty",
+    "chunk_count": 0,
+    "course_package_id": "course_package_placeholder",
+    "embedding_model_id": null,
+    "index_id": "architecture_empty_index_1",
+    "index_version": "unconfigured",
+    "schema_version": "1.0.0",
+    "source_count": 0,
+    "status": "empty",
+    "storage_ref": "pgvector:unconfigured:course_package_placeholder"
+  },
+  "web_job_status": {
+    "created_at": "2026-07-15T09:00:00+08:00",
+    "error_code": null,
+    "finished_at": "2026-07-15T09:00:00+08:00",
+    "job_id": "architecture_empty_django_1",
+    "job_type": "django_frontend",
+    "progress": 0.0,
+    "result_ref": null,
+    "schema_version": "1.0.0",
+    "status": "skipped"
+  }
+}

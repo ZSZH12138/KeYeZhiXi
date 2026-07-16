@@ -1,0 +1,39 @@
+{
+  "additionalProperties": false,
+  "description": "Auditable before-and-after score for one rubric criterion.",
+  "properties": {
+    "criterion_id": {
+      "minLength": 1,
+      "title": "Criterion Id",
+      "type": "string"
+    },
+    "new_score": {
+      "minimum": 0.0,
+      "title": "New Score",
+      "type": "number"
+    },
+    "previous_score": {
+      "minimum": 0.0,
+      "title": "Previous Score",
+      "type": "number"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "criterion_id",
+    "previous_score",
+    "new_score",
+    "reason"
+  ],
+  "title": "CriterionOverride",
+  "type": "object"
+}

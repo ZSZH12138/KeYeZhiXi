@@ -1,0 +1,40 @@
+{
+  "additionalProperties": false,
+  "description": "Current evidence-weighted strength of one misconception.",
+  "properties": {
+    "evidence_count": {
+      "minimum": 0,
+      "title": "Evidence Count",
+      "type": "integer"
+    },
+    "last_seen_at": {
+      "format": "date-time",
+      "title": "Last Seen At",
+      "type": "string"
+    },
+    "misconception_id": {
+      "minLength": 1,
+      "title": "Misconception Id",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "strength": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Strength",
+      "type": "number"
+    }
+  },
+  "required": [
+    "misconception_id",
+    "strength",
+    "evidence_count",
+    "last_seen_at"
+  ],
+  "title": "MisconceptionStrength",
+  "type": "object"
+}

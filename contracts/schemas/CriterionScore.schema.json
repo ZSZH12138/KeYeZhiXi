@@ -1,0 +1,51 @@
+{
+  "additionalProperties": false,
+  "description": "One auditable rubric-criterion decision and its evidence.",
+  "properties": {
+    "course_evidence_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Course Evidence Id"
+    },
+    "criterion_id": {
+      "minLength": 1,
+      "title": "Criterion Id",
+      "type": "string"
+    },
+    "reason": {
+      "minLength": 1,
+      "title": "Reason",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "score": {
+      "minimum": 0.0,
+      "title": "Score",
+      "type": "number"
+    },
+    "student_evidence": {
+      "title": "Student Evidence",
+      "type": "string"
+    }
+  },
+  "required": [
+    "criterion_id",
+    "score",
+    "student_evidence",
+    "course_evidence_id",
+    "reason"
+  ],
+  "title": "CriterionScore",
+  "type": "object"
+}

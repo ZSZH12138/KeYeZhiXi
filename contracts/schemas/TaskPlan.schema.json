@@ -1,0 +1,97 @@
+{
+  "additionalProperties": false,
+  "description": "Frozen M4 routing decision consumed unchanged by M6 and M8.",
+  "properties": {
+    "blueprint_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Blueprint Id"
+    },
+    "class_id": {
+      "minLength": 1,
+      "title": "Class Id",
+      "type": "string"
+    },
+    "course_id": {
+      "minLength": 1,
+      "title": "Course Id",
+      "type": "string"
+    },
+    "created_at": {
+      "format": "date-time",
+      "title": "Created At",
+      "type": "string"
+    },
+    "knowledge_bundle_id": {
+      "minLength": 1,
+      "title": "Knowledge Bundle Id",
+      "type": "string"
+    },
+    "learner_id": {
+      "minLength": 1,
+      "title": "Learner Id",
+      "type": "string"
+    },
+    "next_module": {
+      "minLength": 1,
+      "title": "Next Module",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "session_id": {
+      "minLength": 1,
+      "title": "Session Id",
+      "type": "string"
+    },
+    "task_id": {
+      "minLength": 1,
+      "title": "Task Id",
+      "type": "string"
+    },
+    "task_type": {
+      "enum": [
+        "qa",
+        "diagnostic",
+        "practice",
+        "correction",
+        "stage_assessment"
+      ],
+      "title": "Task Type",
+      "type": "string"
+    },
+    "workflow": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Workflow",
+      "type": "array"
+    }
+  },
+  "required": [
+    "task_id",
+    "task_type",
+    "course_id",
+    "class_id",
+    "learner_id",
+    "session_id",
+    "blueprint_id",
+    "knowledge_bundle_id",
+    "workflow",
+    "next_module",
+    "created_at"
+  ],
+  "title": "TaskPlan",
+  "type": "object"
+}

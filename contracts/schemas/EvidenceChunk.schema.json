@@ -1,0 +1,65 @@
+{
+  "additionalProperties": false,
+  "description": "One retrieved course quotation with stable source location.",
+  "properties": {
+    "checksum": {
+      "minLength": 1,
+      "title": "Checksum",
+      "type": "string"
+    },
+    "chunk_id": {
+      "minLength": 1,
+      "title": "Chunk Id",
+      "type": "string"
+    },
+    "concept_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Concept Ids",
+      "type": "array"
+    },
+    "evidence_id": {
+      "minLength": 1,
+      "title": "Evidence Id",
+      "type": "string"
+    },
+    "locator": {
+      "minLength": 1,
+      "title": "Locator",
+      "type": "string"
+    },
+    "relevance": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Relevance",
+      "type": "number"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_id": {
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    },
+    "text": {
+      "title": "Text",
+      "type": "string"
+    }
+  },
+  "required": [
+    "evidence_id",
+    "source_id",
+    "chunk_id",
+    "text",
+    "locator",
+    "concept_ids",
+    "relevance",
+    "checksum"
+  ],
+  "title": "EvidenceChunk",
+  "type": "object"
+}

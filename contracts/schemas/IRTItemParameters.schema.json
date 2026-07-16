@@ -1,0 +1,51 @@
+{
+  "additionalProperties": false,
+  "description": "Versioned IRT parameters for one immutable item version.",
+  "properties": {
+    "difficulty": {
+      "title": "Difficulty",
+      "type": "number"
+    },
+    "discrimination": {
+      "exclusiveMinimum": 0.0,
+      "title": "Discrimination",
+      "type": "number"
+    },
+    "guessing": {
+      "exclusiveMaximum": 1.0,
+      "minimum": 0.0,
+      "title": "Guessing",
+      "type": "number"
+    },
+    "item_id": {
+      "minLength": 1,
+      "title": "Item Id",
+      "type": "string"
+    },
+    "item_version": {
+      "minLength": 1,
+      "title": "Item Version",
+      "type": "string"
+    },
+    "sample_size": {
+      "minimum": 1,
+      "title": "Sample Size",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "item_id",
+    "item_version",
+    "discrimination",
+    "difficulty",
+    "guessing",
+    "sample_size"
+  ],
+  "title": "IRTItemParameters",
+  "type": "object"
+}

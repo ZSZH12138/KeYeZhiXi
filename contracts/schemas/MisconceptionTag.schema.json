@@ -1,0 +1,48 @@
+{
+  "additionalProperties": false,
+  "description": "Course-defined misconception linked to one or more concepts.",
+  "properties": {
+    "concept_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Concept Ids",
+      "type": "array"
+    },
+    "description": {
+      "title": "Description",
+      "type": "string"
+    },
+    "evidence_rules": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Evidence Rules",
+      "type": "array"
+    },
+    "misconception_id": {
+      "minLength": 1,
+      "title": "Misconception Id",
+      "type": "string"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "misconception_id",
+    "name",
+    "description",
+    "concept_ids",
+    "evidence_rules"
+  ],
+  "title": "MisconceptionTag",
+  "type": "object"
+}

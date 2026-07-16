@@ -1,0 +1,46 @@
+{
+  "additionalProperties": false,
+  "description": "One auditable scoring point in a teacher-approved rubric.",
+  "properties": {
+    "course_evidence_ids": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Course Evidence Ids",
+      "type": "array"
+    },
+    "criterion_id": {
+      "minLength": 1,
+      "title": "Criterion Id",
+      "type": "string"
+    },
+    "description": {
+      "minLength": 1,
+      "title": "Description",
+      "type": "string"
+    },
+    "expected_student_evidence": {
+      "title": "Expected Student Evidence",
+      "type": "string"
+    },
+    "max_score": {
+      "minimum": 0.0,
+      "title": "Max Score",
+      "type": "number"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "criterion_id",
+    "description",
+    "max_score",
+    "expected_student_evidence",
+    "course_evidence_ids"
+  ],
+  "title": "RubricCriterion",
+  "type": "object"
+}

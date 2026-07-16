@@ -1,0 +1,114 @@
+{
+  "$defs": {
+    "EvidenceChunk": {
+      "additionalProperties": false,
+      "description": "One retrieved course quotation with stable source location.",
+      "properties": {
+        "checksum": {
+          "minLength": 1,
+          "title": "Checksum",
+          "type": "string"
+        },
+        "chunk_id": {
+          "minLength": 1,
+          "title": "Chunk Id",
+          "type": "string"
+        },
+        "concept_ids": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Concept Ids",
+          "type": "array"
+        },
+        "evidence_id": {
+          "minLength": 1,
+          "title": "Evidence Id",
+          "type": "string"
+        },
+        "locator": {
+          "minLength": 1,
+          "title": "Locator",
+          "type": "string"
+        },
+        "relevance": {
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Relevance",
+          "type": "number"
+        },
+        "schema_version": {
+          "default": "1.0.0",
+          "title": "Schema Version",
+          "type": "string"
+        },
+        "source_id": {
+          "minLength": 1,
+          "title": "Source Id",
+          "type": "string"
+        },
+        "text": {
+          "title": "Text",
+          "type": "string"
+        }
+      },
+      "required": [
+        "evidence_id",
+        "source_id",
+        "chunk_id",
+        "text",
+        "locator",
+        "concept_ids",
+        "relevance",
+        "checksum"
+      ],
+      "title": "EvidenceChunk",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "description": "M2 retrieval output; an empty chunk list is a valid conservative result.",
+  "properties": {
+    "course_id": {
+      "minLength": 1,
+      "title": "Course Id",
+      "type": "string"
+    },
+    "evidence_chunks": {
+      "items": {
+        "$ref": "#/$defs/EvidenceChunk"
+      },
+      "title": "Evidence Chunks",
+      "type": "array"
+    },
+    "index_id": {
+      "minLength": 1,
+      "title": "Index Id",
+      "type": "string"
+    },
+    "query_id": {
+      "minLength": 1,
+      "title": "Query Id",
+      "type": "string"
+    },
+    "retrieved_at": {
+      "format": "date-time",
+      "title": "Retrieved At",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "query_id",
+    "index_id",
+    "course_id",
+    "evidence_chunks",
+    "retrieved_at"
+  ],
+  "title": "EvidenceBundle",
+  "type": "object"
+}

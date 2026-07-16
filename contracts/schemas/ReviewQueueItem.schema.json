@@ -1,0 +1,60 @@
+{
+  "additionalProperties": false,
+  "description": "One version-bound score audit waiting for teacher attention.",
+  "properties": {
+    "audit_id": {
+      "minLength": 1,
+      "title": "Audit Id",
+      "type": "string"
+    },
+    "audit_version": {
+      "minimum": 1,
+      "title": "Audit Version",
+      "type": "integer"
+    },
+    "confidence": {
+      "maximum": 1.0,
+      "minimum": 0.0,
+      "title": "Confidence",
+      "type": "number"
+    },
+    "item_instance_id": {
+      "minLength": 1,
+      "title": "Item Instance Id",
+      "type": "string"
+    },
+    "learner_id": {
+      "minLength": 1,
+      "title": "Learner Id",
+      "type": "string"
+    },
+    "recommended_score": {
+      "minimum": 0.0,
+      "title": "Recommended Score",
+      "type": "number"
+    },
+    "review_reasons": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Review Reasons",
+      "type": "array"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "audit_id",
+    "audit_version",
+    "learner_id",
+    "item_instance_id",
+    "recommended_score",
+    "confidence",
+    "review_reasons"
+  ],
+  "title": "ReviewQueueItem",
+  "type": "object"
+}

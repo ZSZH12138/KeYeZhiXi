@@ -1,0 +1,67 @@
+{
+  "additionalProperties": false,
+  "description": "Bounded parameter vocabulary for a teacher-reviewed item template.",
+  "properties": {
+    "choices": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Choices",
+      "type": "array"
+    },
+    "constraints": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Constraints",
+      "type": "array"
+    },
+    "maximum": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Maximum"
+    },
+    "minimum": {
+      "anyOf": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Minimum"
+    },
+    "name": {
+      "minLength": 1,
+      "title": "Name",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "value_type": {
+      "minLength": 1,
+      "title": "Value Type",
+      "type": "string"
+    }
+  },
+  "required": [
+    "name",
+    "value_type",
+    "minimum",
+    "maximum",
+    "choices",
+    "constraints"
+  ],
+  "title": "ParameterRule",
+  "type": "object"
+}

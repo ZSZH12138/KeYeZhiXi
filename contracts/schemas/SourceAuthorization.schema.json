@@ -1,0 +1,39 @@
+{
+  "additionalProperties": false,
+  "description": "Authorization evidence for one governed course source.",
+  "properties": {
+    "authorized_at": {
+      "format": "date-time",
+      "title": "Authorized At",
+      "type": "string"
+    },
+    "authorized_by": {
+      "minLength": 1,
+      "title": "Authorized By",
+      "type": "string"
+    },
+    "license_note": {
+      "minLength": 1,
+      "title": "License Note",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_id": {
+      "minLength": 1,
+      "title": "Source Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "source_id",
+    "authorized_by",
+    "license_note",
+    "authorized_at"
+  ],
+  "title": "SourceAuthorization",
+  "type": "object"
+}
