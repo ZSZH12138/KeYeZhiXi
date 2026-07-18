@@ -12,7 +12,8 @@
 
 ## 输入来源
 
-- M4 `TaskPlan`。
+- M4 `TaskPlan`，其中的 `course_package_id` 原样进入 M2 `EvidenceQuery`，不得从
+  `knowledge_bundle_id` 命名格式推导。
 - M8 `ScoringResultBundle`。
 - M5 `StateUpdateResult`，其中现有诊断是教学动作的直接依据。
 - 前版 `SessionStateSnapshot`。

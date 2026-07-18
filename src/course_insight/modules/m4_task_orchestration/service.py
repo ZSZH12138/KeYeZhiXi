@@ -19,7 +19,7 @@ _ASSESSMENT_TASK_TYPES = frozenset(
     {"diagnostic", "practice", "correction", "stage_assessment"}
 )
 _SUPPORTED_TASK_TYPES = frozenset({"qa", *_ASSESSMENT_TASK_TYPES})
-_ASSESSMENT_WORKFLOW = ["M8", "M5", "M6", "M7", "M9"]
+_ASSESSMENT_WORKFLOW = ["M8", "M2", "M7", "M5", "M6", "M9"]
 
 
 class M4TaskOrchestrationService:
@@ -74,6 +74,7 @@ class M4TaskOrchestrationService:
             session_id,
             task_type,
             knowledge_bundle.knowledge_bundle_id,
+            knowledge_bundle.course_package_id,
             blueprint_id or "",
         ]
         canonical_identity = json.dumps(
@@ -106,6 +107,7 @@ class M4TaskOrchestrationService:
             session_id=session_id,
             blueprint_id=blueprint_id,
             knowledge_bundle_id=knowledge_bundle.knowledge_bundle_id,
+            course_package_id=knowledge_bundle.course_package_id,
             workflow=workflow,
             next_module=workflow[0],
             created_at=_FIXED_TIME,

@@ -24,6 +24,11 @@
       "title": "Course Id",
       "type": "string"
     },
+    "course_package_id": {
+      "minLength": 1,
+      "title": "Course Package Id",
+      "type": "string"
+    },
     "created_at": {
       "format": "date-time",
       "title": "Created At",
@@ -88,6 +93,7 @@
     "session_id",
     "blueprint_id",
     "knowledge_bundle_id",
+    "course_package_id",
     "workflow",
     "next_module",
     "created_at"

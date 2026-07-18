@@ -21,7 +21,7 @@
 | `KnowledgeBundle` | `M3.build_knowledge_bundle` | M4、M5、M8、M9 |
 | `TaskPlan` | `M4.create_task_plan` | `M8.generate_paper`；`M6.decide_next_action` |
 | `AssessmentPaper` | `M8.generate_paper` | M0 学生作答外层；`M8.prepare_scoring` |
-| `ScoringPreparationResult` | `M8.prepare_scoring` | M2、M7、`M8.finalize_scoring` |
+| `ScoringPreparationResult` | `M8.prepare_scoring` | `M2.retrieve($.evidence_queries[])`；`M7.score_subjective_answer($.rubric_scoring_tasks[])`；`M8.finalize_scoring($)` |
 | `RubricScoringTask` | `M8.prepare_scoring` | `M7.score_subjective_answer` |
 | `RubricScoringResult` | `M7.score_subjective_answer` | `M8.finalize_scoring` |
 | `ScoringResultBundle` | `M8.finalize_scoring`、`M8.apply_teacher_review` | M0、M5、M6、M9 |
@@ -29,7 +29,7 @@
 | `LearnerStateSnapshot` | `M5.update_state` | M4、M6、M8、M9 |
 | `ClassStateSnapshot` | `M5.update_state` | M9 |
 | `StateUpdateResult` | `M5.update_state` | M6、M9 |
-| `TutoringControlResult` | `M6.decide_next_action` | M2、M7、M4 后续调度 |
+| `TutoringControlResult` | `M6.decide_next_action` | `M2.retrieve($.evidence_query)`；`M7.generate_student_feedback($.feedback_generation_task)`；应用层后续调度 |
 | `FeedbackGenerationTask` | `M6.decide_next_action` | `M7.generate_student_feedback` |
 | `StudentFeedbackPackage` | `M7.generate_student_feedback` | M0 Django 学生外层 |
 | `TeacherAnalyticsBundle` | `M9.build_teacher_analytics` | M0 Django 教师外层 |
@@ -42,8 +42,8 @@
 | 边界 | 生产者 | 消费者 | 当前空结果 |
 |---|---|---|---|
 | `ActorContext` | M0 Django 鉴权边界 | `AppCoordinator`、所有受授权用例 | 可构造伪匿名上下文 |
-| `AssessmentSubmission` | M0 Django 学生表单 | M8 | 仅定义无主机路径的输入格式 |
-| `TeacherReviewSubmission` | M0 Django 教师表单 | M9 | 仅定义无主机路径的输入格式 |
+| `AssessmentSubmission` | M0 Django 学生表单 | `M8.prepare_scoring` | `answers` 是题目实例 ID 到字符串/布尔/整数/有限浮点答案的映射 |
+| `TeacherReviewSubmission` | M0 Django 教师表单 | `M9.record_teacher_review` | 使用 `confirm/override/reject`，并完整携带总分、分项覆盖和教师意见 |
 | `AsyncJobStatus` | M0 作业边界 | M0 页面/调用方 | Django 作业 `skipped` |
 | `EmbeddingModelRef` | M2 检索配置 | M2 索引器 | `empty` |
 | `RetrievalPolicy` | M2 检索配置 | M2 检索器 | 允许词法/向量/混合策略 |

@@ -93,11 +93,11 @@ python -m course_insight.cli export-schemas
 | [M2](src/course_insight/modules/m2_evidence_retrieval/README.md) | 谢 | RAG；词法/pgvector 索引与审计 | M1 `CoursePackage`；M6/M8 `EvidenceQuery`；检索策略 | `EvidenceIndexRef`、`EvidenceBundle`、`RetrievalAudit` | M7、M9 |
 | [M3](src/course_insight/modules/m3_knowledge_bundle/README.md) | 谢 | 知识、题卡、量规、蓝图、Q 矩阵和标定依据 | M1 `CoursePackage`；教师确认 JSON | `KnowledgeBundle` | M4、M5、M8、M9 |
 | [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务、蓝图、策略版本和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
-| [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`LearningModelRun` | M6、M9 |
+| [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`CognitiveDiagnosisResult`、`KnowledgeTraceSnapshot`、`LearningModelRun` | M6、M9 |
 | [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 状态机；消费诊断/追踪 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7、M4 |
 | [M7](src/course_insight/modules/m7_local_model/README.md) | 冯 | 量规评分、学生反馈与 DeepSeek API 边界 | M8 scoring task；M6 feedback task；M2 evidence | `RubricScoringResult`、`StudentFeedbackPackage`、`LLMGenerationResult` | M8、M0 |
-| [M8](src/course_insight/modules/m8_assessment_scoring/README.md) | 童 | 组卷、评分、IRT、自适应选题与在线标定 | M4/M3/M5；作答；M7 result；M9 review | paper/scoring、`CalibrationRunResult`、`AdaptiveSelectionResult` | M0、M2、M5、M6、M9 |
-| [M9](src/course_insight/modules/m9_teacher_analytics/README.md) | 冯 | 教师分析、DeepSeek 叙述、模型质量和审核 | M3/M8/M5；标定 result；复核表单 | analytics/review、`ModelQualityReport` | M0、M8 |
+| [M8](src/course_insight/modules/m8_assessment_scoring/README.md) | 童 | 组卷、评分、IRT、自适应选题与在线标定 | M4/M3/M5；作答；M7 result；M9 review | `AssessmentPaper`、`ScoringPreparationResult`、`ScoringResultBundle`、`IRTParameterSet`、`CalibrationRunResult`、`AdaptiveSelectionResult` | M0、M2、M5、M6、M9 |
+| [M9](src/course_insight/modules/m9_teacher_analytics/README.md) | 冯 | 教师分析、DeepSeek 叙述、模型质量和审核 | M3/M8/M5；标定 result；复核表单 | `TeacherAnalyticsBundle`、`TeacherReviewDecision`、`LLMGenerationResult`、`ModelQualityReport`、`CalibrationReviewDecision` | M0、M8 |
 
 生产者—消费者的机器可检验映射见
 [contract_provenance.json](contracts/contract_provenance.json)。
@@ -156,7 +156,7 @@ python -m course_insight.cli export-schemas
 
 | 类 | 声明字段 | 公开领域方法 |
 |---|---|---|
-| `TaskPlan` | `task_id:str; task_type:Literal[qa,diagnostic,practice,correction,stage_assessment]; course_id:str; class_id:str; learner_id:str; session_id:str; blueprint_id:str\|None; knowledge_bundle_id:str; workflow:list[str]; next_module:str; created_at:datetime` | `requires_assessment; next_after; assert_module_allowed` |
+| `TaskPlan` | `task_id:str; task_type:Literal[qa,diagnostic,practice,correction,stage_assessment]; course_id:str; class_id:str; learner_id:str; session_id:str; blueprint_id:str\|None; knowledge_bundle_id:str; course_package_id:str; workflow:list[str]; next_module:str; created_at:datetime` | `requires_assessment; next_after; assert_module_allowed` |
 
 ### 测评契约（[assessment.py](src/course_insight/contracts/assessment.py)）
 
@@ -225,8 +225,8 @@ python -m course_insight.cli export-schemas
 | 类 | 声明字段 | 公开领域规则/用途 |
 |---|---|---|
 | `ActorContext` | `actor_id:str; role:student\|teacher\|course_admin\|system_admin; course_ids:list[str]; class_ids:list[str]; issued_at:datetime` | 鉴权范围不可重复；只用伪匿名身份 |
-| `AssessmentSubmission` | `submission_id:str; attempt_id:str; paper_id:str; learner_id:str; answers:dict[str,str]; submitted_at:datetime` | Django 学生表单到 M8 的无路径输入 |
-| `TeacherReviewSubmission` | `submission_id:str; audit_id:str; expected_audit_version:int; reviewer_id:str; decision:approve\|override\|reject; submitted_at:datetime` | Django 教师表单到 M9 的无路径输入 |
+| `AssessmentSubmission` | `submission_id:str; attempt_id:str; paper_id:str; learner_id:str; answers:dict[str,str\|bool\|int\|float]; submitted_at:datetime` | Django 学生表单到 M8 的无路径输入；答案键为题目实例 ID |
+| `TeacherReviewSubmission` | `submission_id:str; audit_id:str; expected_audit_version:int; reviewer_id:str; decision:confirm\|override\|reject; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; submitted_at:datetime` | Django 教师表单到 M9 的无路径输入；M9 转成同词汇的 `TeacherReviewDecision` |
 | `AsyncJobStatus` | `job_id:str; job_type:django_frontend\|vector_index\|llm_generation\|learning_model\|calibration; status:queued\|running\|succeeded\|failed\|skipped; progress:float; result_ref/error_code; created_at/finished_at` | 终态必须有完成时间；当前 Django 为 `skipped` |
 
 ### M2/M7/M9 智能边界契约（[intelligence.py](src/course_insight/contracts/intelligence.py)）
@@ -401,7 +401,8 @@ parameter_item_generator: Any)`。
   learner_state_snapshot: LearnerStateSnapshot|None,
   diagnosis_result: DiagnosisResult|None) -> AssessmentPaper`：输入来自
   M4/M3/M5；试卷给学生和 prepare；错误 `BLUEPRINT_UNSATISFIABLE`。
-- `prepare_scoring(assessment_paper: AssessmentPaper, raw_answer_path: Path,
+- `prepare_scoring(assessment_paper: AssessmentPaper,
+  raw_answer_path: Path|AssessmentSubmission,
   knowledge_bundle: KnowledgeBundle) -> ScoringPreparationResult`：试卷来自本模块、
   答案来自系统边界、bundle 来自 M3；任务/查询给 M7/M2；错误
   `ANSWER_FORMAT_INVALID`。
@@ -437,7 +438,7 @@ suggestion_rule_engine: Any)`。
 - `build_model_quality_report(calibration_result: CalibrationRunResult,
   requested_at: datetime) -> ModelQualityReport`：为 M8 空标定返回
   `insufficient_data`，不伪造指标；后续作为参数发布门槛。
-- `record_teacher_review(raw_review_path: Path,
+- `record_teacher_review(raw_review_path: Path|TeacherReviewSubmission,
   current_scoring_result_bundle: ScoringResultBundle) -> TeacherReviewDecision`：原始
   JSON 来自教师、当前审计来自 M8；决定回 M8；错误 `REPORT_SCOPE_INVALID` 和
   复核契约错误。
@@ -452,11 +453,12 @@ suggestion_rule_engine: Any)`。
   rubric_seed_path, blueprint_seed_path, prerequisite_seed_path,
   misconception_seed_path) -> dict[str,ContractModel]`，返回课程包、索引与知识包。
 - `run_assessment_cycle(*, index_ref, knowledge_bundle, student_text,
-  task_type_hint, course_id, class_id, learner_id, session_id, raw_answer_path,
+  task_type_hint, course_id, class_id, learner_id, session_id,
+  raw_answer_path: Path|AssessmentSubmission,
   state_policy_path, teacher_threshold_policy_path) -> dict[str,ContractModel]`，返回
   测评、评分、状态、辅导与分析对象。
 - `run_teacher_review_cycle(*, knowledge_bundle, scoring_result_bundle,
-  state_update_result, raw_review_path, state_policy_path,
+  state_update_result, raw_review_path: Path|TeacherReviewSubmission, state_policy_path,
   teacher_threshold_policy_path) -> dict[str,ContractModel]`，返回复核后的评分、状态与分析对象。
 - `run_intelligence_architecture(*, actor_context: ActorContext,
   course_package_id: str, learner_id: str, requested_at: datetime)

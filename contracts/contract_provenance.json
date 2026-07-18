@@ -339,19 +339,9 @@
       "allow_multiple_producers": false,
       "consumers": [
         {
-          "input_path": "$",
-          "method": "M2.consume_scoring_preparation",
-          "parameter": "scoring_preparation_result"
-        },
-        {
           "input_path": "$.evidence_queries[]",
           "method": "M2.retrieve",
           "parameter": "evidence_query"
-        },
-        {
-          "input_path": "$",
-          "method": "M7.consume_scoring_preparation",
-          "parameter": "scoring_preparation_result"
         },
         {
           "input_path": "$.rubric_scoring_tasks[]",
@@ -378,11 +368,6 @@
           "input_path": "$.learning_events",
           "method": "M0.append_learning_events",
           "parameter": "events"
-        },
-        {
-          "input_path": "$",
-          "method": "M0.consume_scoring_result",
-          "parameter": "scoring_result_bundle"
         },
         {
           "input_path": "$",
@@ -427,11 +412,6 @@
         {
           "input_path": "$",
           "method": "M6.decide_next_action",
-          "parameter": "state_update_result"
-        },
-        {
-          "input_path": "$",
-          "method": "M8.consume_state_update",
           "parameter": "state_update_result"
         },
         {
@@ -523,11 +503,6 @@
           "input_path": "$.evidence_query",
           "method": "M2.retrieve",
           "parameter": "evidence_query"
-        },
-        {
-          "input_path": "$",
-          "method": "M4.consume_tutoring_control",
-          "parameter": "tutoring_control_result"
         },
         {
           "input_path": "$.feedback_generation_task",

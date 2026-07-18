@@ -109,9 +109,7 @@ class M6TutoringControlService:
         query_id = f"{task_plan.task_id}_feedback_query_{turn}"
         query = EvidenceQuery(
             query_id=query_id,
-            course_package_id=self._course_package_id(
-                task_plan.knowledge_bundle_id
-            ),
+            course_package_id=task_plan.course_package_id,
             query_text=f"Find the governed rule for concept {targets[0]}.",
             concept_ids=targets[:1],
             item_id=None,
@@ -142,9 +140,3 @@ class M6TutoringControlService:
             session_state_snapshot=session,
             created_at=scoring_result_bundle.finalized_at,
         )
-
-    @staticmethod
-    def _course_package_id(knowledge_bundle_id: str) -> str:
-        """Map an aligned knowledge-bundle identifier to its course package."""
-
-        return knowledge_bundle_id.replace("knowledge_bundle", "course_package")

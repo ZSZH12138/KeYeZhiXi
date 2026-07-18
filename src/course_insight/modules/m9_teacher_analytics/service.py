@@ -22,6 +22,7 @@ from course_insight.contracts.learning_models import (
     CalibrationRunResult,
     ModelQualityReport,
 )
+from course_insight.contracts.platform import TeacherReviewSubmission
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.deepseek import EmptyDeepSeekAdapter
 from course_insight.infrastructure.json_io import read_json
@@ -175,33 +176,56 @@ class M9TeacherAnalyticsService:
 
     def record_teacher_review(
         self,
-        raw_review_path: Path,
+        raw_review_path: Path | TeacherReviewSubmission,
         current_scoring_result_bundle: ScoringResultBundle,
     ) -> TeacherReviewDecision:
         """Validate a raw teacher form into a version-bound decision.
 
-        原始输入：教师复核 JSON 路径和当前 M8 评分包。
-        契约来源：教师原始表单与 finalize_scoring 当前输出。
+        原始输入：M0 教师提交契约或复核 JSON 路径，以及当前 M8 评分包。
+        契约来源：M0/教师原始表单与 finalize_scoring 当前输出。
         返回消费者：M8.apply_teacher_review。
         业务校验：审计身份、期望版本、决定类型和覆盖分数必须一致。
         错误码：REPORT_SCOPE_INVALID。
         """
 
         try:
-            payload = read_json(raw_review_path)
-            if type(payload) is not dict:
-                raise DomainError(
-                    code="REPORT_SCOPE_INVALID",
-                    module="m9",
-                    message="teacher review payload must be a JSON object",
+            if isinstance(raw_review_path, TeacherReviewSubmission):
+                decision = TeacherReviewDecision(
+                    decision_id=raw_review_path.submission_id,
+                    audit_id=raw_review_path.audit_id,
+                    expected_audit_version=(
+                        raw_review_path.expected_audit_version
+                    ),
+                    decision=raw_review_path.decision,
+                    final_total_score=raw_review_path.final_total_score,
+                    criterion_overrides=[
+                        item.model_copy(deep=True)
+                        for item in raw_review_path.criterion_overrides
+                    ],
+                    teacher_comment=raw_review_path.teacher_comment,
+                    reviewer_id=raw_review_path.reviewer_id,
+                    reviewed_at=raw_review_path.submitted_at,
                 )
-            decision = TeacherReviewDecision.model_validate(payload)
+            else:
+                payload = read_json(raw_review_path)
+                if type(payload) is not dict:
+                    raise DomainError(
+                        code="REPORT_SCOPE_INVALID",
+                        module="m9",
+                        message="teacher review payload must be a JSON object",
+                    )
+                decision = TeacherReviewDecision.model_validate(payload)
         except Exception as error:
+            details = (
+                {"file_name": raw_review_path.name}
+                if isinstance(raw_review_path, Path)
+                else {"submission_id": raw_review_path.submission_id}
+            )
             raise DomainError(
                 code="REPORT_SCOPE_INVALID",
                 module="m9",
-                message="teacher review JSON is invalid",
-                details={"path": str(raw_review_path)},
+                message="teacher review input is invalid",
+                details=details,
                 recoverable=True,
             ) from error
         if decision.audit_id not in {

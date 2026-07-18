@@ -16,7 +16,9 @@ Django 页面、会话、鉴权和表单提交的边界。Django 属于 M0，不
 
 - 可分发配置与运行时环境变量，不包含密钥值或主机绝对路径。
 - Django 会话产生的伪匿名 `ActorContext`。
-- 学生表单转换的 `AssessmentSubmission`与教师表单转换的 `TeacherReviewSubmission`。
+- 学生表单转换的 `AssessmentSubmission` 与教师表单转换的
+  `TeacherReviewSubmission`；前者以题目实例 ID 映射标量答案，后者与 M9 统一使用
+  `confirm/override/reject` 并携带完整复核数据。
 - M8 产生的 `LearningEvent`。
 
 ## 输出

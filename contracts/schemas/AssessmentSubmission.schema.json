@@ -3,8 +3,27 @@
   "description": "Path-free assessment form accepted by M0 and consumed by M8.",
   "properties": {
     "answers": {
-      "additionalProperties": {
-        "type": "string"
+      "minProperties": 1,
+      "patternProperties": {
+        "\\S": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "boolean"
+            },
+            {
+              "type": "integer"
+            },
+            {
+              "type": "number"
+            }
+          ]
+        }
+      },
+      "propertyNames": {
+        "pattern": "\\S"
       },
       "title": "Answers",
       "type": "object"
