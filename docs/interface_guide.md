@@ -67,6 +67,19 @@
 
 ## 编排入口
 
+`M4TaskOrchestrationService.create_task_plan(...) -> TaskPlan` 是唯一任务规划入口。
+它支持 `qa`、`diagnostic`、`practice`、`correction` 和
+`stage_assessment`，并直接把带类型的 `TaskPlan` 交给 M8/M6：问答工作流固定为
+`M2 → M7 → M6`，测评工作流固定为
+`M8 → M2 → M7 → M5 → M6 → M9`。多个教师批准蓝图并存时，M4 构造时必须
+通过 `blueprint_by_task_type` 显式配置任务类型到 bundle 内蓝图 ID 的映射；
+不存在合法确定性选择时返回 `BLUEPRINT_NOT_FOUND`。
+
+M4 幂等身份只由课程、班级、学习者、会话、任务类型、知识包、课程包和蓝图
+八项冻结引用组成。SQLite 唯一约束保证重复、并发和进程重启后的调用复用首次
+`TaskPlan`。`course_package_id` 从 M3 bundle 经 M4 到 M6 的 M2
+`EvidenceQuery` 全程原样透传。
+
 `AppCoordinator.run_intelligence_architecture(...) -> ArchitectureScaffoldResult`
 用于组织并返回智能架构的空实现结果。它依次请求 M0 Django 外层状态、M2 pgvector
 索引引用和检索审计、M7/M9 DeepSeek 空生成、M5 DINA/BKT 空运行、

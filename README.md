@@ -92,7 +92,7 @@ python -m course_insight.cli export-schemas
 | [M1](src/course_insight/modules/m1_course_governance/README.md) | 谢 | 授权、来源版本、确定性分块 | 课程 MD、元数据 JSON、授权 CSV | `CoursePackage` | M2、M3 |
 | [M2](src/course_insight/modules/m2_evidence_retrieval/README.md) | 谢 | RAG；词法/pgvector 索引与审计 | M1 `CoursePackage`；M6/M8 `EvidenceQuery`；检索策略 | `EvidenceIndexRef`、`EvidenceBundle`、`RetrievalAudit` | M7、M9 |
 | [M3](src/course_insight/modules/m3_knowledge_bundle/README.md) | 谢 | 知识、题卡、量规、蓝图、Q 矩阵和标定依据 | M1 `CoursePackage`；教师确认 JSON | `KnowledgeBundle` | M4、M5、M8、M9 |
-| [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务、蓝图、策略版本和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
+| [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务识别、蓝图选择、引用冻结和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
 | [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`CognitiveDiagnosisResult`、`KnowledgeTraceSnapshot`、`LearningModelRun` | M6、M9 |
 | [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 状态机；消费诊断/追踪 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7、M4 |
 | [M7](src/course_insight/modules/m7_local_model/README.md) | 冯 | 量规评分、学生反馈与 DeepSeek API 边界 | M8 scoring task；M6 feedback task；M2 evidence | `RubricScoringResult`、`StudentFeedbackPackage`、`LLMGenerationResult` | M8、M0 |
@@ -332,7 +332,8 @@ repository: M2Repository)`。
 
 源码：[service.py](src/course_insight/modules/m4_task_orchestration/service.py)。构造：
 `M4TaskOrchestrationService(repository: M4Repository,
-idempotency_key_factory: Any)`。
+idempotency_key_factory: IdempotencyKeyFactory,
+*, blueprint_by_task_type: Mapping[str, str]|None=None)`。
 
 - `create_task_plan(student_text: str, task_type_hint: str|None, course_id: str,
   class_id: str, learner_id: str, session_id: str,
@@ -596,7 +597,7 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
 | M1 | 仅固定本地文本解析与段落切分 | 在 parser registry 后增加可替换解析器 |
 | M2 | 词法匹配基线；pgvector 逻辑索引/审计为 `empty` | 实现 embedding 适配器、pgvector 迁移/重建与检索评估 |
 | M3 | 只接受教师确认 JSON，不自动抽取知识 | schema validator 后的教师审核工作流 |
-| M4 | 规则识别与 SHA-256 路由，不含意图模型 | idempotency/intent adapter，保持 `TaskPlan` |
+| M4 | 五类确定性规则识别、显式蓝图映射、SHA-256 幂等身份和 SQLite 原子复用，不含意图模型 | 可替换意图 adapter，但保持 `TaskPlan` 和八字段业务身份 |
 | M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
 | M6 | 固定 S0—S5 状态机，不做策略学习 | `state_machine.py` 的可验证定义 |
 | M7 | `PlaceholderRubricAdapter` 未配置时抛出 `MODEL_ADAPTER_UNCONFIGURED`；DeepSeek 适配器返回 `empty` | 安全、超时、限流和输出校验完成后在 M7 启用 DeepSeek API |
