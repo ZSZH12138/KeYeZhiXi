@@ -1,4 +1,4 @@
-"""Immutable S0-S5 transition policy for deterministic tutoring control."""
+"""The single authoritative S0-S5 tutoring transition graph."""
 
 from __future__ import annotations
 
@@ -21,33 +21,21 @@ ALLOWED_TRANSITIONS: Mapping[str, frozenset[str]] = MappingProxyType(
 
 
 class DefaultTutoringStateMachine:
-    """Choose one auditable next state from explicit evidence conditions."""
+    """Validate candidate transitions against the authoritative graph."""
 
-    def choose_next(
-        self,
-        current_state: str,
-        *,
-        needs_review: bool,
-        has_misconception: bool,
-    ) -> str:
-        """Select S2 for remediation and otherwise advance safely."""
+    def validate_transition(self, current_state: str, next_state: str) -> None:
+        """Accept one legal edge and reject every other state pair uniformly."""
 
-        if current_state == "S1":
-            candidate = "S2" if needs_review or has_misconception else "S3"
-        elif current_state == "S4" and (needs_review or has_misconception):
-            candidate = "S2"
-        else:
-            defaults = {"S0": "S1", "S2": "S3", "S3": "S4", "S4": "S5"}
-            candidate = defaults.get(current_state, "")
-        if candidate not in ALLOWED_TRANSITIONS.get(current_state, frozenset()):
+        if next_state not in ALLOWED_TRANSITIONS.get(current_state, frozenset()):
             raise DomainError(
                 code="INVALID_STATE_TRANSITION",
                 module="m6",
-                message="no safe tutoring transition is available",
-                details={"current_state": current_state},
-                recoverable=True,
+                message="the requested tutoring state transition is not allowed",
+                details={
+                    "current_state": current_state,
+                    "next_state": next_state,
+                },
             )
-        return candidate
 
 
 DEFAULT_STATE_MACHINE = DefaultTutoringStateMachine()

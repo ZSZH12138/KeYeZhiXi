@@ -434,17 +434,54 @@ def test_decision_policy_defaults_are_frozen_and_versioned() -> None:
     assert isinstance(signals, decision_signals)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("minimum_recent_correction_rate", float("nan")),
+        ("minimum_mastery_confidence", float("inf")),
+        ("maximum_hint_dependency", -0.000001),
+    ],
+)
+def test_decision_signals_reject_nonfinite_or_out_of_range_measurements(
+    field_name: str,
+    invalid_value: float,
+) -> None:
+    with pytest.raises(ValueError):
+        _signals(**{field_name: invalid_value})
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("policy_version", ""),
+        ("weak_mastery_threshold", 1.000001),
+        ("stable_correction_threshold", float("nan")),
+        ("mastery_confidence_threshold", -0.000001),
+        ("maximum_hint_dependency", float("inf")),
+        ("active_misconception_threshold", -0.000001),
+    ],
+)
+def test_decision_policy_rejects_invalid_version_or_thresholds(
+    field_name: str,
+    invalid_value: str | float,
+) -> None:
+    _, decision_policy = _decision_policy_types()
+
+    with pytest.raises(ValueError):
+        decision_policy(**{field_name: invalid_value})
+
+
 POLICY_CASES = (
     ("S0", {}, "S1"),
     ("S1", {}, "S3"),
     ("S1", {"needs_teacher_review": True}, "S2"),
-    ("S1", {"has_diagnosed_misconception": True}, "S2"),
+    ("S1", {"has_diagnosed_misconception": True}, "S3"),
     ("S1", {"has_active_misconception": True}, "S2"),
     ("S1", {"has_prerequisite_gap": True}, "S2"),
     ("S2", {"needs_teacher_review": True}, "S3"),
     ("S3", {"has_prerequisite_gap": True}, "S4"),
     ("S4", {"needs_teacher_review": True}, "S2"),
-    ("S4", {"has_diagnosed_misconception": True}, "S2"),
+    ("S4", {"has_diagnosed_misconception": True}, "S3"),
     ("S4", {"has_active_misconception": True}, "S2"),
     ("S4", {"has_prerequisite_gap": True}, "S2"),
     ("S4", {"has_new_evidence": False}, "S3"),
