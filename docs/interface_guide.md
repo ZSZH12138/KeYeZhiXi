@@ -80,6 +80,11 @@ M4 幂等身份只由课程、班级、学习者、会话、任务类型、知�
 `TaskPlan`。`course_package_id` 从 M3 bundle 经 M4 到 M6 的 M2
 `EvidenceQuery` 全程原样透传。
 
+M6 在调用方未提供 `SessionStateSnapshot` 时，按 `TaskPlan.session_id` 从自身
+Repository 恢复最新权威游标；全新会话从 S1/turn 0 开始。相同请求指纹返回已保存
+结果，不重复推进 turn；调用方快照与 Repository 历史冲突时返回
+`TUTORING_REFERENCE_MISMATCH`。
+
 `AppCoordinator.run_intelligence_architecture(...) -> ArchitectureScaffoldResult`
 用于组织并返回智能架构的空实现结果。它依次请求 M0 Django 外层状态、M2 pgvector
 索引引用和检索审计、M7/M9 DeepSeek 空生成、M5 DINA/BKT 空运行、

@@ -94,7 +94,7 @@ python -m course_insight.cli export-schemas
 | [M3](src/course_insight/modules/m3_knowledge_bundle/README.md) | 谢 | 知识、题卡、量规、蓝图、Q 矩阵和标定依据 | M1 `CoursePackage`；教师确认 JSON | `KnowledgeBundle` | M4、M5、M8、M9 |
 | [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务识别、蓝图选择、引用冻结和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
 | [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`CognitiveDiagnosisResult`、`KnowledgeTraceSnapshot`、`LearningModelRun` | M6、M9 |
-| [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 状态机；消费诊断/追踪 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7、M4 |
+| [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 确定性状态机；证据门槛与会话幂等 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7、M4 |
 | [M7](src/course_insight/modules/m7_local_model/README.md) | 冯 | 量规评分、学生反馈与 DeepSeek API 边界 | M8 scoring task；M6 feedback task；M2 evidence | `RubricScoringResult`、`StudentFeedbackPackage`、`LLMGenerationResult` | M8、M0 |
 | [M8](src/course_insight/modules/m8_assessment_scoring/README.md) | 童 | 组卷、评分、IRT、自适应选题与在线标定 | M4/M3/M5；作答；M7 result；M9 review | `AssessmentPaper`、`ScoringPreparationResult`、`ScoringResultBundle`、`IRTParameterSet`、`CalibrationRunResult`、`AdaptiveSelectionResult` | M0、M2、M5、M6、M9 |
 | [M9](src/course_insight/modules/m9_teacher_analytics/README.md) | 冯 | 教师分析、DeepSeek 叙述、模型质量和审核 | M3/M8/M5；标定 result；复核表单 | `TeacherAnalyticsBundle`、`TeacherReviewDecision`、`LLMGenerationResult`、`ModelQualityReport`、`CalibrationReviewDecision` | M0、M8 |
@@ -371,7 +371,9 @@ repository: M6Repository)`。
   state_update_result: StateUpdateResult,
   previous_session_state_snapshot: SessionStateSnapshot|None)
   -> TutoringControlResult`：输入来自 M4/M8/M5/本模块；查询给 M2、反馈任务给
-  M7；错误 `TUTORING_REFERENCE_MISMATCH`、`INVALID_STATE_TRANSITION`。
+  M7。Repository 会恢复最新会话，以 canonical SHA-256 指纹完成重放、重启与
+  并发下的 insert-or-get；错误 `TUTORING_REFERENCE_MISMATCH`、
+  `INVALID_STATE_TRANSITION`。
 
 ### M7LocalModelService
 
@@ -548,6 +550,7 @@ suggestion_rule_engine: Any)`。
 | `m5_learner_states` | M5 | learner_id + state_version |
 | `m5_class_states` | M5 | snapshot_id、aggregation_policy_version |
 | `m6_session_states` | M6 | session_id + turn_count |
+| `m6_tutoring_decisions` | M6 | request/input fingerprint、session_id + turn_count |
 | `m8_score_audits` | M8 | audit_id + audit_version；只能追加 |
 | `m9_teacher_reviews` | M9 | decision_id、audit_id + expected version |
 
