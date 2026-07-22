@@ -1,4 +1,4 @@
-"""Formal M6 tutoring-control service boundary."""
+"""Formal deterministic M6 tutoring-control service boundary."""
 
 from __future__ import annotations
 
@@ -8,30 +8,53 @@ from course_insight.contracts.assessment import ScoringResultBundle
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.contracts.tasking import TaskPlan
-from course_insight.contracts.evidence import EvidenceQuery
 from course_insight.contracts.tutoring import (
-    FeedbackGenerationTask,
     SessionStateSnapshot,
-    TeachingAction,
     TutoringControlResult,
 )
-from course_insight.modules.m6_tutoring_fsm.repository import M6Repository
+from course_insight.modules.m6_tutoring_fsm.action_factory import (
+    build_tutoring_result,
+)
+from course_insight.modules.m6_tutoring_fsm.decision_policy import (
+    DecisionSignals,
+    M6DecisionPolicy,
+)
+from course_insight.modules.m6_tutoring_fsm.identity import (
+    build_evidence_identity,
+    derive_identifier,
+    has_new_evidence,
+    input_fingerprint,
+    request_fingerprint,
+)
+from course_insight.modules.m6_tutoring_fsm.repository import (
+    M6Repository,
+    TutoringDecisionRecord,
+    isolated_session_snapshot,
+)
 from course_insight.modules.m6_tutoring_fsm.state_machine import (
     DEFAULT_STATE_MACHINE,
     DefaultTutoringStateMachine,
 )
+from course_insight.modules.m6_tutoring_fsm.target_selector import (
+    select_target_concept_ids,
+)
 
 
 class M6TutoringControlService:
-    """Select one safe teaching action through the authoritative FSM."""
+    """Select, persist, and replay one safe evidence-bound tutoring action."""
 
     def __init__(
         self,
         state_machine_definition: Any,
         repository: M6Repository,
     ) -> None:
-        self._state_machine_definition = state_machine_definition
+        self._state_machine_definition = (
+            state_machine_definition
+            if isinstance(state_machine_definition, DefaultTutoringStateMachine)
+            else DEFAULT_STATE_MACHINE
+        )
         self._repository = repository
+        self._policy = M6DecisionPolicy()
 
     def decide_next_action(
         self,
@@ -40,103 +63,275 @@ class M6TutoringControlService:
         state_update_result: StateUpdateResult,
         previous_session_state_snapshot: SessionStateSnapshot | None,
     ) -> TutoringControlResult:
-        """Select and package the next tutoring action.
+        """Return the unique authoritative action for the supplied M6 inputs."""
 
-        原始输入：M4 任务、M8 评分、M5 状态和可选 M6 会话历史。
-        契约来源：四个直接前驱或本模块自历史输出。
-        返回消费者：M2 证据检索、M7 反馈和下一轮 M4。
-        业务校验：状态迁移、任务身份、查询引用和防泄题标志必须一致。
-        错误码：INVALID_STATE_TRANSITION。
-        """
+        _validate_cross_contract_references(
+            task_plan,
+            scoring_result_bundle,
+            state_update_result,
+            previous_session_state_snapshot,
+        )
+        request_key = request_fingerprint(
+            task_plan=task_plan,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            caller_previous_session_state_snapshot=(
+                previous_session_state_snapshot
+            ),
+        )
+        replay = self._repository.get_decision_by_request(request_key)
+        if replay is not None:
+            return _validated_replay(replay, task_plan, request_key)
 
-        learner = state_update_result.learner_state_snapshot
-        if (
-            task_plan.learner_id != scoring_result_bundle.learner_id
-            or learner.learner_id != task_plan.learner_id
-            or learner.course_id != task_plan.course_id
-            or learner.class_id != task_plan.class_id
-        ):
-            raise DomainError(
-                code="TUTORING_REFERENCE_MISMATCH",
-                module="m6",
-                message="task, scoring, and state identities must align",
-                details={"task_id": task_plan.task_id},
+        try:
+            previous = self._resolve_previous_snapshot(
+                task_plan,
+                scoring_result_bundle,
+                previous_session_state_snapshot,
             )
-        session = (
-            previous_session_state_snapshot.model_copy(deep=True)
-            if previous_session_state_snapshot is not None
-            else SessionStateSnapshot(
-                session_id=task_plan.session_id,
-                current_state="S1",
-                turn_count=0,
-                completed_action_ids=[],
-                updated_at=scoring_result_bundle.finalized_at,
-            )
+        except DomainError as error:
+            if (
+                error.module != "m6"
+                or error.code != "TUTORING_REFERENCE_MISMATCH"
+                or error.details.get("reason")
+                != "caller_session_history_is_stale"
+            ):
+                raise
+            replay = self._repository.get_decision_by_request(request_key)
+            if replay is None:
+                raise
+            return _validated_replay(replay, task_plan, request_key)
+        targets = select_target_concept_ids(
+            diagnosis_result=state_update_result.diagnosis_result,
+            remediation_plan=scoring_result_bundle.remediation_plan,
+            learner_state_snapshot=state_update_result.learner_state_snapshot,
+            weak_mastery_threshold=self._policy.weak_mastery_threshold,
         )
-        if session.session_id != task_plan.session_id:
-            raise DomainError(
-                code="TUTORING_REFERENCE_MISMATCH",
-                module="m6",
-                message="session history belongs to another task session",
-            )
-        diagnosis = state_update_result.diagnosis_result
-        has_misconception = bool(diagnosis.priority_misconception_ids)
-        machine = (
-            self._state_machine_definition
-            if isinstance(self._state_machine_definition, DefaultTutoringStateMachine)
-            else DEFAULT_STATE_MACHINE
+        current_evidence = build_evidence_identity(
+            scoring_result_bundle,
+            state_update_result,
         )
-        next_state = machine.choose_next(
-            session.current_state,
-            needs_review=scoring_result_bundle.requires_teacher_review(),
-            has_misconception=has_misconception,
+        prior_decision = self._repository.get_latest_decision(task_plan.session_id)
+        evidence_progressed = has_new_evidence(
+            current_evidence,
+            None if prior_decision is None else prior_decision.evidence_identity,
         )
-        targets = diagnosis.priority_concept_ids or [
-            learner.concept_states[0].concept_id
-        ]
-        turn = session.turn_count + 1
-        action_id = f"{task_plan.task_id}_action_{turn}_{next_state}"
-        action = TeachingAction(
-            action_id=action_id,
-            state_before=session.current_state,
-            action_type=("minimal_hint" if next_state == "S2" else "guided_practice"),
-            target_concept_ids=targets[:1],
-            prompt_template_id=f"placeholder_{next_state.casefold()}_hint",
-            must_not_reveal_answer=True,
+        signals = _decision_signals(
+            scoring_result_bundle,
+            state_update_result,
+            targets,
+            self._policy,
+            evidence_progressed,
+        )
+        next_state = self._policy.decide_next_state(
+            previous.current_state,
+            signals,
+        )
+        self._state_machine_definition.validate_transition(
+            previous.current_state,
+            next_state,
+        )
+        input_key = input_fingerprint(
+            task_plan=task_plan,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            authoritative_previous_session_state_snapshot=previous,
+        )
+        candidate_result = build_tutoring_result(
+            task_plan=task_plan,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            previous_session_state_snapshot=previous,
             next_state=next_state,
-            reason="Use governed diagnosis evidence for the smallest safe next step.",
+            target_concept_ids=targets,
+            authoritative_input_fingerprint=input_key,
+            policy_version=self._policy.policy_version,
+            signals=signals,
         )
-        query_id = f"{task_plan.task_id}_feedback_query_{turn}"
-        query = EvidenceQuery(
-            query_id=query_id,
-            course_package_id=task_plan.course_package_id,
-            query_text=f"Find the governed rule for concept {targets[0]}.",
-            concept_ids=targets[:1],
-            item_id=None,
-            use_case="feedback",
-            top_k=3,
-            min_relevance=0.2,
+        candidate = TutoringDecisionRecord(
+            decision_id=derive_identifier("decision", input_key),
+            session_id=task_plan.session_id,
+            turn_count=candidate_result.session_state_snapshot.turn_count,
+            previous_turn_count=previous.turn_count,
+            request_fingerprint=request_key,
+            input_fingerprint=input_key,
+            evidence_identity=current_evidence,
+            result=candidate_result,
         )
-        feedback_task = FeedbackGenerationTask(
-            feedback_task_id=f"{task_plan.task_id}_feedback_{turn}",
-            task_id=task_plan.task_id,
-            learner_id=task_plan.learner_id,
-            teaching_action=action,
-            diagnosis_result=diagnosis,
-            score_summary={
-                "score": scoring_result_bundle.total_score,
-                "max_score": scoring_result_bundle.max_score,
-            },
-            learner_state_snapshot_id=learner.snapshot_id,
-            evidence_query_id=query_id,
-            created_at=scoring_result_bundle.finalized_at,
+        authoritative = self._repository.commit_decision(candidate, previous)
+        return _validated_replay(authoritative, task_plan, authoritative.request_fingerprint)
+
+    def _resolve_previous_snapshot(
+        self,
+        task_plan: TaskPlan,
+        scoring_result_bundle: ScoringResultBundle,
+        caller_snapshot: SessionStateSnapshot | None,
+    ) -> SessionStateSnapshot:
+        repository_snapshot = self._repository.get_latest_session_state(
+            task_plan.session_id
         )
-        session.transition(next_state, action_id)
-        session.updated_at = scoring_result_bundle.finalized_at
-        return TutoringControlResult(
-            teaching_action=action,
-            feedback_generation_task=feedback_task,
-            evidence_query=query,
-            session_state_snapshot=session,
-            created_at=scoring_result_bundle.finalized_at,
+        caller = (
+            None
+            if caller_snapshot is None
+            else isolated_session_snapshot(caller_snapshot)
         )
+        if repository_snapshot is not None and caller is not None:
+            if repository_snapshot.content_checksum() != caller.content_checksum():
+                _raise_reference_mismatch("caller_session_history_is_stale")
+            return repository_snapshot
+        if repository_snapshot is not None:
+            return repository_snapshot
+        if caller is not None:
+            return caller
+        return SessionStateSnapshot(
+            session_id=task_plan.session_id,
+            current_state="S1",
+            turn_count=0,
+            completed_action_ids=[],
+            updated_at=scoring_result_bundle.finalized_at,
+        )
+
+
+def _validate_cross_contract_references(
+    task_plan: TaskPlan,
+    scoring: ScoringResultBundle,
+    state: StateUpdateResult,
+    caller_snapshot: SessionStateSnapshot | None,
+) -> None:
+    try:
+        diagnosis = state.diagnosis_result
+        learner = state.learner_state_snapshot
+        class_state = state.class_state_snapshot
+        remediation = scoring.remediation_plan
+        if (
+            task_plan.learner_id != scoring.learner_id
+            or task_plan.learner_id != diagnosis.learner_id
+            or task_plan.learner_id != learner.learner_id
+            or task_plan.course_id != learner.course_id
+            or task_plan.class_id != learner.class_id
+            or task_plan.course_id != class_state.course_id
+            or task_plan.class_id != class_state.class_id
+            or scoring.attempt_id != diagnosis.attempt_id
+            or remediation.based_on_attempt_id != scoring.attempt_id
+            or remediation.learner_id != scoring.learner_id
+        ):
+            _raise_reference_mismatch("cross_contract_identity_mismatch")
+        if caller_snapshot is not None and (
+            caller_snapshot.session_id != task_plan.session_id
+        ):
+            _raise_reference_mismatch("caller_session_identity_mismatch")
+
+        latest_audit_versions: dict[str, int] = {}
+        for audit in scoring.score_audit_records:
+            current_version = latest_audit_versions.get(audit.audit_id)
+            if current_version is None or audit.audit_version > current_version:
+                latest_audit_versions = {
+                    **latest_audit_versions,
+                    audit.audit_id: audit.audit_version,
+                }
+        expected_audit_keys = {
+            f"{audit_id}:{version}"
+            for audit_id, version in latest_audit_versions.items()
+        }
+        if not expected_audit_keys <= set(state.processed_audit_ids):
+            _raise_reference_mismatch("latest_scoring_audit_not_processed")
+
+        for event in scoring.learning_events:
+            if (
+                event.course_id != task_plan.course_id
+                or event.class_id != task_plan.class_id
+                or event.learner_id != task_plan.learner_id
+            ):
+                _raise_reference_mismatch("learning_event_identity_mismatch")
+            if "paper_id" in event.payload and (
+                type(event.payload["paper_id"]) is not str
+                or event.payload["paper_id"] != scoring.paper_id
+            ):
+                _raise_reference_mismatch("learning_event_paper_mismatch")
+        state.assert_consistent()
+    except DomainError as error:
+        if error.module == "m6":
+            raise
+        raise DomainError(
+            code="TUTORING_REFERENCE_MISMATCH",
+            module="m6",
+            message="state update references are inconsistent for tutoring",
+            details={"reason": "upstream_state_consistency_mismatch"},
+        ) from error
+    except (AttributeError, TypeError, ValueError) as error:
+        raise DomainError(
+            code="TUTORING_REFERENCE_MISMATCH",
+            module="m6",
+            message="tutoring inputs do not satisfy the required contract shape",
+            details={"reason": "invalid_contract_shape"},
+        ) from error
+
+
+def _decision_signals(
+    scoring: ScoringResultBundle,
+    state: StateUpdateResult,
+    targets: list[str],
+    policy: M6DecisionPolicy,
+    evidence_progressed: bool,
+) -> DecisionSignals:
+    concept_states = [
+        state.learner_state_snapshot.get_concept_state(concept_id)
+        for concept_id in targets
+    ]
+    active_misconception = any(
+        concept_state.active_misconceptions(
+            policy.active_misconception_threshold
+        )
+        for concept_state in concept_states
+    )
+    return DecisionSignals(
+        needs_teacher_review=scoring.requires_teacher_review(),
+        has_diagnosed_misconception=bool(
+            state.diagnosis_result.priority_misconception_ids
+        )
+        or any(
+            item_diagnosis.misconception_ids
+            for item_diagnosis in state.diagnosis_result.item_diagnoses
+        ),
+        has_active_misconception=active_misconception,
+        has_prerequisite_gap=state.diagnosis_result.has_prerequisite_gap(),
+        has_new_evidence=evidence_progressed,
+        minimum_recent_correction_rate=min(
+            concept_state.recent_correction_rate
+            for concept_state in concept_states
+        ),
+        minimum_mastery_confidence=min(
+            concept_state.mastery_confidence for concept_state in concept_states
+        ),
+        maximum_hint_dependency=max(
+            concept_state.hint_dependency for concept_state in concept_states
+        ),
+    )
+
+
+def _validated_replay(
+    record: TutoringDecisionRecord,
+    task_plan: TaskPlan,
+    expected_request_fingerprint: str,
+) -> TutoringControlResult:
+    result = record.isolated_copy().result
+    if (
+        record.request_fingerprint != expected_request_fingerprint
+        or record.session_id != task_plan.session_id
+        or result.session_state_snapshot.session_id != task_plan.session_id
+        or result.feedback_generation_task.task_id != task_plan.task_id
+        or result.feedback_generation_task.learner_id != task_plan.learner_id
+        or result.evidence_query.course_package_id != task_plan.course_package_id
+    ):
+        _raise_reference_mismatch("persisted_decision_identity_mismatch")
+    result.assert_query_alignment()
+    return result
+
+
+def _raise_reference_mismatch(reason: str) -> None:
+    raise DomainError(
+        code="TUTORING_REFERENCE_MISMATCH",
+        module="m6",
+        message="task, scoring, state, and session identities must align",
+        details={"reason": reason},
+    )

@@ -784,6 +784,94 @@ def test_same_state_version_with_changed_content_is_an_identity_conflict() -> No
     assert raised.value.code == "TUTORING_REFERENCE_MISMATCH"
 
 
+def test_same_audit_version_with_changed_scoring_content_is_an_identity_conflict(
+) -> None:
+    service = M6TutoringControlServiceStub()
+    task, scoring, state = _valid_inputs()
+    first = service.decide_next_action(
+        task_plan=task,
+        scoring_result_bundle=scoring,
+        state_update_result=state,
+        previous_session_state_snapshot=_session("S3"),
+    )
+    changed_scoring = _scoring_bundle(
+        student_evidence="changed evidence under the same audit version",
+    )
+
+    with pytest.raises(DomainError) as raised:
+        service.decide_next_action(
+            task_plan=task,
+            scoring_result_bundle=changed_scoring,
+            state_update_result=state,
+            previous_session_state_snapshot=first.session_state_snapshot,
+        )
+
+    assert raised.value.code == "TUTORING_REFERENCE_MISMATCH"
+    assert raised.value.details["reason"] == "scoring_evidence_content_conflict"
+
+
+def test_audit_version_regression_is_an_identity_conflict() -> None:
+    service = M6TutoringControlServiceStub()
+    task = _task_plan()
+    scoring_v2 = _scoring_bundle(audit_versions=(1, 2))
+    state_v1 = _state_update(
+        evidence_audit_ids=(f"{AUDIT_ID}:2",),
+        processed_audit_ids=(f"{AUDIT_ID}:1", f"{AUDIT_ID}:2"),
+    )
+    first = service.decide_next_action(
+        task_plan=task,
+        scoring_result_bundle=scoring_v2,
+        state_update_result=state_v1,
+        previous_session_state_snapshot=_session("S3"),
+    )
+    scoring_v1 = _scoring_bundle(audit_versions=(1,))
+    state_v2 = _state_update(
+        state_version=2,
+        evidence_audit_ids=(f"{AUDIT_ID}:1",),
+        processed_audit_ids=(f"{AUDIT_ID}:1",),
+    )
+
+    with pytest.raises(DomainError) as raised:
+        service.decide_next_action(
+            task_plan=task,
+            scoring_result_bundle=scoring_v1,
+            state_update_result=state_v2,
+            previous_session_state_snapshot=first.session_state_snapshot,
+        )
+
+    assert raised.value.code == "TUTORING_REFERENCE_MISMATCH"
+    assert raised.value.details["reason"] == "scoring_audit_version_regressed"
+
+
+def test_nonpriority_diagnosed_misconception_blocks_s4_completion() -> None:
+    service = M6TutoringControlServiceStub()
+    task = _task_plan()
+    scoring_v1 = _scoring_bundle()
+    state_v1 = _state_update(misconception_ids=("misconception-1",))
+    first = service.decide_next_action(
+        task_plan=task,
+        scoring_result_bundle=scoring_v1,
+        state_update_result=state_v1,
+        previous_session_state_snapshot=_session("S3"),
+    )
+    scoring_v2 = _scoring_bundle(audit_versions=(1, 2))
+    state_v2 = _state_update(
+        state_version=2,
+        misconception_ids=("misconception-1",),
+        evidence_audit_ids=(f"{AUDIT_ID}:2",),
+        processed_audit_ids=(f"{AUDIT_ID}:1", f"{AUDIT_ID}:2"),
+    )
+
+    result = service.decide_next_action(
+        task_plan=task,
+        scoring_result_bundle=scoring_v2,
+        state_update_result=state_v2,
+        previous_session_state_snapshot=first.session_state_snapshot,
+    )
+
+    assert result.next_state() == "S3"
+
+
 def test_identical_authoritative_inputs_produce_identical_nonembedded_ids() -> None:
     task, scoring, state = _valid_inputs()
     previous = _session("S1")
@@ -929,6 +1017,7 @@ IDENTITY_CONFLICT_CASES = (
     "event_course",
     "event_class",
     "event_paper",
+    "state_internal_audit_conflict",
     "session",
     "target_without_concept_state",
 )
@@ -964,6 +1053,16 @@ def _conflicting_inputs(
         scoring = _scoring_bundle(event_class_id="other-class")
     elif case == "event_paper":
         scoring = _scoring_bundle(event_paper_id="other-paper")
+    elif case == "state_internal_audit_conflict":
+        state = state.model_copy(
+            update={
+                "processed_audit_ids": [
+                    f"{AUDIT_ID}:1",
+                    f"{AUDIT_ID}:1",
+                ]
+            },
+            deep=True,
+        )
     elif case == "session":
         previous = _session("S1", session_id="other-session")
     elif case == "target_without_concept_state":

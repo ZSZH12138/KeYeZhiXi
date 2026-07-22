@@ -37,6 +37,7 @@ class EvidenceIdentity:
                 raise ValueError(f"{field_name} must contain unique nonempty values")
             if tuple(sorted(values)) != values:
                 raise ValueError(f"{field_name} must use canonical sorted order")
+        _audit_versions(self.latest_audit_version_keys)
 
     def to_dict(self) -> dict[str, Any]:
         """Return the canonical JSON-compatible identity payload."""
@@ -132,11 +133,26 @@ def has_new_evidence(
         and current.learner_state_checksum != previous.learner_state_checksum
     ):
         _raise_evidence_conflict("learner_state_version_content_conflict")
+    current_audits = _audit_versions(current.latest_audit_version_keys)
+    previous_audits = _audit_versions(previous.latest_audit_version_keys)
+    if any(
+        current_audits[audit_id] < previous_audits[audit_id]
+        for audit_id in current_audits.keys() & previous_audits.keys()
+    ):
+        _raise_evidence_conflict("scoring_audit_version_regressed")
+    if (
+        current.latest_audit_version_keys
+        == previous.latest_audit_version_keys
+        and current.scoring_result_checksum
+        != previous.scoring_result_checksum
+    ):
+        _raise_evidence_conflict("scoring_evidence_content_conflict")
     return (
         current.learner_state_version > previous.learner_state_version
-        or bool(
-            set(current.latest_audit_version_keys)
-            - set(previous.latest_audit_version_keys)
+        or any(
+            audit_id not in previous_audits
+            or version > previous_audits[audit_id]
+            for audit_id, version in current_audits.items()
         )
         or bool(
             set(current.processed_audit_ids) - set(previous.processed_audit_ids)
@@ -222,6 +238,23 @@ def _string_list(value: Any) -> list[str]:
     if type(value) is not list or any(type(item) is not str for item in value):
         raise ValueError("value must be a list of strings")
     return list(value)
+
+
+def _audit_versions(version_keys: tuple[str, ...]) -> dict[str, int]:
+    versions: dict[str, int] = {}
+    for version_key in version_keys:
+        audit_id, separator, version_text = version_key.rpartition(":")
+        if (
+            not separator
+            or not audit_id
+            or not version_text.isascii()
+            or not version_text.isdecimal()
+            or int(version_text) < 1
+            or audit_id in versions
+        ):
+            raise ValueError("audit version keys must contain unique positive versions")
+        versions = {**versions, audit_id: int(version_text)}
+    return versions
 
 
 def _require_sha256(value: str, field_name: str) -> None:

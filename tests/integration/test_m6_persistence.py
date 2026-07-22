@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import sqlite3
+from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -503,6 +504,42 @@ def test_same_request_replay_returns_original_result_without_advancing(
     assert _stored_turns(database_path) == [0, 1]
 
 
+def test_replay_that_becomes_visible_during_stale_check_is_returned(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+    previous = _snapshot(0)
+    first = _service(repository).decide_next_action(
+        *_inputs(),
+        previous.model_copy(deep=True),
+    )
+
+    class DelayedReplayRepository:
+        def __init__(self, delegate: Any) -> None:
+            self._delegate = delegate
+            self.request_lookups = 0
+
+        def get_decision_by_request(self, request_key: str) -> Any:
+            self.request_lookups += 1
+            if self.request_lookups == 1:
+                return None
+            return self._delegate.get_decision_by_request(request_key)
+
+        def __getattr__(self, name: str) -> Any:
+            return getattr(self._delegate, name)
+
+    delayed_repository = DelayedReplayRepository(repository)
+    replay = _service(delayed_repository).decide_next_action(
+        *_inputs(),
+        previous.model_copy(deep=True),
+    )
+
+    assert replay == first
+    assert delayed_repository.request_lookups == 2
+    assert _database_counts(database_path) == (2, 1)
+
+
 def test_new_service_instance_recovers_latest_turn_and_preserves_history(
     tmp_path: Path,
 ) -> None:
@@ -645,8 +682,16 @@ def test_twenty_competing_requests_from_one_cursor_allow_only_one_input(
 
     accepted = [outcome for outcome in outcomes if outcome[0] == "accepted"]
     rejected = [outcome for outcome in outcomes if outcome[0] == "rejected"]
-    assert len(accepted) == 10
-    assert len(rejected) == 10
+    outcome_summary = Counter(
+        (
+            status,
+            version,
+            result.code if isinstance(result, DomainError) else "result",
+        )
+        for status, version, result in outcomes
+    )
+    assert len(accepted) == 10, outcome_summary
+    assert len(rejected) == 10, outcome_summary
     assert len({outcome[1] for outcome in accepted}) == 1
     assert len({outcome[1] for outcome in rejected}) == 1
     assert accepted[0][1] != rejected[0][1]
