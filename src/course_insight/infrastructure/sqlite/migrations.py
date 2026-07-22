@@ -5,9 +5,10 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
+_M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -162,6 +163,37 @@ CREATE TABLE IF NOT EXISTS m0_event_outbox (
     )
 )
 """
+_M6_DECISION_SQL = """
+CREATE TABLE IF NOT EXISTS m6_tutoring_decisions (
+    decision_id TEXT PRIMARY KEY CHECK (length(decision_id) > 0),
+    session_id TEXT NOT NULL CHECK (length(session_id) > 0),
+    turn_count INTEGER NOT NULL CHECK (turn_count >= 0),
+    previous_turn_count INTEGER CHECK (
+        previous_turn_count IS NULL OR previous_turn_count >= 0
+    ),
+    request_fingerprint TEXT NOT NULL UNIQUE
+        CHECK (length(request_fingerprint) > 0),
+    input_fingerprint TEXT NOT NULL UNIQUE
+        CHECK (length(input_fingerprint) > 0),
+    evidence_fingerprint TEXT NOT NULL
+        CHECK (length(evidence_fingerprint) > 0),
+    evidence_identity TEXT NOT NULL CHECK (
+        CASE WHEN json_valid(evidence_identity)
+            THEN json(evidence_identity) = evidence_identity
+            ELSE 0
+        END
+    ),
+    result_payload TEXT NOT NULL CHECK (
+        CASE WHEN json_valid(result_payload)
+            THEN json(result_payload) = result_payload
+            ELSE 0
+        END
+    ),
+    UNIQUE (session_id, turn_count),
+    FOREIGN KEY (session_id, turn_count)
+        REFERENCES m6_session_states(session_id, turn_count)
+)
+"""
 
 
 def current_schema_version(connection: sqlite3.Connection) -> int:
@@ -203,6 +235,13 @@ def migrate(connection: sqlite3.Connection) -> None:
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                 (2, _OUTBOX_MIGRATION_NAME),
+            )
+            version = 2
+        if version < 3:
+            connection.execute(_M6_DECISION_SQL)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (3, _M6_DECISION_MIGRATION_NAME),
             )
         connection.execute("COMMIT")
     except Exception:
