@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Literal
+from typing import Annotated, Literal
 
-from pydantic import Field
+from pydantic import Field, FiniteFloat, StringConstraints
 
+from course_insight.contracts.analytics import CriterionOverride
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.errors import DomainError
 
@@ -40,7 +41,13 @@ class AssessmentSubmission(ContractModel):
     attempt_id: str = Field(min_length=1)
     paper_id: str = Field(min_length=1)
     learner_id: str = Field(min_length=1)
-    answers: dict[str, str]
+    answers: dict[
+        Annotated[str, StringConstraints(pattern=r"\S")],
+        str | bool | int | FiniteFloat,
+    ] = Field(
+        min_length=1,
+        json_schema_extra={"propertyNames": {"pattern": r"\S"}},
+    )
     submitted_at: datetime
 
 
@@ -51,7 +58,10 @@ class TeacherReviewSubmission(ContractModel):
     audit_id: str = Field(min_length=1)
     expected_audit_version: int = Field(ge=1)
     reviewer_id: str = Field(min_length=1)
-    decision: Literal["approve", "override", "reject"]
+    decision: Literal["confirm", "override", "reject"]
+    final_total_score: float = Field(ge=0.0, allow_inf_nan=False)
+    criterion_overrides: list[CriterionOverride]
+    teacher_comment: str = Field(min_length=1)
     submitted_at: datetime
 
 

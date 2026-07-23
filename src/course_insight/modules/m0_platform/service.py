@@ -2,23 +2,18 @@
 
 from __future__ import annotations
 
-import json
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import TypeVar
+from typing import Any, TypeVar
 
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.events import EventAck, LearningEvent
 from course_insight.contracts.platform import ActorContext, AsyncJobStatus
-from course_insight.infrastructure.json_io import dumps_json
-from course_insight.infrastructure.logging import append_json_log
-from course_insight.infrastructure.sqlite import (
-    SCHEMA_VERSION,
-    connect_sqlite,
-    current_schema_version,
-    migrate,
-)
+from course_insight.infrastructure.sqlite import SQLiteM0Repository
+from course_insight.modules.m0_platform.event_store import M0EventStore
+from course_insight.modules.m0_platform.repository import M0Repository
 
 
 T = TypeVar("T", bound=ContractModel)
@@ -29,6 +24,23 @@ _FIXED_TIME = datetime(
     9,
     0,
     tzinfo=timezone(timedelta(hours=8)),
+)
+_HOST_ABSOLUTE_PATH = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|/)")
+_SENSITIVE_SNAPSHOT_FIELDS = frozenset(
+    {
+        "access_token",
+        "api_key",
+        "credential",
+        "credentials",
+        "full_name",
+        "password",
+        "phone_number",
+        "private_key",
+        "real_name",
+        "refresh_token",
+        "secret",
+        "student_number",
+    }
 )
 
 
@@ -44,6 +56,11 @@ class M0PlatformService:
         self._database_path = database_path
         self._runtime_dir = runtime_dir
         self._config_dir = config_dir
+        self._repository: M0Repository = SQLiteM0Repository(database_path)
+        self._event_store = M0EventStore(
+            repository=self._repository,
+            audit_log_path=runtime_dir / "audit" / "learning_events.jsonl",
+        )
 
     def initialize(self) -> None:
         """Initialize the local platform boundary.
@@ -58,12 +75,10 @@ class M0PlatformService:
         try:
             self._runtime_dir.mkdir(parents=True, exist_ok=True)
             self._config_dir.mkdir(parents=True, exist_ok=True)
-            self._database_path.parent.mkdir(parents=True, exist_ok=True)
-            connection = connect_sqlite(self._database_path)
-            try:
-                migrate(connection)
-            finally:
-                connection.close()
+            if not self._runtime_dir.is_dir() or not self._config_dir.is_dir():
+                raise OSError("platform directories are unavailable")
+            self._repository.initialize()
+            self._event_store.deliver_pending()
         except Exception as error:
             raise DomainError(
                 code="DATABASE_UNAVAILABLE",
@@ -108,52 +123,12 @@ class M0PlatformService:
         错误码：EVENT_PERSIST_FAILED。
         """
 
-        self._deliver_event_outbox()
-        accepted: list[LearningEvent] = []
-        duplicate_ids: list[str] = []
-        seen_input: set[str] = set()
-        connection = None
         try:
-            connection = connect_sqlite(self._database_path)
-            connection.execute("BEGIN IMMEDIATE")
-            for event in events:
-                event_id = event.idempotency_key()
-                if event_id in seen_input:
-                    continue
-                seen_input.add(event_id)
-                exists = connection.execute(
-                    "SELECT 1 FROM m0_learning_events WHERE event_id = ?",
-                    (event_id,),
-                ).fetchone()
-                if exists is not None:
-                    duplicate_ids.append(event_id)
-                    continue
-                connection.execute(
-                    """
-                    INSERT INTO m0_learning_events(
-                        event_id, idempotency_key, event_type, occurred_at, payload
-                    ) VALUES (?, ?, ?, ?, ?)
-                    """,
-                    (
-                        event.event_id,
-                        event.idempotency_key(),
-                        event.event_type,
-                        event.occurred_at.isoformat(),
-                        dumps_json(event.payload),
-                    ),
-                )
-                connection.execute(
-                    """
-                    INSERT INTO m0_event_outbox(event_id, record)
-                    VALUES (?, ?)
-                    """,
-                    (event.event_id, dumps_json(event.to_dict())),
-                )
-                accepted.append(event)
-            connection.execute("COMMIT")
+            # Deliver only records left by prior calls. Newly inserted rows stay
+            # observable in the outbox for a later worker/retry cycle.
+            self._event_store.deliver_pending()
+            accepted_ids, duplicate_ids = self._repository.append_events(events)
         except Exception as error:
-            if connection is not None and connection.in_transaction:
-                connection.execute("ROLLBACK")
             raise DomainError(
                 code="EVENT_PERSIST_FAILED",
                 module="m0",
@@ -161,17 +136,13 @@ class M0PlatformService:
                 details={"event_count": len(events)},
                 recoverable=True,
             ) from error
-        finally:
-            if connection is not None:
-                connection.close()
-        self._deliver_event_outbox()
         persisted_at = max(
             (event.occurred_at for event in events),
             default=_FIXED_TIME,
         )
         return EventAck(
-            accepted_event_ids=[event.event_id for event in accepted],
-            duplicate_event_ids=duplicate_ids,
+            accepted_event_ids=list(accepted_ids),
+            duplicate_event_ids=list(duplicate_ids),
             failed_event_ids=[],
             persisted_at=persisted_at,
         )
@@ -188,6 +159,7 @@ class M0PlatformService:
 
         target = self._snapshot_path(path)
         try:
+            self._validate_snapshot_payload(obj.to_dict())
             target.parent.mkdir(parents=True, exist_ok=True)
             obj.to_json_file(target)
         except Exception as error:
@@ -233,11 +205,7 @@ class M0PlatformService:
         """
 
         try:
-            connection = connect_sqlite(self._database_path)
-            try:
-                database_ok = current_schema_version(connection) == SCHEMA_VERSION
-            finally:
-                connection.close()
+            database_ok = self._repository.schema_is_current()
             runtime_ok = self._runtime_dir.is_dir()
             config_ok = self._config_dir.is_dir()
         except Exception as error:
@@ -254,77 +222,24 @@ class M0PlatformService:
             "runtime": "ok" if runtime_ok else "unavailable",
         }
 
-    def _deliver_event_outbox(self) -> None:
-        connection = None
-        try:
-            connection = connect_sqlite(self._database_path)
-            connection.execute("BEGIN IMMEDIATE")
-            pending = connection.execute(
-                "SELECT event_id, record FROM m0_event_outbox ORDER BY event_id"
-            ).fetchall()
-            logged_ids = self._logged_event_ids()
-            for row in pending:
-                event_id = str(row["event_id"])
-                record = json.loads(str(row["record"]))
-                if type(record) is not dict or record.get("event_id") != event_id:
-                    raise DomainError(
-                        code="EVENT_PERSIST_FAILED",
-                        module="m0",
-                        message="event outbox record is invalid",
-                        details={"event_id": event_id},
-                        recoverable=True,
-                    )
-                if event_id not in logged_ids:
-                    append_json_log(
-                        self._runtime_dir / "audit" / "learning_events.jsonl",
-                        record,
-                    )
-                    logged_ids.add(event_id)
-                connection.execute(
-                    "DELETE FROM m0_event_outbox WHERE event_id = ?",
-                    (event_id,),
-                )
-            connection.execute("COMMIT")
-        except Exception as error:
-            if connection is not None and connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise DomainError(
-                code="EVENT_PERSIST_FAILED",
-                module="m0",
-                message="learning event audit outbox could not be delivered",
-                recoverable=True,
-            ) from error
-        finally:
-            if connection is not None:
-                connection.close()
+    @classmethod
+    def _validate_snapshot_payload(cls, value: Any) -> None:
+        if type(value) is dict:
+            for key, item in value.items():
+                if key.casefold() in _SENSITIVE_SNAPSHOT_FIELDS:
+                    raise ValueError("snapshot contains a sensitive field")
+                cls._validate_snapshot_payload(item)
+            return
+        if type(value) is list:
+            for item in value:
+                cls._validate_snapshot_payload(item)
+            return
+        if isinstance(value, str) and cls._is_host_absolute_path(value):
+            raise ValueError("snapshot contains a host absolute path")
 
-    def _logged_event_ids(self) -> set[str]:
-        log_path = self._runtime_dir / "audit" / "learning_events.jsonl"
-        if not log_path.exists():
-            return set()
-        event_ids: set[str] = set()
-        try:
-            for line in log_path.read_text(encoding="utf-8").splitlines():
-                record = json.loads(line)
-                if type(record) is not dict or not isinstance(
-                    record.get("event_id"),
-                    str,
-                ):
-                    raise DomainError(
-                        code="EVENT_PERSIST_FAILED",
-                        module="m0",
-                        message="learning event audit log contains an invalid row",
-                        recoverable=True,
-                    )
-                event_ids.add(record["event_id"])
-        except Exception as error:
-            raise DomainError(
-                code="EVENT_PERSIST_FAILED",
-                module="m0",
-                message="learning event audit log could not be scanned",
-                recoverable=True,
-            ) from error
-        return event_ids
+    @staticmethod
+    def _is_host_absolute_path(value: str) -> bool:
+        return bool(_HOST_ABSOLUTE_PATH.match(value))
 
     def _snapshot_path(self, path: Path) -> Path:
         target = path.resolve()

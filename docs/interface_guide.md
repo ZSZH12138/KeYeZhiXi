@@ -21,7 +21,7 @@
 | `KnowledgeBundle` | `M3.build_knowledge_bundle` | M4、M5、M8、M9 |
 | `TaskPlan` | `M4.create_task_plan` | `M8.generate_paper`；`M6.decide_next_action` |
 | `AssessmentPaper` | `M8.generate_paper` | M0 学生作答外层；`M8.prepare_scoring` |
-| `ScoringPreparationResult` | `M8.prepare_scoring` | M2、M7、`M8.finalize_scoring` |
+| `ScoringPreparationResult` | `M8.prepare_scoring` | `M2.retrieve($.evidence_queries[])`；`M7.score_subjective_answer($.rubric_scoring_tasks[])`；`M8.finalize_scoring($)` |
 | `RubricScoringTask` | `M8.prepare_scoring` | `M7.score_subjective_answer` |
 | `RubricScoringResult` | `M7.score_subjective_answer` | `M8.finalize_scoring` |
 | `ScoringResultBundle` | `M8.finalize_scoring`、`M8.apply_teacher_review` | M0、M5、M6、M9 |
@@ -29,7 +29,7 @@
 | `LearnerStateSnapshot` | `M5.update_state` | M4、M6、M8、M9 |
 | `ClassStateSnapshot` | `M5.update_state` | M9 |
 | `StateUpdateResult` | `M5.update_state` | M6、M9 |
-| `TutoringControlResult` | `M6.decide_next_action` | M2、M7、M4 后续调度 |
+| `TutoringControlResult` | `M6.decide_next_action` | `M2.retrieve($.evidence_query)`；`M7.generate_student_feedback($.feedback_generation_task)`；应用层后续调度 |
 | `FeedbackGenerationTask` | `M6.decide_next_action` | `M7.generate_student_feedback` |
 | `StudentFeedbackPackage` | `M7.generate_student_feedback` | M0 Django 学生外层 |
 | `TeacherAnalyticsBundle` | `M9.build_teacher_analytics` | M0 Django 教师外层 |
@@ -42,8 +42,8 @@
 | 边界 | 生产者 | 消费者 | 当前空结果 |
 |---|---|---|---|
 | `ActorContext` | M0 Django 鉴权边界 | `AppCoordinator`、所有受授权用例 | 可构造伪匿名上下文 |
-| `AssessmentSubmission` | M0 Django 学生表单 | M8 | 仅定义无主机路径的输入格式 |
-| `TeacherReviewSubmission` | M0 Django 教师表单 | M9 | 仅定义无主机路径的输入格式 |
+| `AssessmentSubmission` | M0 Django 学生表单 | `M8.prepare_scoring` | `answers` 是题目实例 ID 到字符串/布尔/整数/有限浮点答案的映射 |
+| `TeacherReviewSubmission` | M0 Django 教师表单 | `M9.record_teacher_review` | 使用 `confirm/override/reject`，并完整携带总分、分项覆盖和教师意见 |
 | `AsyncJobStatus` | M0 作业边界 | M0 页面/调用方 | Django 作业 `skipped` |
 | `EmbeddingModelRef` | M2 检索配置 | M2 索引器 | `empty` |
 | `RetrievalPolicy` | M2 检索配置 | M2 检索器 | 允许词法/向量/混合策略 |
@@ -66,6 +66,24 @@
 | `CalibrationReviewDecision` | M9 教师审核 | M8 参数版本发布 | 仅契约，当前不自动发布 |
 
 ## 编排入口
+
+`M4TaskOrchestrationService.create_task_plan(...) -> TaskPlan` 是唯一任务规划入口。
+它支持 `qa`、`diagnostic`、`practice`、`correction` 和
+`stage_assessment`，并直接把带类型的 `TaskPlan` 交给 M8/M6：问答工作流固定为
+`M2 → M7 → M6`，测评工作流固定为
+`M8 → M2 → M7 → M5 → M6 → M9`。多个教师批准蓝图并存时，M4 构造时必须
+通过 `blueprint_by_task_type` 显式配置任务类型到 bundle 内蓝图 ID 的映射；
+不存在合法确定性选择时返回 `BLUEPRINT_NOT_FOUND`。
+
+M4 幂等身份只由课程、班级、学习者、会话、任务类型、知识包、课程包和蓝图
+八项冻结引用组成。SQLite 唯一约束保证重复、并发和进程重启后的调用复用首次
+`TaskPlan`。`course_package_id` 从 M3 bundle 经 M4 到 M6 的 M2
+`EvidenceQuery` 全程原样透传。
+
+M6 在调用方未提供 `SessionStateSnapshot` 时，按 `TaskPlan.session_id` 从自身
+Repository 恢复最新权威游标；全新会话从 S1/turn 0 开始。相同请求指纹返回已保存
+结果，不重复推进 turn；调用方快照与 Repository 历史冲突时返回
+`TUTORING_REFERENCE_MISMATCH`。
 
 `AppCoordinator.run_intelligence_architecture(...) -> ArchitectureScaffoldResult`
 用于组织并返回智能架构的空实现结果。它依次请求 M0 Django 外层状态、M2 pgvector

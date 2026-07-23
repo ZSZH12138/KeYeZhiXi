@@ -14,7 +14,8 @@
 ## 输入来源
 
 - M4 `TaskPlan`、M3 `KnowledgeBundle`、M5 学习状态/诊断。
-- M0 转换的 `AssessmentSubmission` 或经验证的 `student_answers.json`。
+- M0 转换的 `AssessmentSubmission` 或经验证的 `student_answers.json`；二者由
+  `prepare_scoring` 在同一边界消费，答案均归一为题目实例 ID 到 JSON 标量值。
 - M7 `RubricScoringResult`、M9 `TeacherReviewDecision`。
 - `LearningObservationBatch`、`AdaptiveSelectionPolicy`和 `AbilityEstimate`。
 

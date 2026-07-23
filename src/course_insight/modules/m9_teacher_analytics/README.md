@@ -15,7 +15,8 @@ DeepSeek API，仅将已计算的结构化证据转写为教师叙述，不代�
 
 - M3 `KnowledgeBundle`、M8 `ScoringResultBundle`、M5 `StateUpdateResult`。
 - M8 `CalibrationRunResult` 与未来 M5 `LearningModelRun`。
-- M0 转换的 `TeacherReviewSubmission` 或经验证的 `teacher_review.json`。
+- M0 转换的 `TeacherReviewSubmission` 或经验证的 `teacher_review.json`；二者由
+  `record_teacher_review` 在同一边界消费，并统一为 `confirm/override/reject`。
 - `LLMGenerationRequest`，用例必须为 `teacher_narrative`，provider 必须是 DeepSeek。
 
 ## 输出

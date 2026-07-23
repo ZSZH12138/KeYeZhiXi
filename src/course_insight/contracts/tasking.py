@@ -29,6 +29,7 @@ class TaskPlan(ContractModel):
     session_id: str = Field(min_length=1)
     blueprint_id: str | None = Field(min_length=1)
     knowledge_bundle_id: str = Field(min_length=1)
+    course_package_id: str = Field(min_length=1)
     workflow: list[str] = Field(min_length=1)
     next_module: str = Field(min_length=1)
     created_at: datetime
@@ -72,7 +73,7 @@ class TaskPlan(ContractModel):
         return self.task_type in _ASSESSMENT_TASK_TYPES
 
     def next_after(self, module_name: str) -> str | None:
-        """Return the next frozen module, or ``None`` at workflow completion."""
+        """Return the next distinct first-participation module, if any."""
 
         self.assert_module_allowed(module_name)
         index = self.workflow.index(module_name)

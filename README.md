@@ -33,7 +33,8 @@
 ```shell
 conda create --name course-insight-framework python=3.12 -y
 conda activate course-insight-framework
-python -m pip install -e .
+python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
+python -m pytest -q
 ```
 
 导出公开契约 Schema：
@@ -92,12 +93,12 @@ python -m course_insight.cli export-schemas
 | [M1](src/course_insight/modules/m1_course_governance/README.md) | 谢 | 授权、来源版本、确定性分块 | 课程 MD、元数据 JSON、授权 CSV | `CoursePackage` | M2、M3 |
 | [M2](src/course_insight/modules/m2_evidence_retrieval/README.md) | 谢 | RAG；词法/pgvector 索引与审计 | M1 `CoursePackage`；M6/M8 `EvidenceQuery`；检索策略 | `EvidenceIndexRef`、`EvidenceBundle`、`RetrievalAudit` | M7、M9 |
 | [M3](src/course_insight/modules/m3_knowledge_bundle/README.md) | 谢 | 知识、题卡、量规、蓝图、Q 矩阵和标定依据 | M1 `CoursePackage`；教师确认 JSON | `KnowledgeBundle` | M4、M5、M8、M9 |
-| [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务、蓝图、策略版本和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
-| [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`LearningModelRun` | M6、M9 |
-| [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 状态机；消费诊断/追踪 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7、M4 |
+| [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务识别、蓝图选择、引用冻结和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
+| [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`CognitiveDiagnosisResult`、`KnowledgeTraceSnapshot`、`LearningModelRun` | M6、M9 |
+| [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 确定性状态机；证据门槛与会话幂等 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7 |
 | [M7](src/course_insight/modules/m7_local_model/README.md) | 冯 | 量规评分、学生反馈与 DeepSeek API 边界 | M8 scoring task；M6 feedback task；M2 evidence | `RubricScoringResult`、`StudentFeedbackPackage`、`LLMGenerationResult` | M8、M0 |
-| [M8](src/course_insight/modules/m8_assessment_scoring/README.md) | 童 | 组卷、评分、IRT、自适应选题与在线标定 | M4/M3/M5；作答；M7 result；M9 review | paper/scoring、`CalibrationRunResult`、`AdaptiveSelectionResult` | M0、M2、M5、M6、M9 |
-| [M9](src/course_insight/modules/m9_teacher_analytics/README.md) | 冯 | 教师分析、DeepSeek 叙述、模型质量和审核 | M3/M8/M5；标定 result；复核表单 | analytics/review、`ModelQualityReport` | M0、M8 |
+| [M8](src/course_insight/modules/m8_assessment_scoring/README.md) | 童 | 组卷、评分、IRT、自适应选题与在线标定 | M4/M3/M5；作答；M7 result；M9 review | `AssessmentPaper`、`ScoringPreparationResult`、`ScoringResultBundle`、`IRTParameterSet`、`CalibrationRunResult`、`AdaptiveSelectionResult` | M0、M2、M5、M6、M9 |
+| [M9](src/course_insight/modules/m9_teacher_analytics/README.md) | 冯 | 教师分析、DeepSeek 叙述、模型质量和审核 | M3/M8/M5；标定 result；复核表单 | `TeacherAnalyticsBundle`、`TeacherReviewDecision`、`LLMGenerationResult`、`ModelQualityReport`、`CalibrationReviewDecision` | M0、M8 |
 
 生产者—消费者的机器可检验映射见
 [contract_provenance.json](contracts/contract_provenance.json)。
@@ -156,7 +157,7 @@ python -m course_insight.cli export-schemas
 
 | 类 | 声明字段 | 公开领域方法 |
 |---|---|---|
-| `TaskPlan` | `task_id:str; task_type:Literal[qa,diagnostic,practice,correction,stage_assessment]; course_id:str; class_id:str; learner_id:str; session_id:str; blueprint_id:str\|None; knowledge_bundle_id:str; workflow:list[str]; next_module:str; created_at:datetime` | `requires_assessment; next_after; assert_module_allowed` |
+| `TaskPlan` | `task_id:str; task_type:Literal[qa,diagnostic,practice,correction,stage_assessment]; course_id:str; class_id:str; learner_id:str; session_id:str; blueprint_id:str\|None; knowledge_bundle_id:str; course_package_id:str; workflow:list[str]; next_module:str; created_at:datetime` | `requires_assessment; next_after; assert_module_allowed` |
 
 ### 测评契约（[assessment.py](src/course_insight/contracts/assessment.py)）
 
@@ -225,8 +226,8 @@ python -m course_insight.cli export-schemas
 | 类 | 声明字段 | 公开领域规则/用途 |
 |---|---|---|
 | `ActorContext` | `actor_id:str; role:student\|teacher\|course_admin\|system_admin; course_ids:list[str]; class_ids:list[str]; issued_at:datetime` | 鉴权范围不可重复；只用伪匿名身份 |
-| `AssessmentSubmission` | `submission_id:str; attempt_id:str; paper_id:str; learner_id:str; answers:dict[str,str]; submitted_at:datetime` | Django 学生表单到 M8 的无路径输入 |
-| `TeacherReviewSubmission` | `submission_id:str; audit_id:str; expected_audit_version:int; reviewer_id:str; decision:approve\|override\|reject; submitted_at:datetime` | Django 教师表单到 M9 的无路径输入 |
+| `AssessmentSubmission` | `submission_id:str; attempt_id:str; paper_id:str; learner_id:str; answers:dict[str,str\|bool\|int\|float]; submitted_at:datetime` | Django 学生表单到 M8 的无路径输入；答案键为题目实例 ID |
+| `TeacherReviewSubmission` | `submission_id:str; audit_id:str; expected_audit_version:int; reviewer_id:str; decision:confirm\|override\|reject; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; submitted_at:datetime` | Django 教师表单到 M9 的无路径输入；M9 转成同词汇的 `TeacherReviewDecision` |
 | `AsyncJobStatus` | `job_id:str; job_type:django_frontend\|vector_index\|llm_generation\|learning_model\|calibration; status:queued\|running\|succeeded\|failed\|skipped; progress:float; result_ref/error_code; created_at/finished_at` | 终态必须有完成时间；当前 Django 为 `skipped` |
 
 ### M2/M7/M9 智能边界契约（[intelligence.py](src/course_insight/contracts/intelligence.py)）
@@ -332,7 +333,8 @@ repository: M2Repository)`。
 
 源码：[service.py](src/course_insight/modules/m4_task_orchestration/service.py)。构造：
 `M4TaskOrchestrationService(repository: M4Repository,
-idempotency_key_factory: Any)`。
+idempotency_key_factory: IdempotencyKeyFactory,
+*, blueprint_by_task_type: Mapping[str, str]|None=None)`。
 
 - `create_task_plan(student_text: str, task_type_hint: str|None, course_id: str,
   class_id: str, learner_id: str, session_id: str,
@@ -370,7 +372,9 @@ repository: M6Repository)`。
   state_update_result: StateUpdateResult,
   previous_session_state_snapshot: SessionStateSnapshot|None)
   -> TutoringControlResult`：输入来自 M4/M8/M5/本模块；查询给 M2、反馈任务给
-  M7；错误 `TUTORING_REFERENCE_MISMATCH`、`INVALID_STATE_TRANSITION`。
+  M7。Repository 会恢复最新会话，以 canonical SHA-256 指纹完成重放、重启与
+  并发下的 insert-or-get；错误 `TUTORING_REFERENCE_MISMATCH`、
+  `INVALID_STATE_TRANSITION`。
 
 ### M7LocalModelService
 
@@ -401,7 +405,8 @@ parameter_item_generator: Any)`。
   learner_state_snapshot: LearnerStateSnapshot|None,
   diagnosis_result: DiagnosisResult|None) -> AssessmentPaper`：输入来自
   M4/M3/M5；试卷给学生和 prepare；错误 `BLUEPRINT_UNSATISFIABLE`。
-- `prepare_scoring(assessment_paper: AssessmentPaper, raw_answer_path: Path,
+- `prepare_scoring(assessment_paper: AssessmentPaper,
+  raw_answer_path: Path|AssessmentSubmission,
   knowledge_bundle: KnowledgeBundle) -> ScoringPreparationResult`：试卷来自本模块、
   答案来自系统边界、bundle 来自 M3；任务/查询给 M7/M2；错误
   `ANSWER_FORMAT_INVALID`。
@@ -437,7 +442,7 @@ suggestion_rule_engine: Any)`。
 - `build_model_quality_report(calibration_result: CalibrationRunResult,
   requested_at: datetime) -> ModelQualityReport`：为 M8 空标定返回
   `insufficient_data`，不伪造指标；后续作为参数发布门槛。
-- `record_teacher_review(raw_review_path: Path,
+- `record_teacher_review(raw_review_path: Path|TeacherReviewSubmission,
   current_scoring_result_bundle: ScoringResultBundle) -> TeacherReviewDecision`：原始
   JSON 来自教师、当前审计来自 M8；决定回 M8；错误 `REPORT_SCOPE_INVALID` 和
   复核契约错误。
@@ -452,11 +457,12 @@ suggestion_rule_engine: Any)`。
   rubric_seed_path, blueprint_seed_path, prerequisite_seed_path,
   misconception_seed_path) -> dict[str,ContractModel]`，返回课程包、索引与知识包。
 - `run_assessment_cycle(*, index_ref, knowledge_bundle, student_text,
-  task_type_hint, course_id, class_id, learner_id, session_id, raw_answer_path,
+  task_type_hint, course_id, class_id, learner_id, session_id,
+  raw_answer_path: Path|AssessmentSubmission,
   state_policy_path, teacher_threshold_policy_path) -> dict[str,ContractModel]`，返回
   测评、评分、状态、辅导与分析对象。
 - `run_teacher_review_cycle(*, knowledge_bundle, scoring_result_bundle,
-  state_update_result, raw_review_path, state_policy_path,
+  state_update_result, raw_review_path: Path|TeacherReviewSubmission, state_policy_path,
   teacher_threshold_policy_path) -> dict[str,ContractModel]`，返回复核后的评分、状态与分析对象。
 - `run_intelligence_architecture(*, actor_context: ActorContext,
   course_package_id: str, learner_id: str, requested_at: datetime)
@@ -545,6 +551,7 @@ suggestion_rule_engine: Any)`。
 | `m5_learner_states` | M5 | learner_id + state_version |
 | `m5_class_states` | M5 | snapshot_id、aggregation_policy_version |
 | `m6_session_states` | M6 | session_id + turn_count |
+| `m6_tutoring_decisions` | M6 | request/input fingerprint、session_id + turn_count |
 | `m8_score_audits` | M8 | audit_id + audit_version；只能追加 |
 | `m9_teacher_reviews` | M9 | decision_id、audit_id + expected version |
 
@@ -573,7 +580,9 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
 - 陈：先读 [M0 service](src/course_insight/modules/m0_platform/service.py) 的 Django 外层契约与
   [SQLite migrations](src/course_insight/infrastructure/sqlite/migrations.py)，再读
   [M4 service](src/course_insight/modules/m4_task_orchestration/service.py)、
-  [M6 state machine](src/course_insight/modules/m6_tutoring_fsm/state_machine.py)，
+  [M6 state machine](src/course_insight/modules/m6_tutoring_fsm/state_machine.py)、
+  [M6 service](src/course_insight/modules/m6_tutoring_fsm/service.py) 和
+  [M6 SQLite repository](src/course_insight/infrastructure/sqlite/m6_repository.py)，
   最后读 [AppCoordinator](src/course_insight/application/coordinator.py)。
 - 谢：按 M1 `service.py` → M2 `service.py` → M3 `service.py` 阅读，先理解
   `CoursePackage` 和证据定位，再处理 RAG/pgvector 引用与 Q 矩阵标定依据。
@@ -594,9 +603,9 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
 | M1 | 仅固定本地文本解析与段落切分 | 在 parser registry 后增加可替换解析器 |
 | M2 | 词法匹配基线；pgvector 逻辑索引/审计为 `empty` | 实现 embedding 适配器、pgvector 迁移/重建与检索评估 |
 | M3 | 只接受教师确认 JSON，不自动抽取知识 | schema validator 后的教师审核工作流 |
-| M4 | 规则识别与 SHA-256 路由，不含意图模型 | idempotency/intent adapter，保持 `TaskPlan` |
+| M4 | 五类确定性规则识别、显式蓝图映射、SHA-256 幂等身份和 SQLite 原子复用，不含意图模型 | 可替换意图 adapter，但保持 `TaskPlan` 和八字段业务身份 |
 | M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
-| M6 | 固定 S0—S5 状态机，不做策略学习 | `state_machine.py` 的可验证定义 |
+| M6 | 8 条合法迁移、确定性目标/动作、证据门槛、SHA-256 身份，以及 SQLite 决策重放、会话恢复和并发控制；不做策略学习 | 可在保持公共契约和审计身份不变的前提下，引入经验证的版本化策略适配器 |
 | M7 | `PlaceholderRubricAdapter` 未配置时抛出 `MODEL_ADAPTER_UNCONFIGURED`；DeepSeek 适配器返回 `empty` | 安全、超时、限流和输出校验完成后在 M7 启用 DeepSeek API |
 | M8 | 固定 anchor/规则评分；IRT 标定与自适应选题为 `empty` | 足量数据下实现 IRT shadow 标定，经 M9 质量/教师审核后启用 |
 | M9 | 阈值统计/规则建议；DeepSeek 叙述 `empty`；质量 `insufficient_data` | 实现模型指标与标定审核；在 M9 启用 DeepSeek 教师叙述 |

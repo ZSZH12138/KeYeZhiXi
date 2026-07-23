@@ -13,6 +13,13 @@ _TASK_TABLE = "m4_task_plans"
 class M4Repository(Protocol):
     """Persistence operations owned exclusively by M4."""
 
+    def insert_or_get_task_plan(
+        self,
+        plan: TaskPlan,
+        idempotency_key: str,
+    ) -> TaskPlan:
+        """Atomically insert a plan or return the existing replay winner."""
+
     def save_task_plan(self, plan: TaskPlan, idempotency_key: str) -> None:
         """Persist one task plan under a replay-safe key."""
 

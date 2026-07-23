@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  verify:
+    name: Python ${{ matrix.python-version }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.11"
+          - "3.12"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/ci-constraints.txt
+
+      - name: Install project and verification dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          --constraint requirements/ci-constraints.txt
+          -e ".[dev]"
+
+      - name: Check installed dependencies
+        run: python -m pip check
+
+      - name: Compile Python sources
+        run: python -m compileall -q src scripts tests
+
+      - name: Run full test suite
+        run: python -m pytest -q
+
+      - name: Enforce M6 coverage gate
+        run: >-
+          python -m pytest -q
+          tests/unit/test_m6_tutoring_fsm.py
+          tests/integration/test_m6_persistence.py
+          tests/integration/test_m6_cross_module.py
+          --cov=course_insight.modules.m6_tutoring_fsm
+          --cov=course_insight.infrastructure.sqlite.m6_repository
+          --cov=course_insight.infrastructure.sqlite.migrations
+          --cov-report=term-missing
+          --cov-fail-under=90
+
+      - name: Verify deterministic public schemas
+        run: |
+          python scripts/export_schemas.py
+          python -m course_insight.cli export-schemas
+          git diff --exit-code -- contracts/schemas
+
+      - name: Check whitespace
+        run: git diff --check

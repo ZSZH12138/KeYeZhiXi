@@ -2,24 +2,23 @@
 
 from __future__ import annotations
 
-import hashlib
-import json
-from datetime import datetime, timedelta, timezone
-from typing import Any
+from collections.abc import Callable, Mapping
+from datetime import datetime, timezone
+from types import MappingProxyType
 
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.state import LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m4_task_orchestration.repository import M4Repository
-
-
-_FIXED_TIME = datetime(2026, 7, 15, 9, 0, tzinfo=timezone(timedelta(hours=8)))
-_ASSESSMENT_TASK_TYPES = frozenset(
-    {"diagnostic", "practice", "correction", "stage_assessment"}
+from course_insight.modules.m4_task_orchestration.routing import (
+    resolve_blueprint_id,
+    resolve_task_type,
+    workflow_for,
 )
-_SUPPORTED_TASK_TYPES = frozenset({"qa", *_ASSESSMENT_TASK_TYPES})
-_ASSESSMENT_WORKFLOW = ["M8", "M5", "M6", "M7", "M9"]
+
+
+IdempotencyKeyFactory = Callable[[Mapping[str, str | None]], str]
 
 
 class M4TaskOrchestrationService:
@@ -28,10 +27,15 @@ class M4TaskOrchestrationService:
     def __init__(
         self,
         repository: M4Repository,
-        idempotency_key_factory: Any,
+        idempotency_key_factory: IdempotencyKeyFactory,
+        *,
+        blueprint_by_task_type: Mapping[str, str] | None = None,
     ) -> None:
         self._repository = repository
         self._idempotency_key_factory = idempotency_key_factory
+        self._blueprint_by_task_type = MappingProxyType(
+            dict(blueprint_by_task_type or {})
+        )
 
     def create_task_plan(
         self,
@@ -53,7 +57,7 @@ class M4TaskOrchestrationService:
         错误码：UNSUPPORTED_TASK。
         """
 
-        task_type = self._resolve_task_type(student_text, task_type_hint)
+        task_type = resolve_task_type(student_text, task_type_hint)
         self._validate_inputs(
             course_id=course_id,
             class_id=class_id,
@@ -62,41 +66,31 @@ class M4TaskOrchestrationService:
             knowledge_bundle=knowledge_bundle,
             learner_state_snapshot=learner_state_snapshot,
         )
-        blueprint_id = self._resolve_blueprint_id(
+        blueprint_id = resolve_blueprint_id(
             task_type=task_type,
             course_id=course_id,
             knowledge_bundle=knowledge_bundle,
+            blueprint_by_task_type=self._blueprint_by_task_type,
         )
-        identity_parts = [
-            course_id,
-            class_id,
-            learner_id,
-            session_id,
-            task_type,
-            knowledge_bundle.knowledge_bundle_id,
-            blueprint_id or "",
-        ]
-        canonical_identity = json.dumps(
-            identity_parts,
-            ensure_ascii=False,
-            separators=(",", ":"),
-        )
-        idempotency_key = hashlib.sha256(
-            canonical_identity.encode("utf-8")
-        ).hexdigest()
+        identity = {
+            "course_id": course_id,
+            "class_id": class_id,
+            "learner_id": learner_id,
+            "session_id": session_id,
+            "task_type": task_type,
+            "knowledge_bundle_id": knowledge_bundle.knowledge_bundle_id,
+            "course_package_id": knowledge_bundle.course_package_id,
+            "blueprint_id": blueprint_id,
+        }
+        idempotency_key = self._idempotency_key_factory(identity)
+        if not isinstance(idempotency_key, str) or not idempotency_key:
+            raise DomainError(
+                code="UNSUPPORTED_TASK",
+                module="m4",
+                message="idempotency key factory returned an invalid key",
+            )
         task_id = f"task_{idempotency_key}"
-
-        getter = getattr(self._repository, "get_task_plan", None)
-        if callable(getter):
-            existing = getter(task_id)
-            if existing is not None:
-                return existing.model_copy(deep=True)
-
-        workflow = (
-            list(_ASSESSMENT_WORKFLOW)
-            if task_type in _ASSESSMENT_TASK_TYPES
-            else ["M2", "M7", "M6"]
-        )
+        workflow = workflow_for(task_type)
         plan = TaskPlan(
             task_id=task_id,
             task_type=task_type,
@@ -106,42 +100,32 @@ class M4TaskOrchestrationService:
             session_id=session_id,
             blueprint_id=blueprint_id,
             knowledge_bundle_id=knowledge_bundle.knowledge_bundle_id,
+            course_package_id=knowledge_bundle.course_package_id,
             workflow=workflow,
             next_module=workflow[0],
-            created_at=_FIXED_TIME,
+            created_at=self._created_at(),
         )
-        saver = getattr(self._repository, "save_task_plan", None)
-        if callable(saver):
-            saver(plan.model_copy(deep=True), idempotency_key)
-        return plan
+        authoritative = self._repository.insert_or_get_task_plan(
+            plan.model_copy(deep=True),
+            idempotency_key,
+        )
+        self._assert_authoritative_plan(plan, authoritative)
+        return authoritative.model_copy(deep=True)
+
+    def _created_at(self) -> datetime:
+        return datetime.now(timezone.utc)
 
     @staticmethod
-    def _resolve_task_type(student_text: str, task_type_hint: str | None) -> str:
-        if not student_text.strip():
-            raise DomainError(
-                code="UNSUPPORTED_TASK",
-                module="m4",
-                message="student task text must not be blank",
-                recoverable=True,
+    def _assert_authoritative_plan(
+        candidate: TaskPlan,
+        authoritative: TaskPlan,
+    ) -> None:
+        if not isinstance(authoritative, TaskPlan) or authoritative.model_dump(
+            exclude={"created_at"},
+        ) != candidate.model_dump(exclude={"created_at"}):
+            raise RuntimeError(
+                "M4 idempotency collision or persisted task corruption"
             )
-        if task_type_hint is None:
-            normalized_text = " ".join(student_text.split()).casefold()
-            task_type = (
-                "stage_assessment"
-                if "assessment" in normalized_text or "测评" in normalized_text
-                else "qa"
-            )
-        else:
-            task_type = " ".join(task_type_hint.split()).casefold()
-        if task_type not in _SUPPORTED_TASK_TYPES:
-            raise DomainError(
-                code="UNSUPPORTED_TASK",
-                module="m4",
-                message="task type is not supported",
-                details={"task_type": task_type},
-                recoverable=True,
-            )
-        return task_type
 
     @staticmethod
     def _validate_inputs(
@@ -165,6 +149,8 @@ class M4TaskOrchestrationService:
         if (
             knowledge_bundle.course_id != course_id
             or knowledge_bundle.status != "published"
+            or not knowledge_bundle.knowledge_bundle_id.strip()
+            or not knowledge_bundle.course_package_id.strip()
         ):
             raise DomainError(
                 code="KNOWLEDGE_BUNDLE_MISMATCH",
@@ -181,27 +167,3 @@ class M4TaskOrchestrationService:
                 module="m4",
                 message="learner state must match the task identity",
             )
-
-    @staticmethod
-    def _resolve_blueprint_id(
-        *,
-        task_type: str,
-        course_id: str,
-        knowledge_bundle: KnowledgeBundle,
-    ) -> str | None:
-        if task_type not in _ASSESSMENT_TASK_TYPES:
-            return None
-        for blueprint in knowledge_bundle.blueprints:
-            if (
-                blueprint.course_id == course_id
-                and " ".join(blueprint.status.split()).casefold()
-                == "teacher_approved"
-            ):
-                return blueprint.blueprint_id
-        raise DomainError(
-            code="BLUEPRINT_NOT_FOUND",
-            module="m4",
-            message="assessment task requires a teacher-approved blueprint",
-            details={"course_id": course_id},
-            recoverable=True,
-        )

@@ -33,6 +33,7 @@ from course_insight.contracts.learning_models import (
     IRTParameterSet,
     LearningObservationBatch,
 )
+from course_insight.contracts.platform import AssessmentSubmission
 from course_insight.contracts.state import DiagnosisResult, LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m8_assessment_scoring.paper_generator import FIXED_TIME
@@ -96,13 +97,13 @@ class M8AssessmentService:
     def prepare_scoring(
         self,
         assessment_paper: AssessmentPaper,
-        raw_answer_path: Path,
+        raw_answer_path: Path | AssessmentSubmission,
         knowledge_bundle: KnowledgeBundle,
     ) -> ScoringPreparationResult:
         """Parse raw answers and prepare objective and subjective scoring.
 
-        原始输入：冻结试卷、学生答案 JSON 路径和 M3 知识包。
-        契约来源：generate_paper、原始作答边界和 build_knowledge_bundle。
+        原始输入：冻结试卷、M0 提交契约或学生答案 JSON 路径，以及 M3 知识包。
+        契约来源：generate_paper、M0/原始作答边界和 build_knowledge_bundle。
         返回消费者：M7 主观评分及 M8.finalize_scoring。
         业务校验：试卷身份、答案格式、量规任务和证据查询必须一一对应。
         错误码：ANSWER_FORMAT_INVALID。
@@ -540,10 +541,29 @@ class M8AssessmentService:
         )
 
     @staticmethod
-    def _load_raw_answers(path: Path) -> tuple[bytes, dict[str, Any]]:
+    def _load_raw_answers(
+        path: Path | AssessmentSubmission,
+    ) -> tuple[bytes, dict[str, Any]]:
+        if isinstance(path, AssessmentSubmission):
+            payload = {
+                "attempt_id": path.attempt_id,
+                "paper_id": path.paper_id,
+                "learner_id": path.learner_id,
+                "answers": [
+                    {"item_instance_id": item_id, "answer": answer}
+                    for item_id, answer in sorted(path.answers.items())
+                ],
+            }
+            raw_bytes = json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+            return raw_bytes, payload
         if not isinstance(path, Path) or path.suffix.casefold() != ".json":
             M8AssessmentService._raise_answer_error(
-                "raw answer input must be a JSON path"
+                "raw answer input must be an AssessmentSubmission or JSON path"
             )
         try:
             raw_bytes = path.read_bytes()

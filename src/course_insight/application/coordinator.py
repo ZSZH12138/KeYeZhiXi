@@ -20,7 +20,11 @@ from course_insight.contracts.learning_models import (
     AdaptiveSelectionPolicy,
     LearningObservationBatch,
 )
-from course_insight.contracts.platform import ActorContext
+from course_insight.contracts.platform import (
+    ActorContext,
+    AssessmentSubmission,
+    TeacherReviewSubmission,
+)
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.json_io import write_json
 from course_insight.modules.m0_platform.service import M0PlatformService
@@ -112,7 +116,7 @@ class AppCoordinator:
         class_id: str,
         learner_id: str,
         session_id: str,
-        raw_answer_path: Path,
+        raw_answer_path: Path | AssessmentSubmission,
         state_policy_path: Path,
         teacher_threshold_policy_path: Path,
     ) -> dict[str, ContractModel]:
@@ -206,7 +210,7 @@ class AppCoordinator:
         knowledge_bundle: KnowledgeBundle,
         scoring_result_bundle: ScoringResultBundle,
         state_update_result: StateUpdateResult,
-        raw_review_path: Path,
+        raw_review_path: Path | TeacherReviewSubmission,
         state_policy_path: Path,
         teacher_threshold_policy_path: Path,
     ) -> dict[str, ContractModel]:
