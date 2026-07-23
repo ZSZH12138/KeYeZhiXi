@@ -40,7 +40,36 @@ M5 诊断/学习状态选择下一教学动作，并生成可直接交给 M2、M
 `m6_session_states` 追加保存每轮快照，`m6_tutoring_decisions` 保存请求指纹、权威
 输入指纹、证据水位和完整结果。SQLite 适配器在 `BEGIN IMMEDIATE` 事务内执行
 insert-or-get；相同请求重放、进程重启和 20 路并发只产生一个权威决策，不同输入
-争用同一旧游标时拒绝陈旧一方，任何失败都会整体回滚。
+争用同一旧游标时拒绝陈旧一方，任何失败都会整体回滚。独立调用
+`save_session_state()` 追加会话快照时，首条必须是 turn 0，后续快照必须连续扩展
+动作历史并遵守合法状态迁移，不能绕过权威决策链写入任意高 turn。按公开恢复契约，
+空 Repository 仍可在 `commit_decision()` 的同一事务中持久化调用方提供且已通过
+契约/session 校验的上一快照，再恰好推进一轮。
+
+## Schema v3 迁移与恢复
+
+M6 业务服务不内嵌 schema 迁移；SQLite 升级统一由
+`infrastructure.sqlite.migrations.migrate()` 实现，并由
+`M0PlatformService.initialize()` 或独立使用时的
+`SQLiteM6Repository.initialize()` 触发。schema v3 只在既有
+`m6_session_states` 之外新增 `m6_tutoring_decisions`。升级前应停止写入，并使用
+SQLite backup API，或完整备份数据库及其 `-wal`、`-shm` sidecar；备份仍须留在
+不受 Git 管理的 `runtime/` 边界内。
+
+`migrate()` 在一个 `BEGIN IMMEDIATE` 事务中应用全部待执行迁移。若 v3 在提交前
+失败，事务会整体回滚，不会留下半完成表；修复失败原因后重新初始化即可。若 v3
+已经提交，项目不执行破坏性自动降级：需要回退到只支持 v2 的应用版本时，应停止
+写入并恢复升级前备份，不得手工删除表或改写 `schema_migrations`。数据库版本高于
+当前应用支持版本时，初始化会拒绝启动，应改用匹配的应用版本或恢复相匹配的备份。
+每次初始化也会重新核对 v3 表的列、唯一键、复合外键、canonical JSON 约束和
+既有数据的外键完整性；忽略注释与空白后，建表定义必须与 M6 的规范定义严格
+一致，防止用注释、字符串或约束名伪造约束。已有同名但结构不兼容的表或孤儿
+决策记录会 fail closed，且不会被记录为成功迁移。
+
+升级后，调用方未提供快照时，M6 会按 `TaskPlan.session_id` 恢复最新权威
+`SessionStateSnapshot`；相同请求不会重复推进 turn，陈旧快照会返回
+`TUTORING_REFERENCE_MISMATCH`。迁移、失败回滚、重启恢复和幂等行为由
+`tests/integration/test_m6_persistence.py` 验证。
 
 ## 禁止事项
 

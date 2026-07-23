@@ -126,6 +126,10 @@ class InMemoryM6Repository:
             if existing is not None:
                 assert_same_session_snapshot(existing, candidate)
                 return
+            validate_session_append(
+                self._latest_snapshot_unlocked(candidate.session_id),
+                candidate,
+            )
             self._snapshots = {**self._snapshots, key: candidate}
 
     def get_session_state(
@@ -266,6 +270,29 @@ def assert_same_session_snapshot(
 ) -> None:
     if stored.content_checksum() != expected.content_checksum():
         _raise_reference_mismatch("authoritative_session_snapshot_mismatch")
+
+
+def validate_session_append(
+    latest: SessionStateSnapshot | None,
+    candidate: SessionStateSnapshot,
+) -> None:
+    """Reject snapshot writes that do not extend one authoritative FSM history."""
+
+    if latest is None:
+        if (
+            candidate.turn_count != 0
+            or candidate.current_state not in {"S0", "S1"}
+        ):
+            _raise_reference_mismatch("session_history_has_invalid_start")
+        return
+    if (
+        candidate.session_id != latest.session_id
+        or candidate.turn_count != latest.turn_count + 1
+        or candidate.completed_action_ids[:-1] != latest.completed_action_ids
+    ):
+        _raise_reference_mismatch("session_snapshot_not_contiguous")
+    if not latest.can_transition_to(candidate.current_state):
+        _raise_reference_mismatch("session_snapshot_transition_invalid")
 
 
 def _require_fingerprint(value: str, field_name: str) -> None:

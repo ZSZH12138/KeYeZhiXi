@@ -28,6 +28,9 @@ from course_insight.contracts.state import (
 )
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.contracts.tutoring import SessionStateSnapshot
+from course_insight.modules.m6_tutoring_fsm.repository import (
+    InMemoryM6Repository,
+)
 from course_insight.modules.m6_tutoring_fsm.state_machine import (
     DEFAULT_STATE_MACHINE,
 )
@@ -414,6 +417,38 @@ def test_session_transition_rejects_reused_action_id_atomically() -> None:
 
     assert raised.value.code == "TUTORING_REFERENCE_CONFLICT"
     assert session.model_dump(mode="json") == before
+
+
+def test_in_memory_repository_rejects_first_snapshot_after_turn_zero() -> None:
+    repository = InMemoryM6Repository()
+
+    with pytest.raises(DomainError) as raised:
+        repository.save_session_state(_session("S4", turn_count=2))
+
+    assert raised.value.code == "TUTORING_REFERENCE_MISMATCH"
+    assert repository.get_latest_session_state(SESSION_ID) is None
+
+
+def test_in_memory_repository_rejects_terminal_initial_snapshot() -> None:
+    repository = InMemoryM6Repository()
+
+    with pytest.raises(DomainError) as raised:
+        repository.save_session_state(_session("S5", turn_count=0))
+
+    assert raised.value.code == "TUTORING_REFERENCE_MISMATCH"
+    assert repository.get_latest_session_state(SESSION_ID) is None
+
+
+def test_in_memory_repository_rejects_illegal_snapshot_transition() -> None:
+    repository = InMemoryM6Repository()
+    seed = _session("S1", turn_count=0)
+    repository.save_session_state(seed)
+
+    with pytest.raises(DomainError) as raised:
+        repository.save_session_state(_session("S4", turn_count=1))
+
+    assert raised.value.code == "TUTORING_REFERENCE_MISMATCH"
+    assert repository.get_latest_session_state(SESSION_ID) == seed
 
 
 def test_decision_policy_defaults_are_frozen_and_versioned() -> None:

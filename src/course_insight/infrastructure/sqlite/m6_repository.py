@@ -20,6 +20,7 @@ from course_insight.modules.m6_tutoring_fsm.repository import (
     assert_same_session_snapshot,
     isolated_session_snapshot,
     validate_decision_commit,
+    validate_session_append,
 )
 
 
@@ -46,14 +47,24 @@ class SQLiteM6Repository:
         connection = connect_sqlite(self._database_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
+            existing = connection.execute(
                 """
-                INSERT INTO m6_session_states(session_id, turn_count, payload)
-                VALUES (?, ?, ?)
-                ON CONFLICT(session_id, turn_count) DO NOTHING
+                SELECT session_id, turn_count, payload
+                FROM m6_session_states
+                WHERE session_id = ? AND turn_count = ?
                 """,
-                (candidate.session_id, candidate.turn_count, payload),
+                (candidate.session_id, candidate.turn_count),
+            ).fetchone()
+            if existing is not None:
+                assert_same_session_snapshot(_snapshot_from_row(existing), candidate)
+                connection.execute("COMMIT")
+                return
+            latest_row = _latest_snapshot_row(connection, candidate.session_id)
+            validate_session_append(
+                None if latest_row is None else _snapshot_from_row(latest_row),
+                candidate,
             )
+            _insert_snapshot(connection, candidate, payload)
             row = connection.execute(
                 """
                 SELECT session_id, turn_count, payload

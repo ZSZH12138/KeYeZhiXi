@@ -339,6 +339,204 @@ def test_migration_v3_creates_m6_decision_table_with_required_keys(
         } <= unique_columns
 
 
+def test_migration_rejects_incompatible_existing_m6_decision_table(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    with connect_sqlite(database_path) as connection:
+        migrate(connection)
+        connection.execute("DROP TABLE m6_tutoring_decisions")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 3")
+        connection.execute(
+            """
+            CREATE TABLE m6_tutoring_decisions (
+                decision_id TEXT,
+                session_id TEXT,
+                turn_count INTEGER,
+                previous_turn_count INTEGER,
+                request_fingerprint TEXT,
+                input_fingerprint TEXT,
+                evidence_fingerprint TEXT,
+                evidence_identity TEXT,
+                result_payload TEXT
+            )
+            """
+        )
+
+        with pytest.raises(RuntimeError, match="M6 decision schema is incompatible"):
+            migrate(connection)
+
+        assert current_schema_version(connection) == 2
+        indexes = connection.execute(
+            "PRAGMA index_list('m6_tutoring_decisions')"
+        ).fetchall()
+        assert indexes == []
+
+
+def test_migration_revalidates_v3_schema_on_every_startup(tmp_path: Path) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    with connect_sqlite(database_path) as connection:
+        migrate(connection)
+        connection.execute("DROP TABLE m6_tutoring_decisions")
+        connection.execute(
+            "CREATE TABLE m6_tutoring_decisions (decision_id TEXT PRIMARY KEY)"
+        )
+
+        with pytest.raises(RuntimeError, match="M6 decision schema is incompatible"):
+            migrate(connection)
+
+        assert current_schema_version(connection) == 3
+
+
+@pytest.mark.parametrize(
+    "spoofed_checks",
+    [
+        pytest.param(
+            """
+            /*
+            CHECK (length(decision_id) > 0)
+            CHECK (length(session_id) > 0)
+            CHECK (turn_count >= 0)
+            CHECK (previous_turn_count IS NULL OR previous_turn_count >= 0)
+            CHECK (length(request_fingerprint) > 0)
+            CHECK (length(input_fingerprint) > 0)
+            CHECK (length(evidence_fingerprint) > 0)
+            json_valid(evidence_identity)
+            json(evidence_identity) = evidence_identity
+            json_valid(result_payload)
+            json(result_payload) = result_payload
+            */
+            """,
+            id="sql-comments",
+        ),
+        pytest.param(
+            """
+            , CONSTRAINT "check(length(decision_id)>0)" CHECK (1)
+            , CONSTRAINT "check(length(session_id)>0)" CHECK (1)
+            , CONSTRAINT "check(turn_count>=0)" CHECK (1)
+            , CONSTRAINT
+                "check(previous_turn_countisnullorprevious_turn_count>=0)"
+                CHECK (1)
+            , CONSTRAINT "check(length(request_fingerprint)>0)" CHECK (1)
+            , CONSTRAINT "check(length(input_fingerprint)>0)" CHECK (1)
+            , CONSTRAINT "check(length(evidence_fingerprint)>0)" CHECK (1)
+            , CONSTRAINT "json_valid(evidence_identity)" CHECK (1)
+            , CONSTRAINT
+                "json(evidence_identity)=evidence_identity"
+                CHECK (1)
+            , CONSTRAINT "json_valid(result_payload)" CHECK (1)
+            , CONSTRAINT "json(result_payload)=result_payload" CHECK (1)
+            """,
+            id="quoted-constraint-names",
+        ),
+    ],
+)
+def test_migration_rejects_spoofed_check_constraints(
+    tmp_path: Path,
+    spoofed_checks: str,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    with connect_sqlite(database_path) as connection:
+        migrate(connection)
+        connection.execute("DROP TABLE m6_tutoring_decisions")
+        connection.execute(
+            f"""
+            CREATE TABLE m6_tutoring_decisions (
+                decision_id TEXT PRIMARY KEY,
+                session_id TEXT NOT NULL,
+                turn_count INTEGER NOT NULL,
+                previous_turn_count INTEGER,
+                request_fingerprint TEXT NOT NULL UNIQUE,
+                input_fingerprint TEXT NOT NULL UNIQUE,
+                evidence_fingerprint TEXT NOT NULL,
+                evidence_identity TEXT NOT NULL,
+                result_payload TEXT NOT NULL,
+                UNIQUE (session_id, turn_count),
+                FOREIGN KEY (session_id, turn_count)
+                    REFERENCES m6_session_states(session_id, turn_count)
+                {spoofed_checks}
+            )
+            """
+        )
+
+        with pytest.raises(RuntimeError, match="M6 decision schema is incompatible"):
+            migrate(connection)
+
+
+def test_migration_rejects_orphaned_m6_decision_rows(tmp_path: Path) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    with connect_sqlite(database_path) as connection:
+        migrate(connection)
+        connection.execute(
+            """
+            INSERT INTO m6_session_states(session_id, turn_count, payload)
+            VALUES (?, ?, ?)
+            """,
+            ("session_1", 0, dumps_json(_snapshot(0).to_dict())),
+        )
+        connection.execute(
+            """
+            INSERT INTO m6_tutoring_decisions(
+                decision_id,
+                session_id,
+                turn_count,
+                previous_turn_count,
+                request_fingerprint,
+                input_fingerprint,
+                evidence_fingerprint,
+                evidence_identity,
+                result_payload
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "decision_1",
+                "session_1",
+                0,
+                None,
+                "request_1",
+                "input_1",
+                "evidence_1",
+                '{"audit":"audit_1:1"}',
+                "{}",
+            ),
+        )
+        connection.execute("PRAGMA foreign_keys = OFF")
+        connection.execute(
+            """
+            DELETE FROM m6_session_states
+            WHERE session_id = ? AND turn_count = ?
+            """,
+            ("session_1", 0),
+        )
+        connection.execute("PRAGMA foreign_keys = ON")
+
+        with pytest.raises(
+            RuntimeError,
+            match="M6 decision data violates foreign keys",
+        ):
+            migrate(connection)
+
+
+def test_migration_rejects_schema_newer_than_application(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    with connect_sqlite(database_path) as connection:
+        migrate(connection)
+        connection.execute(
+            "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+            (SCHEMA_VERSION + 1, "future_schema"),
+        )
+
+        with pytest.raises(
+            RuntimeError,
+            match="database schema is newer than this application",
+        ):
+            migrate(connection)
+
+        assert current_schema_version(connection) == SCHEMA_VERSION + 1
+
+
 @pytest.mark.parametrize("invalid_column", ["evidence_identity", "result_payload"])
 def test_m6_decision_json_columns_require_canonical_json(
     tmp_path: Path,
@@ -447,6 +645,49 @@ def test_sqlite_repository_saves_exact_snapshots_and_retains_history(
     assert _stored_turns(database_path) == [0, 1, 2]
 
 
+def test_sqlite_repository_rejects_first_snapshot_after_turn_zero(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+
+    with pytest.raises(DomainError) as raised:
+        repository.save_session_state(_snapshot(2))
+
+    assert raised.value.code == "TUTORING_REFERENCE_MISMATCH"
+    assert repository.get_latest_session_state("session_1") is None
+
+
+def test_sqlite_repository_rejects_terminal_initial_snapshot(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+    invalid = _snapshot(0).model_copy(update={"current_state": "S5"}, deep=True)
+
+    with pytest.raises(DomainError) as raised:
+        repository.save_session_state(invalid)
+
+    assert raised.value.code == "TUTORING_REFERENCE_MISMATCH"
+    assert repository.get_latest_session_state("session_1") is None
+
+
+def test_sqlite_repository_rejects_illegal_snapshot_transition(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+    seed = _snapshot(0)
+    repository.save_session_state(seed)
+    invalid = _snapshot(1).model_copy(update={"current_state": "S4"}, deep=True)
+
+    with pytest.raises(DomainError) as raised:
+        repository.save_session_state(invalid)
+
+    assert raised.value.code == "TUTORING_REFERENCE_MISMATCH"
+    assert repository.get_latest_session_state("session_1") == seed
+
+
 def test_first_decision_persists_seed_result_and_readable_decision(
     tmp_path: Path,
 ) -> None:
@@ -480,6 +721,23 @@ def test_first_decision_persists_seed_result_and_readable_decision(
     assert len(decision.evidence_fingerprint) == 64
     assert decision.result == result
     assert decision.result is not result
+
+
+def test_empty_repository_seeds_valid_caller_snapshot_before_advancing(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+    previous = _snapshot(2)
+
+    result = _service(repository).decide_next_action(*_inputs(), previous)
+
+    assert repository.get_session_state("session_1", 2) == previous
+    assert result.session_state_snapshot.turn_count == 3
+    assert result.session_state_snapshot.completed_action_ids[:-1] == (
+        previous.completed_action_ids
+    )
+    assert _stored_turns(database_path) == [2, 3]
 
 
 def test_same_request_replay_returns_original_result_without_advancing(

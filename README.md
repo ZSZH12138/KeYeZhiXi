@@ -33,7 +33,8 @@
 ```shell
 conda create --name course-insight-framework python=3.12 -y
 conda activate course-insight-framework
-python -m pip install -e .
+python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
+python -m pytest -q
 ```
 
 导出公开契约 Schema：
@@ -94,7 +95,7 @@ python -m course_insight.cli export-schemas
 | [M3](src/course_insight/modules/m3_knowledge_bundle/README.md) | 谢 | 知识、题卡、量规、蓝图、Q 矩阵和标定依据 | M1 `CoursePackage`；教师确认 JSON | `KnowledgeBundle` | M4、M5、M8、M9 |
 | [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务识别、蓝图选择、引用冻结和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
 | [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`CognitiveDiagnosisResult`、`KnowledgeTraceSnapshot`、`LearningModelRun` | M6、M9 |
-| [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 确定性状态机；证据门槛与会话幂等 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7、M4 |
+| [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 确定性状态机；证据门槛与会话幂等 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7 |
 | [M7](src/course_insight/modules/m7_local_model/README.md) | 冯 | 量规评分、学生反馈与 DeepSeek API 边界 | M8 scoring task；M6 feedback task；M2 evidence | `RubricScoringResult`、`StudentFeedbackPackage`、`LLMGenerationResult` | M8、M0 |
 | [M8](src/course_insight/modules/m8_assessment_scoring/README.md) | 童 | 组卷、评分、IRT、自适应选题与在线标定 | M4/M3/M5；作答；M7 result；M9 review | `AssessmentPaper`、`ScoringPreparationResult`、`ScoringResultBundle`、`IRTParameterSet`、`CalibrationRunResult`、`AdaptiveSelectionResult` | M0、M2、M5、M6、M9 |
 | [M9](src/course_insight/modules/m9_teacher_analytics/README.md) | 冯 | 教师分析、DeepSeek 叙述、模型质量和审核 | M3/M8/M5；标定 result；复核表单 | `TeacherAnalyticsBundle`、`TeacherReviewDecision`、`LLMGenerationResult`、`ModelQualityReport`、`CalibrationReviewDecision` | M0、M8 |
@@ -579,7 +580,9 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
 - 陈：先读 [M0 service](src/course_insight/modules/m0_platform/service.py) 的 Django 外层契约与
   [SQLite migrations](src/course_insight/infrastructure/sqlite/migrations.py)，再读
   [M4 service](src/course_insight/modules/m4_task_orchestration/service.py)、
-  [M6 state machine](src/course_insight/modules/m6_tutoring_fsm/state_machine.py)，
+  [M6 state machine](src/course_insight/modules/m6_tutoring_fsm/state_machine.py)、
+  [M6 service](src/course_insight/modules/m6_tutoring_fsm/service.py) 和
+  [M6 SQLite repository](src/course_insight/infrastructure/sqlite/m6_repository.py)，
   最后读 [AppCoordinator](src/course_insight/application/coordinator.py)。
 - 谢：按 M1 `service.py` → M2 `service.py` → M3 `service.py` 阅读，先理解
   `CoursePackage` 和证据定位，再处理 RAG/pgvector 引用与 Q 矩阵标定依据。
@@ -602,7 +605,7 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
 | M3 | 只接受教师确认 JSON，不自动抽取知识 | schema validator 后的教师审核工作流 |
 | M4 | 五类确定性规则识别、显式蓝图映射、SHA-256 幂等身份和 SQLite 原子复用，不含意图模型 | 可替换意图 adapter，但保持 `TaskPlan` 和八字段业务身份 |
 | M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
-| M6 | 固定 S0—S5 状态机，不做策略学习 | `state_machine.py` 的可验证定义 |
+| M6 | 8 条合法迁移、确定性目标/动作、证据门槛、SHA-256 身份，以及 SQLite 决策重放、会话恢复和并发控制；不做策略学习 | 可在保持公共契约和审计身份不变的前提下，引入经验证的版本化策略适配器 |
 | M7 | `PlaceholderRubricAdapter` 未配置时抛出 `MODEL_ADAPTER_UNCONFIGURED`；DeepSeek 适配器返回 `empty` | 安全、超时、限流和输出校验完成后在 M7 启用 DeepSeek API |
 | M8 | 固定 anchor/规则评分；IRT 标定与自适应选题为 `empty` | 足量数据下实现 IRT shadow 标定，经 M9 质量/教师审核后启用 |
 | M9 | 阈值统计/规则建议；DeepSeek 叙述 `empty`；质量 `insufficient_data` | 实现模型指标与标定审核；在 M9 启用 DeepSeek 教师叙述 |
