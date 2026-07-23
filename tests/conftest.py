@@ -263,6 +263,7 @@ def task_plan() -> TaskPlan:
         session_id="session_1",
         blueprint_id="blueprint_1",
         knowledge_bundle_id="kb_1",
+        course_package_id="course_package_1",
         workflow=["M8", "M5"],
         next_module="M8",
         created_at=FIXED_DT,
