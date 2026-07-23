@@ -1,9 +1,23 @@
 {
   "owner": "童",
   "modules": ["M5", "M8"],
-  "current_task": "总框架初始化",
-  "completed": [],
+  "current_task": "M5/M8 测试完善",
+  "completed": [
+    "M5StateService.update_state 单元测试",
+    "M5StateService.run_learning_models 空壳验证",
+    "M5 update_policy 诊断策略测试",
+    "M5 aggregation 班级聚合测试",
+    "M8AssessmentService.generate_paper 单元测试",
+    "M8AssessmentService.prepare_scoring 单元测试",
+    "M8AssessmentService.finalize_scoring 单元测试",
+    "M8AssessmentService.apply_teacher_review 单元测试",
+    "M8 calibrate_irt / select_adaptive_items 空壳验证",
+    "M8 rule_scorer 客观评分测试",
+    "M8 paper_generator 组卷器测试",
+    "M5/M8 契约序列化往返测试",
+    "M8→M5 集成链路测试"
+  ],
   "blockers": [],
-  "next_step": "实现共享契约",
-  "updated_at": "2026-07-15T00:00:00+08:00"
+  "next_step": "与团队联调，确认 AppCoordinator 全链路通过",
+  "updated_at": "2026-07-17T12:30:00+08:00"
 }
