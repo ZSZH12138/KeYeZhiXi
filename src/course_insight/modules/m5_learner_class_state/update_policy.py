@@ -94,7 +94,7 @@ class DeterministicStateUpdatePolicy:
         bundle: ScoringResultBundle,
         knowledge: KnowledgeBundle,
     ) -> DiagnosisResult:
-        """Diagnose latest audits using only governed remediation references."""
+        """Diagnose latest audits using Q-matrix per-item concept lookup."""
 
         audits = latest_audits(bundle)
         if not audits:
@@ -104,6 +104,7 @@ class DeterministicStateUpdatePolicy:
                 message="at least one score audit is required for state updating",
                 recoverable=True,
             )
+        # Validate remediation targets still exist in the knowledge bundle
         target_concepts = _unique(
             [target.concept_id for target in bundle.remediation_plan.targets]
         ) or [knowledge.concepts[0].concept_id]
@@ -126,29 +127,66 @@ class DeterministicStateUpdatePolicy:
                 module="m5",
                 message="remediation targets must exist in the knowledge bundle",
             )
-        prerequisite_ids = _unique(
-            [
-                relation.from_concept_id
-                for relation in knowledge.prerequisite_relations
-                if relation.to_concept_id in target_concepts
-            ]
-        )
-        diagnoses = [
-            ItemDiagnosis(
-                item_instance_id=audit.item_instance_id,
-                concept_ids=target_concepts,
-                misconception_ids=target_misconceptions,
-                error_type=(
-                    "misconception_or_low_confidence"
-                    if audit.needs_review() or audit.total_score < audit.max_score
-                    else "correct_with_review_evidence"
-                ),
-                confidence=audit.confidence,
-                evidence_audit_ids=[audit_version_key(audit)],
-                prerequisite_gap_ids=prerequisite_ids,
+        # M5-05: build Q-matrix lookup for per-item concept diagnosis
+        q_lookup: dict[tuple[str, str], list[str]] = {}
+        for entry in knowledge.q_matrix:
+            if entry.is_active():
+                q_lookup.setdefault(
+                    (entry.item_id, entry.item_version), []
+                ).append(entry.concept_id)
+        diagnoses = []
+        for audit in audits:
+            # Query per-item concepts from Q-matrix
+            if audit.item_id is not None and audit.item_version is not None:
+                item_concepts = q_lookup.get(
+                    (audit.item_id, audit.item_version),
+                    [],
+                )
+                if not item_concepts:
+                    raise DomainError(
+                        code="STATE_REFERENCE_MISMATCH",
+                        module="m5",
+                        message="no Q-matrix entry found for audit item",
+                        details={
+                            "item_id": audit.item_id,
+                            "item_version": audit.item_version,
+                        },
+                    )
+            else:
+                # Fallback for legacy audits without item identity
+                item_concepts = target_concepts
+            # Query per-item misconceptions from knowledge bundle
+            item_misconceptions = _unique(
+                [
+                    tag.misconception_id
+                    for tag in knowledge.misconception_tags
+                    for concept_id in item_concepts
+                    if concept_id in tag.concept_ids
+                ]
             )
-            for audit in audits
-        ]
+            # Prerequisite gaps for this item's concepts
+            item_prerequisites = _unique(
+                [
+                    relation.from_concept_id
+                    for relation in knowledge.prerequisite_relations
+                    if relation.to_concept_id in item_concepts
+                ]
+            )
+            diagnoses.append(
+                ItemDiagnosis(
+                    item_instance_id=audit.item_instance_id,
+                    concept_ids=item_concepts,
+                    misconception_ids=item_misconceptions,
+                    error_type=(
+                        "misconception_or_low_confidence"
+                        if audit.needs_review() or audit.total_score < audit.max_score
+                        else "correct_with_review_evidence"
+                    ),
+                    confidence=audit.confidence,
+                    evidence_audit_ids=[audit_version_key(audit)],
+                    prerequisite_gap_ids=item_prerequisites,
+                )
+            )
         return DiagnosisResult(
             diagnosis_id=f"{bundle.attempt_id}_diagnosis_v{max(a.audit_version for a in audits)}",
             attempt_id=bundle.attempt_id,
@@ -185,8 +223,25 @@ class DeterministicStateUpdatePolicy:
         review_required = bundle.requires_teacher_review()
         priority_concepts = set(diagnosis.priority_concept_ids)
         priority_misconceptions = set(diagnosis.priority_misconception_ids)
+        # M5-03: build previous state lookups for cumulative merging
+        prev_concepts = (
+            {cs.concept_id: cs for cs in previous.concept_states}
+            if previous is not None
+            else {}
+        )
+        prev_misconceptions = (
+            {
+                ms.misconception_id: ms
+                for cs in previous.concept_states
+                for ms in cs.misconceptions
+            }
+            if previous is not None
+            else {}
+        )
+        current_evidence = len(audits)
         concept_states: list[ConceptState] = []
         for concept in knowledge.concepts:
+            prev_cs = prev_concepts.get(concept.concept_id)
             governed_misconceptions = [
                 item
                 for item in knowledge.misconception_tags
@@ -202,24 +257,46 @@ class DeterministicStateUpdatePolicy:
                         else 0.2
                     ),
                     evidence_count=(
-                        len(audits)
-                        if item.misconception_id in priority_misconceptions
-                        else 0
+                        (
+                            prev_misconceptions[item.misconception_id].evidence_count
+                            if item.misconception_id in prev_misconceptions
+                            else 0
+                        )
+                        + (
+                            current_evidence
+                            if item.misconception_id in priority_misconceptions
+                            else 0
+                        )
                     ),
                     last_seen_at=bundle.finalized_at,
                 )
                 for item in governed_misconceptions
             ]
             is_priority = concept.concept_id in priority_concepts
+            current_mastery = (
+                score_ratio if is_priority else max(0.5, score_ratio)
+            )
+            # M5-03: weighted average merge with previous mastery
+            if prev_cs is not None and prev_cs.evidence_count > 0:
+                total_ev = prev_cs.evidence_count + current_evidence
+                merged_mastery = (
+                    prev_cs.mastery_probability * prev_cs.evidence_count
+                    + current_mastery * current_evidence
+                ) / total_ev
+            else:
+                merged_mastery = current_mastery
             concept_states.append(
                 ConceptState(
                     concept_id=concept.concept_id,
-                    mastery_probability=(score_ratio if is_priority else max(0.5, score_ratio)),
+                    mastery_probability=merged_mastery,
                     mastery_confidence=(0.6 if is_priority else 0.5),
                     misconceptions=misconception_states,
                     hint_dependency=(0.5 if is_priority and review_required else 0.0),
                     recent_correction_rate=(0.0 if review_required else score_ratio),
-                    evidence_count=(len(audits) if is_priority else 0),
+                    evidence_count=(
+                        (prev_cs.evidence_count if prev_cs else 0)
+                        + (current_evidence if is_priority else 0)
+                    ),
                     updated_at=bundle.finalized_at,
                 )
             )
@@ -235,7 +312,10 @@ class DeterministicStateUpdatePolicy:
             state_version=version,
             concept_states=concept_states,
             overall_mastery=overall,
-            evidence_count=len(audits),
+            evidence_count=(
+                (previous.evidence_count if previous is not None else 0)
+                + current_evidence
+            ),
             updated_at=bundle.finalized_at,
         )
 

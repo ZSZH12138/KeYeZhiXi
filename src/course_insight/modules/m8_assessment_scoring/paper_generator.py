@@ -57,7 +57,12 @@ class PaperGenerator:
 
         used_item_ids: set[str] = set()
         sections = [
-            self._build_section(section, knowledge_bundle, used_item_ids)
+            self._build_section(
+                section,
+                knowledge_bundle,
+                used_item_ids,
+                learner_state_snapshot,
+            )
             for section in blueprint.sections
         ]
         paper_payload: dict[str, Any] = {
@@ -69,6 +74,8 @@ class PaperGenerator:
             "sections": sections,
             "generated_at": FIXED_TIME,
             "immutable_checksum": "pending",
+            "course_id": task_plan.course_id,
+            "class_id": task_plan.class_id,
         }
         paper = AssessmentPaper(**paper_payload)
         frozen = AssessmentPaper(
@@ -98,6 +105,8 @@ class PaperGenerator:
             or task_plan.knowledge_bundle_id
             != knowledge_bundle.knowledge_bundle_id
             or task_plan.course_id != knowledge_bundle.course_id
+            or task_plan.course_package_id
+            != knowledge_bundle.course_package_id
             or "M8" not in task_plan.workflow
         ):
             PaperGenerator._raise_unsatisfiable(
@@ -126,6 +135,7 @@ class PaperGenerator:
         section: BlueprintSection,
         knowledge_bundle: KnowledgeBundle,
         used_item_ids: set[str],
+        learner_state: LearnerStateSnapshot | None = None,
     ) -> PaperSection:
         approved = [
             item
@@ -144,10 +154,42 @@ class PaperGenerator:
             )
         anchored_ids = {item.item_id for item in anchors}
         remaining = [item for item in approved if item.item_id not in anchored_ids]
-        ordered_candidates = [
-            *[item for item in remaining if item.is_objective()],
-            *[item for item in remaining if not item.is_objective()],
-        ]
+
+        # M8-02: when learner state is available, prioritise items testing weak concepts
+        weak_concepts: set[str] = set()
+        if learner_state is not None:
+            for cs in learner_state.concept_states:
+                if cs.mastery_probability < 0.5:
+                    weak_concepts.add(cs.concept_id)
+
+        # M8-03: track concept coverage for quota enforcement
+        concept_quota = dict(section.concept_weights) if section.concept_weights else {}
+        concept_coverage: dict[str, int] = {c: 0 for c in concept_quota}
+
+        # Count concepts already covered by anchors
+        for item in anchors:
+            for cid in item.concept_ids:
+                if cid in concept_coverage:
+                    concept_coverage[cid] += 1
+
+        # Build a priority key for each remaining item:
+        # 1. Items covering weak concepts come first (M8-02)
+        # 2. Items covering underrepresented concepts come next (M8-03)
+        # 3. Objective items before subjective (existing behavior)
+        def _priority_key(item: ItemCard) -> tuple[int, int, int]:
+            covers_weak = any(cid in weak_concepts for cid in item.concept_ids)
+            underrepresented = min(
+                (concept_coverage.get(cid, 0) for cid in item.concept_ids if cid in concept_coverage),
+                default=0,
+            ) if concept_quota else 0
+            is_objective = 0 if item.is_objective() else 1
+            return (
+                0 if covers_weak else 1,
+                underrepresented,
+                is_objective,
+            )
+
+        ordered_candidates = sorted(remaining, key=_priority_key)
         selected = [*anchors, *ordered_candidates][0 : section.item_count]
         if len(selected) != section.item_count:
             self._raise_section_unsatisfiable(section, "not enough approved items")
@@ -165,6 +207,23 @@ class PaperGenerator:
                 section,
                 "selected item maxima do not match the section score",
             )
+
+        # M8-03: verify concept quota is satisfied when concept_weights are defined
+        if concept_quota:
+            final_coverage: dict[str, int] = {c: 0 for c in concept_quota}
+            for item in selected:
+                for cid in item.concept_ids:
+                    if cid in final_coverage:
+                        final_coverage[cid] += 1
+            # Every concept in the quota should have at least one item covering it
+            uncovered = [
+                cid for cid, count in final_coverage.items() if count == 0
+            ]
+            if uncovered:
+                self._raise_section_unsatisfiable(
+                    section,
+                    "concept quota not satisfied: concepts without any items",
+                )
 
         used_item_ids.update(item.item_id for item in selected)
         instances = [
@@ -208,6 +267,11 @@ class PaperGenerator:
             parameters=parameters,
             concept_ids=list(item.concept_ids),
             rubric_id=item.rubric_id,
+            rubric_version=(
+                knowledge_bundle.get_rubric(item.rubric_id).version
+                if item.rubric_id is not None
+                else None
+            ),
             max_score=item.max_score(knowledge_bundle),
             source_evidence_ids=list(item.source_evidence_ids),
         )

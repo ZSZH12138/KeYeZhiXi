@@ -72,6 +72,8 @@ class RuleScorer:
             audit_version=1,
             attempt_id=attempt_id,
             item_instance_id=item_instance.item_instance_id,
+            item_id=item_instance.item_id,
+            item_version=item_instance.item_version,
             criterion_scores=[criterion],
             total_score=score,
             max_score=item_instance.max_score,

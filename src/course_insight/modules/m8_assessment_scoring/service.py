@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -40,6 +40,23 @@ from course_insight.modules.m8_assessment_scoring.paper_generator import FIXED_T
 from course_insight.modules.m8_assessment_scoring.repository import M8Repository
 
 
+class Clock:
+    """Injectable time source; tests use fixed clock, production uses real time."""
+
+    def now(self) -> datetime:
+        return datetime.now(tz=timezone(timedelta(hours=8)))
+
+
+class FixedClock:
+    """Deterministic clock returning a fixed instant for replay-safe tests."""
+
+    def __init__(self, fixed_at: datetime = FIXED_TIME) -> None:
+        self._fixed_at = fixed_at
+
+    def now(self) -> datetime:
+        return self._fixed_at
+
+
 class M8AssessmentService:
     """Generate papers, score attempts, and retain audit history."""
 
@@ -48,10 +65,12 @@ class M8AssessmentService:
         repository: M8Repository,
         rule_scorer: Any,
         parameter_item_generator: Any,
+        clock: Any = None,
     ) -> None:
         self._repository = repository
         self._rule_scorer = rule_scorer
         self._parameter_item_generator = parameter_item_generator
+        self._clock = clock or FixedClock()
         self._paper_event_context: dict[str, tuple[str, str]] = {}
 
     def generate_paper(
@@ -115,6 +134,17 @@ class M8AssessmentService:
         attempt_id = self._required_text(payload, "attempt_id")
         paper_id = self._required_text(payload, "paper_id")
         learner_id = self._required_text(payload, "learner_id")
+        # M8-06: retain submission identity when answers arrive via M0 contract
+        submission_id = (
+            raw_answer_path.submission_id
+            if isinstance(raw_answer_path, AssessmentSubmission)
+            else None
+        )
+        submitted_at = (
+            raw_answer_path.submitted_at
+            if isinstance(raw_answer_path, AssessmentSubmission)
+            else None
+        )
         if (
             paper_id != assessment_paper.paper_id
             or learner_id != assessment_paper.learner_id
@@ -182,6 +212,14 @@ class M8AssessmentService:
             if instance.rubric_id is None:
                 self._raise_answer_error("subjective paper item has no rubric")
             rubric = knowledge_bundle.get_rubric(instance.rubric_id)
+            # M8-01: verify the rubric version matches the frozen paper
+            if (
+                instance.rubric_version is not None
+                and rubric.version != instance.rubric_version
+            ):
+                self._raise_answer_error(
+                    "rubric version mismatch: paper was frozen with a different rubric version"
+                )
             scoring_task_id = (
                 f"scoring_{attempt_id}_{instance.item_instance_id}"
             )
@@ -197,7 +235,7 @@ class M8AssessmentService:
                     student_answer=answer,
                     rubric=rubric,
                     evidence_query_id=evidence_query_id,
-                    created_at=FIXED_TIME,
+                    created_at=self._clock.now(),
                 )
             )
             evidence_queries.append(
@@ -220,7 +258,11 @@ class M8AssessmentService:
             rubric_scoring_tasks=rubric_tasks,
             evidence_queries=evidence_queries,
             raw_answer_checksum=hashlib.sha256(raw_bytes).hexdigest(),
-            prepared_at=FIXED_TIME,
+            prepared_at=self._clock.now(),
+            course_id=assessment_paper.course_id,
+            class_id=assessment_paper.class_id,
+            submission_id=submission_id,
+            submitted_at=submitted_at,
         )
 
     def finalize_scoring(
@@ -264,12 +306,29 @@ class M8AssessmentService:
             result = result_by_id[task.scoring_task_id]
             self._validate_rubric_result(task, result)
             review_reasons = list(result.review_flags)
-            if (
-                result.confidence
-                < task.rubric.review_policy.low_confidence_threshold
-                and "low_confidence" not in review_reasons
+            # M8-05: use ReviewPolicy.needs_review() for dual-scoring disagreement detection
+            # When review_flags carry "dual_scoring_disagreement", the disagreement
+            # is maximal (1.0); in single-scorer mode the default is 0.0.
+            disagreement = (
+                1.0
+                if "dual_scoring_disagreement" in result.review_flags
+                else 0.0
+            )
+            if task.rubric.review_policy.needs_review(
+                result.confidence, disagreement
             ):
-                review_reasons.insert(0, "low_confidence")
+                if (
+                    result.confidence
+                    < task.rubric.review_policy.low_confidence_threshold
+                    and "low_confidence" not in review_reasons
+                ):
+                    review_reasons.insert(0, "low_confidence")
+                if (
+                    disagreement
+                    > task.rubric.review_policy.double_score_disagreement_threshold
+                    and "dual_scoring_disagreement" not in review_reasons
+                ):
+                    review_reasons.append("dual_scoring_disagreement")
             requires_review = bool(review_reasons)
             subjective_audits.append(
                 ScoreAuditRecord(
@@ -280,6 +339,8 @@ class M8AssessmentService:
                     audit_version=1,
                     attempt_id=task.attempt_id,
                     item_instance_id=task.item_instance.item_instance_id,
+                    item_id=task.item_instance.item_id,
+                    item_version=task.item_instance.item_version,
                     criterion_scores=[
                         score.model_copy(deep=True)
                         for score in result.criterion_scores
@@ -322,13 +383,20 @@ class M8AssessmentService:
             [record.max_score for record in audits],
             "scoring maxima must remain finite",
         )
-        course_id, class_id = self._paper_event_context.get(
-            scoring_preparation_result.paper_id,
-            ("course_unavailable", "class_unavailable"),
-        )
+        # M8-07: recover course/class from the frozen preparation, not process memory
+        course_id = scoring_preparation_result.course_id
+        class_id = scoring_preparation_result.class_id
+        # M8-08: include content checksum in event ID to prevent silent collisions
+        content_checksum = hashlib.sha256(
+            json.dumps(
+                {"total_score": total_score, "max_score": max_score},
+                sort_keys=True,
+            ).encode("utf-8")
+        ).hexdigest()[:12]
         event = LearningEvent(
             event_id=(
-                f"event_{scoring_preparation_result.attempt_id}_assessment_scored"
+                f"event_{scoring_preparation_result.attempt_id}_"
+                f"assessment_scored_{content_checksum}"
             ),
             event_type="assessment_scored",
             course_id=course_id,
@@ -343,7 +411,7 @@ class M8AssessmentService:
                     record.needs_review() for record in audits
                 ),
             },
-            occurred_at=FIXED_TIME,
+            occurred_at=self._clock.now(),
         )
         bundle = ScoringResultBundle(
             attempt_id=scoring_preparation_result.attempt_id,
@@ -358,11 +426,11 @@ class M8AssessmentService:
                 based_on_attempt_id=scoring_preparation_result.attempt_id,
                 learner_id=scoring_preparation_result.learner_id,
                 targets=remediation_targets,
-                created_at=FIXED_TIME,
+                created_at=self._clock.now(),
             ),
             total_score=total_score,
             max_score=max_score,
-            finalized_at=FIXED_TIME,
+            finalized_at=self._clock.now(),
         )
         saver = getattr(self._repository, "save_score_audit", None)
         if callable(saver):
