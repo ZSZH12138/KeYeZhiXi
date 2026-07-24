@@ -13,6 +13,7 @@ from course_insight.infrastructure.sqlite.migrations import (
     SCHEMA_VERSION,
     current_schema_version,
     migrate,
+    validate_m0_schema,
 )
 
 
@@ -114,10 +115,16 @@ class SQLiteM0Repository:
             connection.close()
 
     def schema_is_current(self) -> bool:
-        """Check the migration version without returning storage details."""
+        """Check the migration version and M0 storage structure."""
 
         connection = connect_sqlite(self._database_path)
         try:
-            return current_schema_version(connection) == SCHEMA_VERSION
+            if current_schema_version(connection) != SCHEMA_VERSION:
+                return False
+            try:
+                validate_m0_schema(connection)
+            except RuntimeError:
+                return False
+            return True
         finally:
             connection.close()

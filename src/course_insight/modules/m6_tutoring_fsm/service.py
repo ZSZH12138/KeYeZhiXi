@@ -65,6 +65,7 @@ class M6TutoringControlService:
     ) -> TutoringControlResult:
         """Return the unique authoritative action for the supplied M6 inputs."""
 
+        task_plan.assert_module_allowed("M6")
         _validate_cross_contract_references(
             task_plan,
             scoring_result_bundle,

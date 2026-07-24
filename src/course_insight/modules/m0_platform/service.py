@@ -184,7 +184,9 @@ class M0PlatformService:
 
         target = self._snapshot_path(path)
         try:
-            return model_type.from_json_file(target)
+            restored = model_type.from_json_file(target)
+            self._validate_snapshot_payload(restored.to_dict())
+            return restored
         except Exception as error:
             raise DomainError(
                 code="CONFIG_INVALID",

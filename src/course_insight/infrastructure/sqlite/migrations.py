@@ -15,21 +15,22 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
     name TEXT NOT NULL UNIQUE CHECK (length(name) > 0)
 )
 """
-_INITIAL_TABLE_STATEMENTS = (
-    """
-    CREATE TABLE IF NOT EXISTS m0_learning_events (
-        event_id TEXT PRIMARY KEY CHECK (length(event_id) > 0),
-        idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) > 0),
-        event_type TEXT NOT NULL CHECK (length(event_type) > 0),
-        occurred_at TEXT NOT NULL CHECK (length(occurred_at) > 0),
-        payload TEXT NOT NULL CHECK (
-            CASE WHEN json_valid(payload)
-                THEN json(payload) = payload
-                ELSE 0
-            END
-        )
+_M0_LEARNING_EVENTS_SQL = """
+CREATE TABLE IF NOT EXISTS m0_learning_events (
+    event_id TEXT PRIMARY KEY CHECK (length(event_id) > 0),
+    idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) > 0),
+    event_type TEXT NOT NULL CHECK (length(event_type) > 0),
+    occurred_at TEXT NOT NULL CHECK (length(occurred_at) > 0),
+    payload TEXT NOT NULL CHECK (
+        CASE WHEN json_valid(payload)
+            THEN json(payload) = payload
+            ELSE 0
+        END
     )
-    """,
+)
+"""
+_INITIAL_TABLE_STATEMENTS = (
+    _M0_LEARNING_EVENTS_SQL,
     """
     CREATE TABLE IF NOT EXISTS m1_course_packages (
         course_package_id TEXT NOT NULL CHECK (length(course_package_id) > 0),
@@ -163,6 +164,10 @@ CREATE TABLE IF NOT EXISTS m0_event_outbox (
     )
 )
 """
+_M0_SCHEMA_DEFINITIONS = (
+    ("m0_learning_events", _M0_LEARNING_EVENTS_SQL),
+    ("m0_event_outbox", _EVENT_OUTBOX_SQL),
+)
 _M6_DECISION_SQL = """
 CREATE TABLE IF NOT EXISTS m6_tutoring_decisions (
     decision_id TEXT PRIMARY KEY CHECK (length(decision_id) > 0),
@@ -357,13 +362,31 @@ def _normalize_create_table_sql(schema_sql: str) -> str:
     return normalized
 
 
-def _normalized_m6_decision_schema_sql(connection: sqlite3.Connection) -> str:
+def _normalized_table_schema_sql(
+    connection: sqlite3.Connection,
+    table_name: str,
+) -> str:
     row = connection.execute(
         "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
-        ("m6_tutoring_decisions",),
+        (table_name,),
     ).fetchone()
     schema_sql = "" if row is None or row[0] is None else str(row[0])
     return _normalize_create_table_sql(schema_sql)
+
+
+def validate_m0_schema(connection: sqlite3.Connection) -> None:
+    """Reject missing or weakened M0 persistence structures."""
+
+    for table_name, expected_sql in _M0_SCHEMA_DEFINITIONS:
+        if _normalized_table_schema_sql(
+            connection,
+            table_name,
+        ) != _normalize_create_table_sql(expected_sql):
+            raise RuntimeError("M0 schema is incompatible")
+
+
+def _normalized_m6_decision_schema_sql(connection: sqlite3.Connection) -> str:
+    return _normalized_table_schema_sql(connection, "m6_tutoring_decisions")
 
 
 def _validate_m6_decision_schema(connection: sqlite3.Connection) -> None:
@@ -407,6 +430,7 @@ def migrate(connection: sqlite3.Connection) -> None:
                 (2, _OUTBOX_MIGRATION_NAME),
             )
             version = 2
+        validate_m0_schema(connection)
         if version < 3:
             connection.execute(_M6_DECISION_SQL)
             _validate_m6_decision_schema(connection)

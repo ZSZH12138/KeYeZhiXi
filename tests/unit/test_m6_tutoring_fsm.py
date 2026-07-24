@@ -31,6 +31,9 @@ from course_insight.contracts.tutoring import SessionStateSnapshot
 from course_insight.modules.m6_tutoring_fsm.repository import (
     InMemoryM6Repository,
 )
+from course_insight.modules.m6_tutoring_fsm.service import (
+    M6TutoringControlService,
+)
 from course_insight.modules.m6_tutoring_fsm.state_machine import (
     DEFAULT_STATE_MACHINE,
 )
@@ -339,6 +342,35 @@ def _valid_inputs(
             priority_concepts=(concept_id,),
         ),
     )
+
+
+def test_service_rejects_legacy_task_that_omits_m6_before_repository_access(
+) -> None:
+    class TrackingRepository(InMemoryM6Repository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.request_lookup_count = 0
+
+        def get_decision_by_request(self, request_fingerprint: str) -> Any:
+            self.request_lookup_count += 1
+            return super().get_decision_by_request(request_fingerprint)
+
+    task, scoring, state = _valid_inputs()
+    legacy_task = task.model_copy(
+        update={"workflow": ["M8", "M2", "M7", "M5", "M9"]},
+        deep=True,
+    )
+    repository = TrackingRepository()
+    service = M6TutoringControlService(DEFAULT_STATE_MACHINE, repository)
+
+    with pytest.raises(DomainError) as raised:
+        service.decide_next_action(legacy_task, scoring, state, None)
+
+    assert raised.value.code == "MODULE_NOT_ALLOWED"
+    assert raised.value.module == "m4"
+    assert raised.value.details == {"module_name": "M6"}
+    assert repository.request_lookup_count == 0
+    assert repository.get_latest_session_state(legacy_task.session_id) is None
 
 
 def _decision_policy_types() -> tuple[type[Any], type[Any]]:
