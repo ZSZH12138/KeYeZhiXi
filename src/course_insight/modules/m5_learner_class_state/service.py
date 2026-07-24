@@ -232,46 +232,138 @@ class M5StateService:
             created_at=bundle.finalized_at,
         )
 
+    # ── M5-08 DINA 默认参数 ──
+    _DINA_VERSION = "dina_v1_basic"
+
+    # ── M5-09 BKT 默认参数 ──
+    _BKT_VERSION = "bkt_v1_basic"
+    _BKT_P_L0 = 0.1      # 初始掌握概率
+    _BKT_P_T = 0.1       # 学习迁移概率
+    _BKT_P_G = 0.25      # 猜测概率
+    _BKT_P_S = 0.25      # 失误概率
+
     def run_learning_models(
         self,
         observation_batch: LearningObservationBatch,
     ) -> LearningModelRun:
-        """Return empty DINA and BKT outputs for the governed learner batch.
+        """Run basic DINA and BKT estimation over the learner observation batch.
 
         原始输入：M8 评分审计转换得到的 LearningObservationBatch。
         契约来源：learning_models 中的批次、DINA、BKT 与运行契约。
         返回消费者：AppCoordinator、M6 诊断编排和后续模型实现。
-        业务校验：保留学习者、水位和观测计数，不执行估计或伪造概率。
-        错误码：无；当前空实现固定返回 empty。
+        业务校验：无观测时返回 empty；有观测时返回 estimated。
+        错误码：无。
         """
 
-        observation_count = len(observation_batch.observations)
+        observations = observation_batch.observations
+        observation_count = len(observations)
+
+        # 无观测时保持空实现
+        if observation_count == 0:
+            diagnosis = CognitiveDiagnosisResult(
+                run_id=f"dina_empty_{observation_batch.batch_id}",
+                learner_id=observation_batch.learner_id,
+                model_type="DINA",
+                model_version="unconfigured",
+                concept_mastery={},
+                observation_count=0,
+                status="empty",
+                generated_at=observation_batch.created_at,
+            )
+            knowledge_trace = KnowledgeTraceSnapshot(
+                trace_id=f"bkt_empty_{observation_batch.batch_id}",
+                learner_id=observation_batch.learner_id,
+                model_type="BKT",
+                model_version="unconfigured",
+                concept_probabilities={},
+                observation_watermark=observation_batch.watermark,
+                observation_count=0,
+                status="empty",
+                updated_at=observation_batch.created_at,
+            )
+            return LearningModelRun(
+                run_id=f"learning_models_empty_{observation_batch.batch_id}",
+                diagnosis=diagnosis,
+                knowledge_trace=knowledge_trace,
+                observation_count=0,
+                status="empty",
+                created_at=observation_batch.created_at,
+            )
+
+        # ── M5-08: DINA 基础估计 ──
+        # 收集所有概念，计算每个概念的掌握概率
+        # 掌握概率 = 该概念相关题目的得分率平均值
+        concept_scores: dict[str, list[float]] = {}
+        for obs in observations:
+            ratio = obs.score / obs.max_score if obs.max_score > 0 else 0.0
+            for cid in obs.concept_ids:
+                concept_scores.setdefault(cid, []).append(ratio)
+
+        concept_mastery: dict[str, float] = {}
+        for cid, ratios in concept_scores.items():
+            mastery = sum(ratios) / len(ratios)
+            concept_mastery[cid] = max(0.0, min(1.0, mastery))
+
         diagnosis = CognitiveDiagnosisResult(
-            run_id=f"dina_empty_{observation_batch.batch_id}",
+            run_id=f"dina_est_{observation_batch.batch_id}",
             learner_id=observation_batch.learner_id,
             model_type="DINA",
-            model_version="unconfigured",
-            concept_mastery={},
+            model_version=self._DINA_VERSION,
+            concept_mastery=concept_mastery,
             observation_count=observation_count,
-            status="empty",
+            status="estimated",
             generated_at=observation_batch.created_at,
         )
+
+        # ── M5-09: BKT 基础估计 ──
+        # 标准 BKT 四参数模型，按概念分组、按时间顺序更新
+        concept_observations: dict[str, list[LearningObservation]] = {}
+        for obs in observations:
+            for cid in obs.concept_ids:
+                concept_observations.setdefault(cid, []).append(obs)
+
+        concept_probabilities: dict[str, float] = {}
+        for cid, obs_list in concept_observations.items():
+            # 按时间排序保证更新顺序
+            obs_list.sort(key=lambda o: o.occurred_at)
+            p_l = self._BKT_P_L0
+            p_t = self._BKT_P_T
+            p_g = self._BKT_P_G
+            p_s = self._BKT_P_S
+            for obs in obs_list:
+                ratio = obs.score / obs.max_score if obs.max_score > 0 else 0.0
+                is_correct = ratio >= 0.5
+                if is_correct:
+                    # P(L|correct) = P(L)(1-S) / [P(L)(1-S) + (1-L)G]
+                    p_l = (p_l * (1 - p_s)) / (
+                        p_l * (1 - p_s) + (1 - p_l) * p_g
+                    )
+                else:
+                    # P(L|incorrect) = P(L)S / [P(L)S + (1-L)(1-G)]
+                    p_l = (p_l * p_s) / (
+                        p_l * p_s + (1 - p_l) * (1 - p_g)
+                    )
+                # 迁移：P(L_t+1) = P(L|obs) + (1-P(L|obs))T
+                p_l = p_l + (1 - p_l) * p_t
+            concept_probabilities[cid] = max(0.0, min(1.0, p_l))
+
         knowledge_trace = KnowledgeTraceSnapshot(
-            trace_id=f"bkt_empty_{observation_batch.batch_id}",
+            trace_id=f"bkt_est_{observation_batch.batch_id}",
             learner_id=observation_batch.learner_id,
             model_type="BKT",
-            model_version="unconfigured",
-            concept_probabilities={},
+            model_version=self._BKT_VERSION,
+            concept_probabilities=concept_probabilities,
             observation_watermark=observation_batch.watermark,
             observation_count=observation_count,
-            status="empty",
+            status="estimated",
             updated_at=observation_batch.created_at,
         )
+
         return LearningModelRun(
-            run_id=f"learning_models_empty_{observation_batch.batch_id}",
+            run_id=f"learning_models_est_{observation_batch.batch_id}",
             diagnosis=diagnosis,
             knowledge_trace=knowledge_trace,
             observation_count=observation_count,
-            status="empty",
+            status="completed",
             created_at=observation_batch.created_at,
         )
