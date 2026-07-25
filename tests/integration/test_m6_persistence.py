@@ -37,6 +37,9 @@ from course_insight.infrastructure.sqlite import (
     current_schema_version,
     migrate,
 )
+from course_insight.infrastructure.sqlite.outbox_migration import (
+    LEGACY_OUTBOX_SQL,
+)
 from course_insight.modules.m6_tutoring_fsm.service import (
     M6TutoringControlService,
 )
@@ -275,15 +278,15 @@ def test_migration_v3_creates_m6_decision_table_with_required_keys(
         migrate(connection)
         migrate(connection)
 
-        assert SCHEMA_VERSION == 3
-        assert current_schema_version(connection) == 3
+        assert SCHEMA_VERSION == 9
+        assert current_schema_version(connection) == SCHEMA_VERSION
         versions = [
             int(row[0])
             for row in connection.execute(
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
         ]
-        assert versions == [1, 2, 3]
+        assert versions == list(range(1, SCHEMA_VERSION + 1))
 
         columns = {
             str(row["name"]): row
@@ -346,7 +349,9 @@ def test_migration_rejects_incompatible_existing_m6_decision_table(
     with connect_sqlite(database_path) as connection:
         migrate(connection)
         connection.execute("DROP TABLE m6_tutoring_decisions")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 3")
+        connection.execute("DROP TABLE m0_event_outbox")
+        connection.execute(LEGACY_OUTBOX_SQL)
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 3")
         connection.execute(
             """
             CREATE TABLE m6_tutoring_decisions (
@@ -385,7 +390,7 @@ def test_migration_revalidates_v3_schema_on_every_startup(tmp_path: Path) -> Non
         with pytest.raises(RuntimeError, match="M6 decision schema is incompatible"):
             migrate(connection)
 
-        assert current_schema_version(connection) == 3
+        assert current_schema_version(connection) == SCHEMA_VERSION
 
 
 @pytest.mark.parametrize(

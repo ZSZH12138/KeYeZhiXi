@@ -1,0 +1,8 @@
+{
+  "minimum_coverage": 1.0,
+  "minimum_assessed_count": 1,
+  "minimum_confidence": 0.5,
+  "weak_mastery_threshold": 0.8,
+  "misconception_threshold": 0.5,
+  "priority_support_threshold": 0.5
+}

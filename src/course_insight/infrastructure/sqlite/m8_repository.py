@@ -1,0 +1,426 @@
+"""SQLite persistence for M8 papers, scope, audits, and scoring bundles."""
+
+from __future__ import annotations
+
+import sqlite3
+from datetime import timezone
+from pathlib import Path
+
+from course_insight.contracts.assessment import (
+    AssessmentPaper,
+    ScoreAuditRecord,
+    ScoringResultBundle,
+)
+from course_insight.infrastructure.json_io import dumps_json
+from course_insight.infrastructure.sqlite.connection import connect_sqlite
+from course_insight.infrastructure.sqlite.migrations import migrate
+
+
+class SQLiteM8Repository:
+    """Persist M8-owned recovery objects without exposing SQLite rows."""
+
+    def __init__(self, database_path: Path) -> None:
+        self._database_path = database_path
+
+    def initialize(self) -> None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            migrate(connection)
+        finally:
+            connection.close()
+
+    def insert_or_get_paper(
+        self,
+        paper: AssessmentPaper,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> AssessmentPaper:
+        if not course_id.strip() or not class_id.strip():
+            raise ValueError("M8 paper execution scope must not be blank")
+        payload = dumps_json(paper.to_dict())
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO m8_assessment_papers(
+                    paper_id,
+                    task_id,
+                    course_id,
+                    class_id,
+                    learner_id,
+                    payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    paper.paper_id,
+                    paper.task_id,
+                    course_id,
+                    class_id,
+                    paper.learner_id,
+                    payload,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT
+                    paper_id,
+                    task_id,
+                    course_id,
+                    class_id,
+                    learner_id,
+                    payload
+                FROM m8_assessment_papers
+                WHERE paper_id = ? OR task_id = ?
+                ORDER BY CASE WHEN paper_id = ? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (paper.paper_id, paper.task_id, paper.paper_id),
+            ).fetchone()
+            stored = self._paper_from_row(row)
+            stored_scope = (str(row["course_id"]), str(row["class_id"]))
+            if stored != paper or stored_scope != (course_id, class_id):
+                raise RuntimeError("M8 paper identity or scope conflict")
+            connection.execute("COMMIT")
+            return stored.model_copy(deep=True)
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def save_paper(self, paper: AssessmentPaper) -> None:
+        context = self.get_paper_execution_context(paper.paper_id)
+        if context is None:
+            raise ValueError(
+                "M8 paper persistence requires course and class execution scope"
+            )
+        self.insert_or_get_paper(
+            paper,
+            course_id=context[0],
+            class_id=context[1],
+        )
+
+    def get_paper(self, paper_id: str) -> AssessmentPaper | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT
+                    paper_id,
+                    task_id,
+                    course_id,
+                    class_id,
+                    learner_id,
+                    payload
+                FROM m8_assessment_papers
+                WHERE paper_id = ?
+                """,
+                (paper_id,),
+            ).fetchone()
+            return (
+                None
+                if row is None
+                else self._paper_from_row(row).model_copy(deep=True)
+            )
+        finally:
+            connection.close()
+
+    def get_paper_execution_context(
+        self,
+        paper_id: str,
+    ) -> tuple[str, str] | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT course_id, class_id
+                FROM m8_assessment_papers
+                WHERE paper_id = ?
+                """,
+                (paper_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            return (str(row["course_id"]), str(row["class_id"]))
+        finally:
+            connection.close()
+
+    def save_score_audit(self, record: ScoreAuditRecord) -> None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            self._insert_or_validate_audit(connection, record)
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def get_score_audit(
+        self,
+        audit_id: str,
+        audit_version: int,
+    ) -> ScoreAuditRecord | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT audit_id, audit_version, item_instance_id, payload
+                FROM m8_score_audits
+                WHERE audit_id = ? AND audit_version = ?
+                """,
+                (audit_id, audit_version),
+            ).fetchone()
+            return (
+                None
+                if row is None
+                else self._audit_from_row(row).model_copy(deep=True)
+            )
+        finally:
+            connection.close()
+
+    def insert_or_get_scoring_result(
+        self,
+        bundle: ScoringResultBundle,
+    ) -> ScoringResultBundle:
+        bundle.validate_business_rules()
+        result_key = self._result_key(bundle)
+        payload = dumps_json(bundle.to_dict())
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for record in bundle.score_audit_records:
+                self._insert_or_validate_audit(connection, record)
+            connection.execute(
+                """
+                INSERT INTO m8_scoring_results(
+                    attempt_id,
+                    result_key,
+                    paper_id,
+                    learner_id,
+                    finalized_at,
+                    payload
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(attempt_id, result_key) DO NOTHING
+                """,
+                (
+                    bundle.attempt_id,
+                    result_key,
+                    bundle.paper_id,
+                    bundle.learner_id,
+                    bundle.finalized_at.astimezone(timezone.utc).isoformat(),
+                    payload,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT
+                    attempt_id,
+                    result_key,
+                    paper_id,
+                    learner_id,
+                    finalized_at,
+                    payload
+                FROM m8_scoring_results
+                WHERE attempt_id = ? AND result_key = ?
+                """,
+                (bundle.attempt_id, result_key),
+            ).fetchone()
+            stored = self._scoring_from_row(row)
+            if stored != bundle:
+                raise RuntimeError(
+                    "M8 scoring-result conflict for the same attempt version"
+                )
+            connection.execute("COMMIT")
+            return stored.model_copy(deep=True)
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def save_scoring_result(self, bundle: ScoringResultBundle) -> None:
+        self.insert_or_get_scoring_result(bundle)
+
+    def get_scoring_result(
+        self,
+        attempt_id: str,
+    ) -> ScoringResultBundle | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT
+                    attempt_id,
+                    result_key,
+                    paper_id,
+                    learner_id,
+                    finalized_at,
+                    payload
+                FROM m8_scoring_results
+                WHERE attempt_id = ?
+                ORDER BY finalized_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (attempt_id,),
+            ).fetchone()
+            return (
+                None
+                if row is None
+                else self._scoring_from_row(row).model_copy(deep=True)
+            )
+        finally:
+            connection.close()
+
+    def get_scoring_result_by_checksum(
+        self,
+        attempt_id: str,
+        checksum: str,
+    ) -> ScoringResultBundle | None:
+        for bundle in self._scoring_history(attempt_id):
+            if bundle.content_checksum() == checksum:
+                return bundle.model_copy(deep=True)
+        return None
+
+    def get_scoring_result_for_audit(
+        self,
+        attempt_id: str,
+        audit_id: str,
+        audit_version: int,
+    ) -> ScoringResultBundle | None:
+        for bundle in self._scoring_history(attempt_id):
+            if any(
+                record.audit_id == audit_id
+                and record.audit_version == audit_version
+                for record in bundle.score_audit_records
+            ):
+                return bundle.model_copy(deep=True)
+        return None
+
+    def _scoring_history(
+        self,
+        attempt_id: str,
+    ) -> list[ScoringResultBundle]:
+        connection = connect_sqlite(self._database_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT
+                    attempt_id,
+                    result_key,
+                    paper_id,
+                    learner_id,
+                    finalized_at,
+                    payload
+                FROM m8_scoring_results
+                WHERE attempt_id = ?
+                ORDER BY finalized_at ASC, rowid ASC
+                """,
+                (attempt_id,),
+            ).fetchall()
+            return [self._scoring_from_row(row) for row in rows]
+        finally:
+            connection.close()
+
+    @staticmethod
+    def _result_key(bundle: ScoringResultBundle) -> str:
+        latest_versions: dict[str, int] = {}
+        for record in bundle.score_audit_records:
+            latest_versions = {
+                **latest_versions,
+                record.audit_id: max(
+                    record.audit_version,
+                    latest_versions.get(record.audit_id, 0),
+                ),
+            }
+        return dumps_json(
+            [
+                {"audit_id": audit_id, "audit_version": audit_version}
+                for audit_id, audit_version in sorted(latest_versions.items())
+            ]
+        )
+
+    @staticmethod
+    def _insert_or_validate_audit(
+        connection: sqlite3.Connection,
+        record: ScoreAuditRecord,
+    ) -> None:
+        payload = dumps_json(record.to_dict())
+        connection.execute(
+            """
+            INSERT INTO m8_score_audits(
+                audit_id,
+                audit_version,
+                item_instance_id,
+                payload
+            )
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(audit_id, audit_version) DO NOTHING
+            """,
+            (
+                record.audit_id,
+                record.audit_version,
+                record.item_instance_id,
+                payload,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT audit_id, audit_version, item_instance_id, payload
+            FROM m8_score_audits
+            WHERE audit_id = ? AND audit_version = ?
+            """,
+            (record.audit_id, record.audit_version),
+        ).fetchone()
+        if SQLiteM8Repository._audit_from_row(row) != record:
+            raise RuntimeError("M8 score-audit version conflict")
+
+    @staticmethod
+    def _paper_from_row(row: sqlite3.Row | None) -> AssessmentPaper:
+        if row is None:
+            raise RuntimeError("M8 paper insert produced no row")
+        paper = AssessmentPaper.model_validate_json(str(row["payload"]))
+        if (
+            paper.paper_id != str(row["paper_id"])
+            or paper.task_id != str(row["task_id"])
+            or paper.learner_id != str(row["learner_id"])
+        ):
+            raise RuntimeError("M8 paper row identity mismatch")
+        return paper
+
+    @staticmethod
+    def _audit_from_row(row: sqlite3.Row | None) -> ScoreAuditRecord:
+        if row is None:
+            raise RuntimeError("M8 score-audit insert produced no row")
+        record = ScoreAuditRecord.model_validate_json(str(row["payload"]))
+        if (
+            record.audit_id != str(row["audit_id"])
+            or record.audit_version != int(row["audit_version"])
+            or record.item_instance_id != str(row["item_instance_id"])
+        ):
+            raise RuntimeError("M8 score-audit row identity mismatch")
+        return record
+
+    @staticmethod
+    def _scoring_from_row(row: sqlite3.Row | None) -> ScoringResultBundle:
+        if row is None:
+            raise RuntimeError("M8 scoring-result insert produced no row")
+        bundle = ScoringResultBundle.model_validate_json(str(row["payload"]))
+        if (
+            bundle.attempt_id != str(row["attempt_id"])
+            or bundle.paper_id != str(row["paper_id"])
+            or bundle.learner_id != str(row["learner_id"])
+            or SQLiteM8Repository._result_key(bundle)
+            != str(row["result_key"])
+        ):
+            raise RuntimeError("M8 scoring-result row identity mismatch")
+        return bundle

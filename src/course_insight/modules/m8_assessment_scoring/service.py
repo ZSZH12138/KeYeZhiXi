@@ -38,9 +38,10 @@ from course_insight.contracts.state import DiagnosisResult, LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m8_assessment_scoring.paper_generator import FIXED_TIME
 from course_insight.modules.m8_assessment_scoring.repository import M8Repository
+from course_insight.modules.m8_assessment_scoring.recovery import M8HistoricalRecoveryMixin
 
 
-class M8AssessmentService:
+class M8AssessmentService(M8HistoricalRecoveryMixin):
     """Generate papers, score attempts, and retain audit history."""
 
     def __init__(
@@ -89,10 +90,56 @@ class M8AssessmentService:
             **self._paper_event_context,
             paper.paper_id: (task_plan.course_id, task_plan.class_id),
         }
+        insert_or_get = getattr(self._repository, "insert_or_get_paper", None)
+        if callable(insert_or_get):
+            authoritative = insert_or_get(
+                paper.model_copy(deep=True),
+                course_id=task_plan.course_id,
+                class_id=task_plan.class_id,
+            )
+            if authoritative != paper:
+                raise RuntimeError("M8 persisted paper conflicts with result")
+            return authoritative.model_copy(deep=True)
         saver = getattr(self._repository, "save_paper", None)
         if callable(saver):
             saver(paper.model_copy(deep=True))
         return paper
+
+    def get_paper(self, paper_id: str) -> AssessmentPaper | None:
+        """Recover a frozen paper and its internal execution scope."""
+
+        getter = getattr(self._repository, "get_paper", None)
+        if not callable(getter):
+            return None
+        paper = getter(paper_id)
+        if paper is None:
+            return None
+        context_getter = getattr(
+            self._repository,
+            "get_paper_execution_context",
+            None,
+        )
+        if callable(context_getter):
+            context = context_getter(paper_id)
+            if context is None:
+                raise RuntimeError("M8 persisted paper has no execution scope")
+            self._paper_event_context = {
+                **self._paper_event_context,
+                paper_id: context,
+            }
+        return paper.model_copy(deep=True)
+
+    def get_scoring_result(
+        self,
+        attempt_id: str,
+    ) -> ScoringResultBundle | None:
+        """Recover the latest complete scoring bundle for an attempt."""
+
+        getter = getattr(self._repository, "get_scoring_result", None)
+        if not callable(getter):
+            return None
+        bundle = getter(attempt_id)
+        return None if bundle is None else bundle.model_copy(deep=True)
 
     def prepare_scoring(
         self,
@@ -322,9 +369,8 @@ class M8AssessmentService:
             [record.max_score for record in audits],
             "scoring maxima must remain finite",
         )
-        course_id, class_id = self._paper_event_context.get(
-            scoring_preparation_result.paper_id,
-            ("course_unavailable", "class_unavailable"),
+        course_id, class_id = self._event_context(
+            scoring_preparation_result.paper_id
         )
         event = LearningEvent(
             event_id=(
@@ -364,11 +410,7 @@ class M8AssessmentService:
             max_score=max_score,
             finalized_at=FIXED_TIME,
         )
-        saver = getattr(self._repository, "save_score_audit", None)
-        if callable(saver):
-            for record in bundle.score_audit_records:
-                saver(record.model_copy(deep=True))
-        return bundle
+        return self._persist_scoring_result(bundle)
 
     def apply_teacher_review(
         self,
@@ -444,12 +486,20 @@ class M8AssessmentService:
             **current_scoring_result_bundle.model_dump(mode="python")
         )
         reviewed_bundle.replace_audit_record(replacement)
-        if reviewed_bundle.learning_events:
+        if reviewed_bundle.learning_events and all(
+            "unavailable" not in value
+            for value in (
+                reviewed_bundle.learning_events[-1].course_id,
+                reviewed_bundle.learning_events[-1].class_id,
+            )
+        ):
             context_event = reviewed_bundle.learning_events[-1]
             course_id = context_event.course_id
             class_id = context_event.class_id
         else:
-            course_id, class_id = ("course_unavailable", "class_unavailable")
+            course_id, class_id = self._event_context(
+                reviewed_bundle.paper_id
+            )
         review_event = LearningEvent(
             event_id=(
                 f"event_{teacher_review_decision.decision_id}_"
@@ -478,10 +528,61 @@ class M8AssessmentService:
                 "finalized_at": teacher_review_decision.reviewed_at,
             }
         )
+        return self._persist_scoring_result(finalized)
+
+    def _event_context(self, paper_id: str) -> tuple[str, str]:
+        context = self._paper_event_context.get(paper_id)
+        if context is not None:
+            return context
+        getter = getattr(
+            self._repository,
+            "get_paper_execution_context",
+            None,
+        )
+        if callable(getter):
+            context = getter(paper_id)
+            if context is None:
+                raise DomainError(
+                    code="PAPER_CONTEXT_MISSING",
+                    module="m8",
+                    message="paper execution scope is unavailable",
+                    details={"paper_id": paper_id},
+                    recoverable=True,
+                )
+            self._paper_event_context = {
+                **self._paper_event_context,
+                paper_id: context,
+            }
+            return context
+        raise DomainError(
+            code="PAPER_CONTEXT_MISSING",
+            module="m8",
+            message="paper execution scope is unavailable",
+            details={"paper_id": paper_id},
+            recoverable=True,
+        )
+
+    def _persist_scoring_result(
+        self,
+        bundle: ScoringResultBundle,
+    ) -> ScoringResultBundle:
+        insert_or_get = getattr(
+            self._repository,
+            "insert_or_get_scoring_result",
+            None,
+        )
+        if callable(insert_or_get):
+            authoritative = insert_or_get(bundle.model_copy(deep=True))
+            if authoritative != bundle:
+                raise RuntimeError(
+                    "M8 persisted scoring result conflicts with result"
+                )
+            return authoritative.model_copy(deep=True)
         saver = getattr(self._repository, "save_score_audit", None)
         if callable(saver):
-            saver(replacement.model_copy(deep=True))
-        return finalized
+            for record in bundle.score_audit_records:
+                saver(record.model_copy(deep=True))
+        return bundle
 
     def calibrate_irt(
         self,

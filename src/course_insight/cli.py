@@ -8,23 +8,38 @@ import sys
 from pathlib import Path
 from typing import Sequence
 
+from course_insight.application.factory import build_application
 from course_insight.contracts.errors import DomainError
-from course_insight.modules.m0_platform import M0PlatformService
+from course_insight.infrastructure.config import (
+    ConfigurationError,
+    load_platform_settings,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
-def _run_init(runtime_dir: Path) -> int:
+def _run_init(
+    runtime_dir: Path,
+    *,
+    dotenv_path: Path | None = None,
+) -> int:
     """Initialize local platform storage and print its component status."""
 
-    service = M0PlatformService(
-        database_path=runtime_dir / "course_insight.sqlite3",
-        runtime_dir=runtime_dir,
-        config_dir=PROJECT_ROOT / "config",
+    settings = load_platform_settings(
+        project_root=PROJECT_ROOT,
+        dotenv_path=dotenv_path,
+        overrides={
+            "runtime_dir": runtime_dir,
+            "database": {
+                "sqlite_path": runtime_dir / "course_insight.sqlite3",
+            },
+            "logging": {"directory": runtime_dir / "logs"},
+        },
     )
-    service.initialize()
-    print(json.dumps(service.health_check(), sort_keys=True))
+    container = build_application(settings)
+    container.m0_service.initialize()
+    print(json.dumps(container.m0_service.health_check(), sort_keys=True))
     return 0
 
 
@@ -45,6 +60,12 @@ def _parser() -> argparse.ArgumentParser:
         type=Path,
         default=PROJECT_ROOT / "runtime" / "local",
     )
+    init_command.add_argument(
+        "--dotenv",
+        type=Path,
+        default=None,
+        help="explicit project-root .env path",
+    )
     subcommands.add_parser("export-schemas")
     return parser
 
@@ -55,10 +76,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = _parser().parse_args(argv)
     try:
         if args.command == "init":
-            return _run_init(args.runtime_dir)
+            return _run_init(args.runtime_dir, dotenv_path=args.dotenv)
         return _run_export_schemas()
     except DomainError as error:
         print(f"{error.module}:{error.code}: {error.message}", file=sys.stderr)
+        return 1
+    except ConfigurationError as error:
+        print(f"configuration:{error.code}: invalid settings", file=sys.stderr)
         return 1
     except Exception as error:
         print(f"command failed safely: {type(error).__name__}", file=sys.stderr)

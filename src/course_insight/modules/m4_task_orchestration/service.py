@@ -112,6 +112,19 @@ class M4TaskOrchestrationService:
         self._assert_authoritative_plan(plan, authoritative)
         return authoritative.model_copy(deep=True)
 
+    def get_task_plan(self, task_id: str) -> TaskPlan | None:
+        """Recover a previously created task plan by stable identity."""
+
+        getter = getattr(self._repository, "get_task_plan", None)
+        if not callable(getter):
+            return None
+        plan = getter(task_id)
+        if plan is None:
+            return None
+        if not isinstance(plan, TaskPlan) or plan.task_id != task_id:
+            raise RuntimeError("M4 persisted task plan is corrupt")
+        return plan.model_copy(deep=True)
+
     def _created_at(self) -> datetime:
         return datetime.now(timezone.utc)
 

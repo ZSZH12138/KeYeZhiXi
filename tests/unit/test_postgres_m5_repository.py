@@ -1,0 +1,517 @@
+from __future__ import annotations
+
+from typing import Any
+
+import psycopg
+import pytest
+from psycopg.types.json import Jsonb
+
+from course_insight.infrastructure.postgresql.base import (
+    PostgresConnectionError,
+    PostgresOperationError,
+)
+from tests.integration.test_web_workflow_persistence import _state_result
+from tests.unit._postgres_repository_fakes import (
+    FailingPool,
+    FakeConnection,
+    FakePool,
+)
+
+try:
+    from course_insight.infrastructure.postgresql.m5_repository import (
+        PostgresM5Repository,
+    )
+except ModuleNotFoundError:
+    PostgresM5Repository = None  # type: ignore[assignment,misc]
+
+
+def _contract_columns(contract: Any) -> dict[str, Any]:
+    return {
+        "payload": contract.to_dict(),
+        "payload_checksum": contract.content_checksum(),
+        "schema_version": contract.schema_version,
+    }
+
+
+def _learner_row(result: Any) -> dict[str, Any]:
+    learner = result.learner_state_snapshot
+    return {
+        "snapshot_id": learner.snapshot_id,
+        "course_id": learner.course_id,
+        "class_id": learner.class_id,
+        "learner_id": learner.learner_id,
+        "state_version": learner.state_version,
+        **_contract_columns(learner),
+    }
+
+
+def _class_row(result: Any, *, state_version: int) -> dict[str, Any]:
+    snapshot = result.class_state_snapshot
+    return {
+        "snapshot_id": snapshot.snapshot_id,
+        "course_id": snapshot.course_id,
+        "class_id": snapshot.class_id,
+        "state_version": state_version,
+        "aggregation_policy_version": snapshot.aggregation_policy_version,
+        **_contract_columns(snapshot),
+    }
+
+
+def _update_row(result: Any) -> dict[str, Any]:
+    learner = result.learner_state_snapshot
+    return {
+        "attempt_id": result.diagnosis_result.attempt_id,
+        "course_id": learner.course_id,
+        "class_id": learner.class_id,
+        "learner_id": learner.learner_id,
+        "state_version": learner.state_version,
+        **_contract_columns(result),
+    }
+
+
+def _responder_for(result: Any):
+    def respond(statement: str, _: tuple[Any, ...]):
+        normalized = " ".join(statement.lower().split())
+        if "pg_advisory_xact_lock" in normalized:
+            return {"locked": None}
+        if "from m5_learner_states" in normalized:
+            return _learner_row(result)
+        if "from m5_class_states" in normalized:
+            return _class_row(result, state_version=1)
+        if "from m5_state_updates" in normalized:
+            return _update_row(result)
+        return None
+
+    return respond
+
+
+def test_postgres_m5_repository_module_exists() -> None:
+    assert PostgresM5Repository is not None
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_implements_complete_protocol_and_serializes_contracts() -> None:
+    result = _state_result(
+        attempt_id="attempt_1",
+        course_id="course_1",
+        class_id="class_1",
+        state_version=1,
+    )
+    connection = FakeConnection(_responder_for(result))
+    repository = PostgresM5Repository(FakePool(connection))
+
+    assert repository.insert_or_get_state_update(result) == result
+    repository.save_state_update(result.model_copy(deep=True))
+    repository.save_learner_state(result.learner_state_snapshot)
+    repository.save_class_state(result.class_state_snapshot)
+    assert repository.get_learner_state("learner_1", 1) == (
+        result.learner_state_snapshot
+    )
+    assert repository.get_class_state(
+        result.class_state_snapshot.snapshot_id
+    ) == result.class_state_snapshot
+    assert repository.get_state_update("attempt_1") == result
+    assert repository.get_state_update_result("attempt_1") == result
+    assert repository.get_state_update_version("attempt_1", 1) == result
+    assert repository.get_state_update_for_audit(
+        "attempt_1",
+        "audit_attempt_1",
+        1,
+    ) == result
+    assert repository.get_latest_learner_state(
+        "course_1",
+        "class_1",
+        "learner_1",
+    ) == result.learner_state_snapshot
+    assert repository.get_latest_class_state(
+        "course_1",
+        "class_1",
+    ) == result.class_state_snapshot
+    assert repository.get_processed_audit_ids(
+        "course_1",
+        "class_1",
+        "learner_1",
+    ) == frozenset(result.processed_audit_ids)
+
+    insert_parameters = next(
+        parameters
+        for statement, parameters in connection.executions
+        if "INSERT INTO m5_state_updates" in statement
+    )
+    payload = next(
+        parameter
+        for parameter in insert_parameters
+        if isinstance(parameter, Jsonb)
+    )
+    assert payload.obj == result.to_dict()
+    assert result.content_checksum() in insert_parameters
+    assert result.schema_version in insert_parameters
+    assert connection.transaction_entries >= 3
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_legacy_scope_lookup_fails_closed_when_ambiguous() -> None:
+    first = _state_result(
+        attempt_id="attempt_1",
+        course_id="course_1",
+        class_id="shared_class",
+        state_version=1,
+    )
+    second = _state_result(
+        attempt_id="attempt_2",
+        course_id="course_2",
+        class_id="shared_class",
+        state_version=1,
+    )
+
+    def respond(statement: str, _: tuple[Any, ...]):
+        if "FROM m5_learner_states" in statement:
+            return [_learner_row(first), _learner_row(second)]
+        return None
+
+    repository = PostgresM5Repository(
+        FakePool(FakeConnection(respond))
+    )
+
+    with pytest.raises(RuntimeError, match="ambiguous across courses"):
+        repository.get_learner_state("learner_1", 1)
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_exact_state_reads_use_complete_scope_and_version() -> None:
+    result = _state_result(
+        attempt_id="attempt_1",
+        course_id="course_1",
+        class_id="class_1",
+        state_version=3,
+    )
+
+    def respond(statement: str, parameters: tuple[Any, ...]):
+        normalized = " ".join(statement.lower().split())
+        if "from m5_learner_states" in normalized:
+            if parameters == ("course_1", "class_1", "learner_1", 3):
+                return _learner_row(result)
+            return None
+        if "from m5_class_states" in normalized:
+            if parameters == ("course_1", "class_1", 3):
+                return _class_row(result, state_version=3)
+            return None
+        return None
+
+    connection = FakeConnection(respond)
+    repository = PostgresM5Repository(FakePool(connection))
+
+    assert repository.get_learner_state_exact(
+        "course_1",
+        "class_1",
+        "learner_1",
+        3,
+    ) == result.learner_state_snapshot
+    assert repository.get_class_state_exact(
+        "course_1",
+        "class_1",
+        3,
+    ) == result.class_state_snapshot
+    assert repository.get_learner_state_exact(
+        "course_missing",
+        "class_1",
+        "learner_1",
+        3,
+    ) is None
+    assert repository.get_class_state_exact(
+        "course_missing",
+        "class_1",
+        3,
+    ) is None
+
+    learner_statement, learner_parameters = connection.executions[0]
+    class_statement, class_parameters = connection.executions[1]
+    assert "course_id = %s" in learner_statement
+    assert "class_id = %s" in learner_statement
+    assert "learner_id = %s" in learner_statement
+    assert "state_version = %s" in learner_statement
+    assert learner_parameters == ("course_1", "class_1", "learner_1", 3)
+    assert "course_id = %s" in class_statement
+    assert "class_id = %s" in class_statement
+    assert "state_version = %s" in class_statement
+    assert class_parameters == ("course_1", "class_1", 3)
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_class_identity_read_uses_complete_scope() -> None:
+    first = _state_result(
+        attempt_id="attempt_course_1",
+        course_id="course_1",
+        class_id="shared_class",
+        state_version=1,
+    )
+    second = _state_result(
+        attempt_id="attempt_course_2",
+        course_id="course_2",
+        class_id="shared_class",
+        state_version=1,
+    )
+    shared_snapshot_id = "shared_class_state_v1"
+    first_class = first.class_state_snapshot.model_copy(
+        update={"snapshot_id": shared_snapshot_id},
+        deep=True,
+    )
+    second_class = second.class_state_snapshot.model_copy(
+        update={"snapshot_id": shared_snapshot_id},
+        deep=True,
+    )
+    first_result = first.model_copy(
+        update={"class_state_snapshot": first_class},
+        deep=True,
+    )
+    second_result = second.model_copy(
+        update={"class_state_snapshot": second_class},
+        deep=True,
+    )
+
+    def respond(_: str, parameters: tuple[Any, ...]):
+        if parameters == ("course_1", "shared_class", shared_snapshot_id):
+            return _class_row(first_result, state_version=1)
+        if parameters == ("course_2", "shared_class", shared_snapshot_id):
+            return _class_row(second_result, state_version=1)
+        return None
+
+    connection = FakeConnection(respond)
+    repository = PostgresM5Repository(FakePool(connection))
+
+    assert repository.get_class_state_by_identity(
+        "course_1",
+        "shared_class",
+        shared_snapshot_id,
+    ) == first_class
+    assert repository.get_class_state_by_identity(
+        "course_2",
+        "shared_class",
+        shared_snapshot_id,
+    ) == second_class
+    assert repository.get_class_state_by_identity(
+        "course_missing",
+        "shared_class",
+        shared_snapshot_id,
+    ) is None
+    statement, parameters = connection.executions[0]
+    assert "course_id = %s" in statement
+    assert "class_id = %s" in statement
+    assert "snapshot_id = %s" in statement
+    assert parameters == ("course_1", "shared_class", shared_snapshot_id)
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_rejects_checksum_and_insert_or_get_conflicts() -> None:
+    result = _state_result(
+        attempt_id="attempt_1",
+        course_id="course_1",
+        class_id="class_1",
+        state_version=1,
+    )
+
+    def corrupt_checksum(statement: str, parameters: tuple[Any, ...]):
+        response = _responder_for(result)(statement, parameters)
+        if (
+            isinstance(response, dict)
+            and "FROM m5_state_updates" in statement
+        ):
+            return {**response, "payload_checksum": "0" * 64}
+        return response
+
+    repository = PostgresM5Repository(
+        FakePool(FakeConnection(corrupt_checksum))
+    )
+    with pytest.raises(RuntimeError, match="checksum"):
+        repository.get_state_update("attempt_1")
+
+    conflicting = result.model_copy(
+        update={"updated_at": result.updated_at.replace(hour=9)}
+    )
+    conflict_repository = PostgresM5Repository(
+        FakePool(FakeConnection(_responder_for(result)))
+    )
+    with pytest.raises(RuntimeError, match="conflict"):
+        conflict_repository.insert_or_get_state_update(conflicting)
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_allocates_first_class_version_under_advisory_lock() -> None:
+    result = _state_result(
+        attempt_id="attempt_1",
+        course_id="course_1",
+        class_id="class_1",
+        state_version=1,
+    )
+    class_reads = 0
+
+    def respond(statement: str, _: tuple[Any, ...]):
+        nonlocal class_reads
+        normalized = " ".join(statement.lower().split())
+        if "pg_advisory_xact_lock" in normalized:
+            return {"locked": None}
+        if "select coalesce(max(state_version)" in normalized:
+            return {"next_version": 1}
+        if "from m5_class_states" in normalized:
+            class_reads += 1
+            if class_reads == 1:
+                return None
+            return _class_row(result, state_version=1)
+        return None
+
+    connection = FakeConnection(respond)
+    repository = PostgresM5Repository(FakePool(connection))
+
+    repository.save_class_state(result.class_state_snapshot)
+
+    insert_parameters = next(
+        parameters
+        for statement, parameters in connection.executions
+        if "INSERT INTO m5_class_states" in statement
+    )
+    assert 1 in insert_parameters
+    assert result.class_state_snapshot.content_checksum() in insert_parameters
+    assert any(
+        "pg_advisory_xact_lock" in statement
+        for statement, _ in connection.executions
+    )
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_empty_recovery_and_safe_database_errors() -> None:
+    repository = PostgresM5Repository(
+        FakePool(FakeConnection(lambda _statement, _parameters: None))
+    )
+
+    assert repository.get_state_update("missing") is None
+    assert repository.get_state_update_version("missing", 1) is None
+    assert repository.get_state_update_for_audit(
+        "missing",
+        "audit_missing",
+        1,
+    ) is None
+    assert repository.get_learner_state("missing", 1) is None
+    assert repository.get_latest_learner_state(
+        "course_1",
+        "class_1",
+        "missing",
+    ) is None
+    assert repository.get_class_state("missing") is None
+    assert repository.get_latest_class_state("course_1", "class_1") is None
+    assert repository.get_processed_audit_ids(
+        "course_1",
+        "class_1",
+        "missing",
+    ) == frozenset()
+
+    connection_error = PostgresConnectionError("database unavailable")
+    failing_repository = PostgresM5Repository(FailingPool(connection_error))
+    with pytest.raises(PostgresConnectionError) as captured:
+        failing_repository.get_state_update("attempt_1")
+    assert captured.value is connection_error
+
+    def fail_operation(
+        _statement: str,
+        _parameters: tuple[Any, ...],
+    ):
+        raise psycopg.DataError("private SQL detail")
+
+    unsafe_repository = PostgresM5Repository(
+        FakePool(FakeConnection(fail_operation))
+    )
+    with pytest.raises(
+        PostgresOperationError,
+        match="PostgreSQL repository operation failed",
+    ) as operation:
+        unsafe_repository.get_state_update("attempt_1")
+    assert operation.value.__cause__ is None
+    assert "private SQL detail" not in str(operation.value)
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_sanitizes_database_errors_across_protocol_methods() -> None:
+    result = _state_result(
+        attempt_id="attempt_1",
+        course_id="course_1",
+        class_id="class_1",
+        state_version=1,
+    )
+
+    def fail_operation(
+        _statement: str,
+        _parameters: tuple[Any, ...],
+    ):
+        raise psycopg.DataError("private SQL detail")
+
+    operations = (
+        lambda repository: repository.insert_or_get_state_update(result),
+        lambda repository: repository.get_state_update_version(
+            "attempt_1",
+            1,
+        ),
+        lambda repository: repository.get_state_update_for_audit(
+            "attempt_1",
+            "audit_attempt_1",
+            1,
+        ),
+        lambda repository: repository.save_learner_state(
+            result.learner_state_snapshot
+        ),
+        lambda repository: repository.get_learner_state("learner_1", 1),
+        lambda repository: repository.get_latest_learner_state(
+            "course_1",
+            "class_1",
+            "learner_1",
+        ),
+        lambda repository: repository.save_class_state(
+            result.class_state_snapshot
+        ),
+        lambda repository: repository.get_class_state(
+            result.class_state_snapshot.snapshot_id
+        ),
+        lambda repository: repository.get_latest_class_state(
+            "course_1",
+            "class_1",
+        ),
+        lambda repository: repository.get_processed_audit_ids(
+            "course_1",
+            "class_1",
+            "learner_1",
+        ),
+    )
+
+    for invoke in operations:
+        repository = PostgresM5Repository(
+            FakePool(FakeConnection(fail_operation))
+        )
+        with pytest.raises(
+            PostgresOperationError,
+            match="PostgreSQL repository operation failed",
+        ) as operation:
+            invoke(repository)
+        assert operation.value.__cause__ is None
+        assert "private SQL detail" not in str(operation.value)

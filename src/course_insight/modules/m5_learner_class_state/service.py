@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +33,35 @@ from course_insight.modules.m5_learner_class_state.update_policy import (
 )
 
 
+def _read_verified_state_policy(
+    path: Path,
+    expected_checksum: str,
+) -> StatePolicy:
+    try:
+        content = path.read_bytes()
+    except (OSError, TypeError, ValueError) as exc:
+        raise DomainError(
+            code="STATE_POLICY_INVALID",
+            module="m5",
+            message="state policy could not be loaded",
+            details={"policy": "state", "reason": "unavailable"},
+            recoverable=True,
+        ) from exc
+    actual_checksum = hashlib.sha256(content).hexdigest()
+    if type(expected_checksum) is not str or not hmac.compare_digest(
+        actual_checksum,
+        expected_checksum,
+    ):
+        raise DomainError(
+            code="STATE_POLICY_INVALID",
+            module="m5",
+            message="state policy does not match the frozen dependency",
+            details={"policy": "state", "reason": "checksum_mismatch"},
+            recoverable=True,
+        )
+    return StatePolicy.from_bytes(content)
+
+
 class M5StateService:
     """Diagnose scoring evidence into versioned learner and class state."""
 
@@ -43,7 +74,163 @@ class M5StateService:
         self._repository = repository
         self._state_update_policy = state_update_policy
         self._class_aggregation_policy = class_aggregation_policy
-        self._processed_by_learner: dict[str, frozenset[str]] = {}
+        self._processed_by_scope: dict[
+            tuple[str, str, str],
+            frozenset[str],
+        ] = {}
+
+    def get_state_update(
+        self,
+        attempt_id: str,
+    ) -> StateUpdateResult | None:
+        """Recover one complete attempt-bound state update."""
+
+        getter = getattr(self._repository, "get_state_update", None)
+        if not callable(getter):
+            getter = getattr(
+                self._repository,
+                "get_state_update_result",
+                None,
+            )
+        if not callable(getter):
+            return None
+        result = getter(attempt_id)
+        return None if result is None else result.model_copy(deep=True)
+
+    def get_state_update_result(
+        self,
+        attempt_id: str,
+    ) -> StateUpdateResult | None:
+        return self.get_state_update(attempt_id)
+
+    def get_state_update_version(
+        self,
+        attempt_id: str,
+        state_version: int,
+    ) -> StateUpdateResult | None:
+        result = self._repository.get_state_update_version(
+            attempt_id,
+            state_version,
+        )
+        return None if result is None else result.model_copy(deep=True)
+
+    def get_state_update_for_audit(
+        self,
+        attempt_id: str,
+        audit_id: str,
+        audit_version: int,
+    ) -> StateUpdateResult | None:
+        result = self._repository.get_state_update_for_audit(
+            attempt_id,
+            audit_id,
+            audit_version,
+        )
+        return None if result is None else result.model_copy(deep=True)
+
+    def get_learner_state_exact(
+        self,
+        course_id: str,
+        class_id: str,
+        learner_id: str,
+        state_version: int,
+    ) -> LearnerStateSnapshot | None:
+        """Recover one exact learner baseline without a latest-state lookup."""
+
+        getter = getattr(self._repository, "get_learner_state_exact", None)
+        if not callable(getter):
+            return None
+        snapshot = getter(
+            course_id,
+            class_id,
+            learner_id,
+            state_version,
+        )
+        if snapshot is None:
+            return None
+        if not isinstance(snapshot, LearnerStateSnapshot) or (
+            snapshot.course_id,
+            snapshot.class_id,
+            snapshot.learner_id,
+            snapshot.state_version,
+        ) != (course_id, class_id, learner_id, state_version):
+            raise RuntimeError(
+                "M5 exact learner-state scope mismatch"
+            )
+        return snapshot.model_copy(deep=True)
+
+    def get_class_state_exact(
+        self,
+        course_id: str,
+        class_id: str,
+        state_version: int,
+    ) -> ClassStateSnapshot | None:
+        """Recover one exact class baseline without a latest-state lookup."""
+
+        getter = getattr(self._repository, "get_class_state_exact", None)
+        if not callable(getter):
+            return None
+        snapshot = getter(course_id, class_id, state_version)
+        if snapshot is None:
+            return None
+        if not isinstance(snapshot, ClassStateSnapshot) or (
+            snapshot.course_id,
+            snapshot.class_id,
+        ) != (course_id, class_id):
+            raise RuntimeError(
+                "M5 exact class-state scope mismatch"
+            )
+        return snapshot.model_copy(deep=True)
+
+    def get_class_state_by_identity(
+        self,
+        course_id: str,
+        class_id: str,
+        snapshot_id: str,
+    ) -> ClassStateSnapshot | None:
+        """Recover one exact class baseline by its scoped identity."""
+
+        getter = getattr(
+            self._repository,
+            "get_class_state_by_identity",
+            None,
+        )
+        if not callable(getter):
+            return None
+        snapshot = getter(course_id, class_id, snapshot_id)
+        if snapshot is None:
+            return None
+        if not isinstance(snapshot, ClassStateSnapshot) or (
+            snapshot.course_id,
+            snapshot.class_id,
+            snapshot.snapshot_id,
+        ) != (course_id, class_id, snapshot_id):
+            raise RuntimeError(
+                "M5 exact class-state identity mismatch"
+            )
+        return snapshot.model_copy(deep=True)
+
+    def get_latest_learner_state(
+        self,
+        course_id: str,
+        class_id: str,
+        learner_id: str,
+    ) -> LearnerStateSnapshot | None:
+        getter = getattr(self._repository, "get_latest_learner_state", None)
+        if not callable(getter):
+            return None
+        snapshot = getter(course_id, class_id, learner_id)
+        return None if snapshot is None else snapshot.model_copy(deep=True)
+
+    def get_latest_class_state(
+        self,
+        course_id: str,
+        class_id: str,
+    ) -> ClassStateSnapshot | None:
+        getter = getattr(self._repository, "get_latest_class_state", None)
+        if not callable(getter):
+            return None
+        snapshot = getter(course_id, class_id)
+        return None if snapshot is None else snapshot.model_copy(deep=True)
 
     def update_state(
         self,
@@ -62,7 +249,45 @@ class M5StateService:
         错误码：INSUFFICIENT_EVIDENCE。
         """
 
-        policy = StatePolicy.from_path(state_policy_path)
+        return self._update_state_with_policy(
+            scoring_result_bundle=scoring_result_bundle,
+            knowledge_bundle=knowledge_bundle,
+            previous_learner_state_snapshot=previous_learner_state_snapshot,
+            previous_class_state_snapshot=previous_class_state_snapshot,
+            policy=StatePolicy.from_path(state_policy_path),
+        )
+
+    def update_state_with_frozen_policy(
+        self,
+        scoring_result_bundle: ScoringResultBundle,
+        knowledge_bundle: KnowledgeBundle,
+        previous_learner_state_snapshot: LearnerStateSnapshot | None,
+        previous_class_state_snapshot: ClassStateSnapshot | None,
+        state_policy_path: Path,
+        expected_policy_checksum: str,
+    ) -> StateUpdateResult:
+        """Update state using the exact policy bytes identified by M0."""
+
+        return self._update_state_with_policy(
+            scoring_result_bundle=scoring_result_bundle,
+            knowledge_bundle=knowledge_bundle,
+            previous_learner_state_snapshot=previous_learner_state_snapshot,
+            previous_class_state_snapshot=previous_class_state_snapshot,
+            policy=_read_verified_state_policy(
+                state_policy_path,
+                expected_policy_checksum,
+            ),
+        )
+
+    def _update_state_with_policy(
+        self,
+        *,
+        scoring_result_bundle: ScoringResultBundle,
+        knowledge_bundle: KnowledgeBundle,
+        previous_learner_state_snapshot: LearnerStateSnapshot | None,
+        previous_class_state_snapshot: ClassStateSnapshot | None,
+        policy: StatePolicy,
+    ) -> StateUpdateResult:
         audits = latest_audits(scoring_result_bundle)
         audit_keys = frozenset(
             audit_version_key(record)
@@ -76,15 +301,22 @@ class M5StateService:
                 details={"attempt_id": scoring_result_bundle.attempt_id},
                 recoverable=True,
             )
-        seen = self._processed_by_learner.get(
-            scoring_result_bundle.learner_id,
-            frozenset(),
+        scope_key = self._state_scope(
+            scoring_result_bundle,
+            knowledge_bundle,
+            previous_learner_state_snapshot,
+            previous_class_state_snapshot,
+            authoritative_class_id=policy.class_id,
         )
-        latest_version = max(record.audit_version for record in audits)
-        if audit_keys <= seen or (
-            previous_learner_state_snapshot is not None
-            and latest_version <= previous_learner_state_snapshot.state_version
-        ):
+        seen = self._processed_by_scope.get(scope_key, frozenset())
+        watermark_getter = getattr(
+            self._repository,
+            "get_processed_audit_ids",
+            None,
+        )
+        if callable(watermark_getter):
+            seen = seen | watermark_getter(*scope_key)
+        if audit_keys <= seen:
             raise DomainError(
                 code="STALE_STATE_VERSION",
                 module="m5",
@@ -128,11 +360,69 @@ class M5StateService:
             processed_audit_ids=sorted(audit_keys),
             updated_at=scoring_result_bundle.finalized_at,
         )
-        self._processed_by_learner = {
-            **self._processed_by_learner,
-            scoring_result_bundle.learner_id: seen | audit_keys,
+        insert_or_get = getattr(
+            self._repository,
+            "insert_or_get_state_update",
+            None,
+        )
+        if callable(insert_or_get):
+            authoritative = insert_or_get(result.model_copy(deep=True))
+            if authoritative != result:
+                raise RuntimeError("M5 persisted state update conflicts with result")
+            result = authoritative.model_copy(deep=True)
+        self._processed_by_scope = {
+            **self._processed_by_scope,
+            scope_key: seen | audit_keys,
         }
         return result
+
+    @staticmethod
+    def _state_scope(
+        scoring_result_bundle: ScoringResultBundle,
+        knowledge_bundle: KnowledgeBundle,
+        previous_learner_state_snapshot: LearnerStateSnapshot | None,
+        previous_class_state_snapshot: ClassStateSnapshot | None,
+        *,
+        authoritative_class_id: str,
+    ) -> tuple[str, str, str]:
+        learner_id = scoring_result_bundle.learner_id
+        learner_mismatch = (
+            previous_learner_state_snapshot is not None
+            and (
+                previous_learner_state_snapshot.course_id
+                != knowledge_bundle.course_id
+                or previous_learner_state_snapshot.class_id
+                != authoritative_class_id
+                or previous_learner_state_snapshot.learner_id != learner_id
+            )
+        )
+        class_mismatch = (
+            previous_class_state_snapshot is not None
+            and (
+                previous_class_state_snapshot.course_id
+                != knowledge_bundle.course_id
+                or previous_class_state_snapshot.class_id
+                != authoritative_class_id
+            )
+        )
+        event_mismatch = any(
+            event.course_id != knowledge_bundle.course_id
+            or event.class_id != authoritative_class_id
+            for event in scoring_result_bundle.learning_events
+        )
+        if learner_mismatch or class_mismatch or event_mismatch:
+            raise DomainError(
+                code="STATE_SCOPE_MISMATCH",
+                module="m5",
+                message="state inputs must match the authoritative policy scope",
+                details={"attempt_id": scoring_result_bundle.attempt_id},
+                recoverable=True,
+            )
+        return (
+            knowledge_bundle.course_id,
+            authoritative_class_id,
+            learner_id,
+        )
 
     def run_learning_models(
         self,

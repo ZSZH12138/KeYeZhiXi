@@ -1,0 +1,6 @@
+actor_id,role,course_id,class_id,is_active
+pseudonym_student_001,student,course_network,class_01,true
+pseudonym_teacher_001,teacher,course_network,class_01,true
+pseudonym_course_admin_001,course_admin,course_network,,true
+pseudonym_system_admin_001,system_admin,,,true
+pseudonym_teacher_revoked_001,teacher,course_network,class_02,false

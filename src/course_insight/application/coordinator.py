@@ -27,6 +27,7 @@ from course_insight.contracts.platform import (
 )
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.json_io import write_json
+from course_insight.application.assessment_workflow import AssessmentWorkflow
 from course_insight.modules.m0_platform.service import M0PlatformService
 from course_insight.modules.m1_course_governance.service import M1CourseGovernanceService
 from course_insight.modules.m2_evidence_retrieval.service import M2EvidenceRetrievalService
@@ -65,6 +66,126 @@ class AppCoordinator:
         self._m7 = m7_service
         self._m8 = m8_service
         self._m9 = m9_service
+        self._assessment_workflow = AssessmentWorkflow(
+            m0=m0_service,
+            m2=m2_service,
+            m4=m4_service,
+            m5=m5_service,
+            m6=m6_service,
+            m7=m7_service,
+            m8=m8_service,
+            m9=m9_service,
+        )
+
+    def start_assessment(
+        self,
+        *,
+        student_text: str,
+        task_type_hint: str | None,
+        course_id: str,
+        class_id: str,
+        learner_id: str,
+        session_id: str,
+        knowledge_bundle: KnowledgeBundle,
+    ) -> dict[str, ContractModel]:
+        """Create and durably index an assessment without copying its payload."""
+
+        return self._assessment_workflow.start(
+            student_text=student_text,
+            task_type_hint=task_type_hint,
+            course_id=course_id,
+            class_id=class_id,
+            learner_id=learner_id,
+            session_id=session_id,
+            knowledge_bundle=knowledge_bundle,
+        )
+
+    def submit_assessment(
+        self,
+        *,
+        assessment_submission: AssessmentSubmission,
+        request_id: str,
+        index_ref: EvidenceIndexRef,
+        knowledge_bundle: KnowledgeBundle,
+        state_policy_path: Path,
+        teacher_threshold_policy_path: Path,
+    ) -> dict[str, ContractModel]:
+        """Resume a submission from module-owned results and M0 checkpoints."""
+
+        return self._assessment_workflow.submit(
+            assessment_submission=assessment_submission,
+            request_id=request_id,
+            index_ref=index_ref,
+            knowledge_bundle=knowledge_bundle,
+            state_policy_path=state_policy_path,
+            teacher_threshold_policy_path=teacher_threshold_policy_path,
+        )
+
+    def get_pending_assessment(
+        self,
+        *,
+        paper_id: str,
+        learner_id: str,
+    ) -> dict[str, ContractModel]:
+        """Reload one authoritative, not-yet-submitted assessment paper."""
+
+        return self._assessment_workflow.pending_assessment(
+            paper_id=paper_id,
+            learner_id=learner_id,
+        )
+
+    def get_student_assessment(
+        self,
+        *,
+        paper_id: str,
+        learner_id: str,
+    ) -> dict[str, ContractModel]:
+        """Load student-safe authoritative assessment results."""
+
+        return self._assessment_workflow.student_result(
+            paper_id=paper_id,
+            learner_id=learner_id,
+        )
+
+    def get_teacher_review_context(
+        self,
+        *,
+        paper_id: str,
+        course_id: str,
+        class_id: str,
+    ) -> dict[str, ContractModel]:
+        """Load scoring, state, and analytics within an exact teacher scope."""
+
+        return self._assessment_workflow.teacher_context(
+            paper_id=paper_id,
+            course_id=course_id,
+            class_id=class_id,
+        )
+
+    def review_assessment(
+        self,
+        *,
+        paper_id: str,
+        review_submission: TeacherReviewSubmission,
+        request_id: str,
+        knowledge_bundle: KnowledgeBundle,
+        state_policy_path: Path,
+        teacher_threshold_policy_path: Path,
+        course_id: str,
+        class_id: str,
+    ) -> dict[str, ContractModel]:
+        """Resume a teacher review without applying an existing audit twice."""
+
+        return self._assessment_workflow.review(
+            paper_id=paper_id,
+            review_submission=review_submission,
+            request_id=request_id,
+            knowledge_bundle=knowledge_bundle,
+            state_policy_path=state_policy_path,
+            teacher_threshold_policy_path=teacher_threshold_policy_path,
+            course_id=course_id,
+            class_id=class_id,
+        )
 
     def initialize_course(
         self,

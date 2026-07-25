@@ -136,14 +136,17 @@ class M3KnowledgeBundleService:
                 code="Q_MATRIX_CONFLICT",
                 module="m3",
                 message="knowledge seed file could not be read",
-                details={"path": str(path), "reason": type(error).__name__},
+                details={
+                    "input": "knowledge_seed",
+                    "reason": type(error).__name__,
+                },
             ) from error
         if not isinstance(payload, dict):
             raise DomainError(
                 code="Q_MATRIX_CONFLICT",
                 module="m3",
                 message="knowledge seed root must be a JSON object",
-                details={"path": str(path)},
+                details={"input": "knowledge_seed"},
             )
         return payload
 

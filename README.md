@@ -10,6 +10,12 @@
 [接口指南](docs/interface_guide.md)。契约 Schema、空示例和来源图位于
 [contracts/](contracts/)。
 
+### 2026-07-25 运维补充
+
+- Web、部署、进程角色与回滚边界见 [deployment.md](docs/deployment.md)；
+- SQLite→PostgreSQL 迁移与源数据限制见 [postgresql_migration.md](docs/postgresql_migration.md)；
+- M0 leased outbox Worker 的投递语义与状态文件见 [outbox_worker.md](docs/outbox_worker.md)。
+
 ### 本阶段能力
 
 - 授权课程导入、SHA-256 校验、确定性文本切片；
@@ -22,7 +28,10 @@
 - M5 DINA 认知诊断、BKT 知识追踪的契约与空运行；
 - M8 IRT、自适应选题和在线标定契约，M9 模型质量/审核边界；
 - M7/M9 统一的 DeepSeek API 契约与空适配器；
-- M0 Django 学生/教师外层契约与跳过状态；
+- M0 配置优先级、真实 Django 学生/教师 Web、两层权限、roles 完整状态同步、
+  runtime snapshot 与独立 leased outbox Worker；
+- SQLite/PostgreSQL 可切换的 M0、M4—M9 持久化与显式
+  SQLite→PostgreSQL 导入器；
 - SQLite 迁移、幂等事件、原子 JSON 快照和 Schema 导出。
 
 ## 快速开始：独立 Anaconda 环境
@@ -36,6 +45,10 @@ conda activate course-insight-framework
 python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
 python -m pytest -q
 ```
+
+M0 Web/Worker 使用根 `manage.py`：`python manage.py runserver` 启动开发 Web，
+`python manage.py run_outbox_worker` 启动独立 Worker。生产配置与完整验收步骤见
+[部署说明](docs/deployment.md)。
 
 导出公开契约 Schema：
 
@@ -64,7 +77,7 @@ python -m course_insight.cli export-schemas
 ├─ src/course_insight/
 │  ├─ contracts/                  Pydantic 契约 Python 包
 │  ├─ application/                AppCoordinator 跨模块编排
-│  ├─ infrastructure/             SQLite/JSON/日志基线、DeepSeek 空适配器与未来数据库适配器
+│  ├─ infrastructure/             配置、SQLite/PostgreSQL、JSON/日志、导入器与 DeepSeek 空适配器
 │  ├─ modules/m0_platform/        M0 责任域
 │  ├─ modules/m1_course_governance/
 │  ├─ modules/m2_evidence_retrieval/
@@ -228,7 +241,7 @@ python -m course_insight.cli export-schemas
 | `ActorContext` | `actor_id:str; role:student\|teacher\|course_admin\|system_admin; course_ids:list[str]; class_ids:list[str]; issued_at:datetime` | 鉴权范围不可重复；只用伪匿名身份 |
 | `AssessmentSubmission` | `submission_id:str; attempt_id:str; paper_id:str; learner_id:str; answers:dict[str,str\|bool\|int\|float]; submitted_at:datetime` | Django 学生表单到 M8 的无路径输入；答案键为题目实例 ID |
 | `TeacherReviewSubmission` | `submission_id:str; audit_id:str; expected_audit_version:int; reviewer_id:str; decision:confirm\|override\|reject; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; submitted_at:datetime` | Django 教师表单到 M9 的无路径输入；M9 转成同词汇的 `TeacherReviewDecision` |
-| `AsyncJobStatus` | `job_id:str; job_type:django_frontend\|vector_index\|llm_generation\|learning_model\|calibration; status:queued\|running\|succeeded\|failed\|skipped; progress:float; result_ref/error_code; created_at/finished_at` | 终态必须有完成时间；当前 Django 为 `skipped` |
+| `AsyncJobStatus` | `job_id:str; job_type:django_frontend\|vector_index\|llm_generation\|learning_model\|calibration; status:queued\|running\|succeeded\|failed\|skipped; progress:float; result_ref/error_code; created_at/finished_at` | 终态必须有完成时间；legacy Django scaffold 作业保持 `skipped` |
 
 ### M2/M7/M9 智能边界契约（[intelligence.py](src/course_insight/contracts/intelligence.py)）
 
@@ -280,10 +293,12 @@ python -m course_insight.cli export-schemas
 - `initialize() -> None`：读取本地 config/runtime，初始化迁移；供应用启动使用；
   错误 `DATABASE_UNAVAILABLE`。
 - `prepare_django_frontend(actor_context: ActorContext, requested_at: datetime)
-  -> AsyncJobStatus`：M0 的 Django 外层准备入口；当前不启动服务或作业，
-  固定返回 `skipped`。
+  -> AsyncJobStatus`：为保持既有 `ArchitectureScaffoldResult` 公共语义，作为
+  legacy intelligence scaffold 固定返回 `skipped`；它不启动 Web 或 Worker。
+  真实 Django 已由独立 URL/View/Template、WSGI/ASGI 与 health 入口提供。
 - `append_learning_events(events: list[LearningEvent]) -> EventAck`：事件来自 M8
-  scoring；确认供 `AppCoordinator`；错误 `EVENT_PERSIST_FAILED`。
+  scoring；事件与 outbox 同事务持久化，确认供 `AppCoordinator`；文件投递只由
+  独立 Worker 完成；错误 `EVENT_PERSIST_FAILED`。
 - `save_contract_snapshot(obj: ContractModel, path: Path) -> Path`：任意上游契约
   写入 runtime 原子快照；错误 `CONFIG_INVALID`。
 - `load_contract_snapshot(model_type: type[T], path: Path) -> T`：恢复同类型契约；
@@ -452,6 +467,16 @@ suggestion_rule_engine: Any)`。
 源码：[coordinator.py](src/course_insight/application/coordinator.py)。构造接收
 `m0_service`—`m9_service` 十个对应公开服务，不接收仓储：
 
+- `start_assessment(...)`：为一次 Web 流程创建 M4 `TaskPlan`、M8
+  `AssessmentPaper` 与 M0 的无 payload 流程索引。
+- `submit_assessment(...)`：按稳定标识恢复试卷，执行既有评分、状态、辅导、
+  反馈与教师分析链；客观题全量流程允许主观任务列表为空。
+- `get_student_assessment(...)`：在 M0 校验 actor/course/class/learner 归属后，
+  从 M8/M7 的公开入口取得权威评分与反馈。
+- `get_teacher_review_context(...)`：校验教师课程/班级作用域，并从 M8/M5/M9
+  的公开入口恢复复核上下文。
+- `review_assessment(...)`：复用既有教师复核链，追加评分审计版本和新的学习事件，
+  并按 checkpoint 恢复失败后的重放。
 - `initialize_course(*, raw_course_files, course_metadata_path,
   source_authorization_path, output_dir, concept_seed_path, item_seed_path,
   rubric_seed_path, blueprint_seed_path, prerequisite_seed_path,
@@ -466,12 +491,23 @@ suggestion_rule_engine: Any)`。
   teacher_threshold_policy_path) -> dict[str,ContractModel]`，返回复核后的评分、状态与分析对象。
 - `run_intelligence_architecture(*, actor_context: ActorContext,
   course_package_id: str, learner_id: str, requested_at: datetime)
-  -> ArchitectureScaffoldResult`，贯通 M0 Django、M2 pgvector/RAG、M5 DINA/BKT、
-  M7/M9 DeepSeek、M8 IRT/自适应在线标定与 M9 质量门槛；全部返回空结果。
+  -> ArchitectureScaffoldResult`，保留为 legacy 智能能力脚手架；M0 的作业字段
+  为兼容契约保持 `skipped`，M2 pgvector/RAG、M5 DINA/BKT、M7/M9 DeepSeek、
+  M8 IRT/自适应在线标定仍保持空结果或证据不足。真实 Django 不由该入口启动。
 - `export_run_manifest(*, objects: list[ContractModel], output_path: Path) -> Path`，
   仅导出 ID、checksum、时间，不导出学生答案。
 
-编排器只直接产生 `ASSESSMENT_FLOW_INVALID`；其他 `DomainError` 原样来自对应服务。
+拆分 Web 用例使用 M0 的稳定 operation ID、短 lease、CAS 版本与 checkpoint；
+权威领域对象仍由 M4/M5/M7/M8/M9 各自持久化。既有一站式方法签名保留。
+编排器产生的流程错误使用稳定 `DomainError`；其他错误原样来自对应服务。
+
+每个拆分操作还冻结知识包、课程包、证据索引和 policy checksum；M5 更新前以
+`state_inputs_frozen` 固定精确 learner/class 前态。长模块调用使用 CAS heartbeat
+续租；M5/M9 对 policy 只读取一次，并对同一份内存字节完成 checksum 校验和严格
+解析，避免校验后文件被替换。v9 升级后的旧 workflow 行只在持久化 TaskPlan 的
+知识包/课程包锚点匹配时执行一次性 CAS 接管，部分迁移状态继续 fail closed。
+失租 owner 的结果会被丢弃，且不能继续推进或写终态。登录限流使用
+actor+IP、actor 与 IP 三个 HMAC 桶，成功登录保留共享 IP 历史。
 
 ## 三类系统边界原始 JSON
 
@@ -535,37 +571,51 @@ suggestion_rule_engine: Any)`。
 
 ## PostgreSQL 目标、SQLite 基线、JSON 与 runtime 边界
 
-目标部署使用 PostgreSQL，M2 的向量扩展使用 pgvector。当前不安装、不连接
-这两个服务；下列 SQLite 表提供可替换的本地持久化边界，不是多人部署配置。
-后续迁移必须保持模块前缀、主身份、追加式版本和契约不变。
+目标部署使用 PostgreSQL；M2 未来的向量扩展仍归 M2/pgvector。仓库已经包含
+Psycopg 3 连接池、checksum-locked core migrations、M0/M4—M9 PostgreSQL
+Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整可运行基线；
+两个后端必须保持模块前缀、幂等身份、追加式版本与现有 Pydantic 契约一致。
+
+本文档不声称真实 PostgreSQL 联调已在当前机器跑通。live tests 必须同时提供
+`COURSE_INSIGHT_TEST_DATABASE_URL` 和与 DSN 库名完全一致的
+`COURSE_INSIGHT_TEST_DATABASE_NAME`；库名还必须带分隔的 `test`、`ci` 或 `tmp`
+标记。缺少变量会明确 `skip`，保留库或危险命名会 fail closed。
 
 | 表 | 归属 | 主身份/版本 |
 |---|---|---|
 | `schema_migrations` | infrastructure | migration version |
 | `m0_learning_events` | M0 | event_id、idempotency_key |
-| `m0_event_outbox` | M0 | event_id；事件与待投递 JSONL 同事务提交，成功投递后删除 |
+| `m0_event_outbox` | M0 | event_id、lease/version；事件同事务提交，Worker 在事务外投递 |
+| `m0_assessment_runs` | M0 | operation_id、checkpoint、CAS version；只存流程关联元数据 |
 | `m1_course_packages` | M1 | course_package_id + package_version |
 | `m2_evidence_indexes` | M2 | index_id + index_version |
 | `m3_knowledge_bundles` | M3 | knowledge_bundle_id + bundle_version |
 | `m4_task_plans` | M4 | task_id、idempotency_key |
-| `m5_learner_states` | M5 | learner_id + state_version |
-| `m5_class_states` | M5 | snapshot_id、aggregation_policy_version |
+| `m5_learner_states` | M5 | course_id + class_id + learner_id + state_version |
+| `m5_class_states` | M5 | course_id + class_id + state_version |
+| `m5_state_updates` | M5 | attempt_id + state_version |
 | `m6_session_states` | M6 | session_id + turn_count |
 | `m6_tutoring_decisions` | M6 | request/input fingerprint、session_id + turn_count |
+| `m7_student_feedback` | M7 | feedback_id |
+| `m8_assessment_papers` | M8 | paper_id，并持久化 course/class 执行作用域 |
 | `m8_score_audits` | M8 | audit_id + audit_version；只能追加 |
+| `m8_scoring_results` | M8 | attempt_id + 审计版本集合 |
 | `m9_teacher_reviews` | M9 | decision_id、audit_id + expected version |
+| `m9_teacher_analytics` | M9 | course_id + class_id + report_id |
 
-M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词；项目不建立
-本地模型权重表。每个仓储只访问本模块前缀。教师确认的 JSON 是只读输入；
-`runtime/` 保存数据库、JSON 快照、索引、日志和运行清单。运行产物不得回写
-`data/` 或 `contracts/`。
+M7 的持久表保存现有学生反馈契约，不保存 DeepSeek 密钥、完整提示词或本地模型
+权重。每个仓储只访问本模块前缀。教师确认的 JSON 是只读输入；`runtime/`
+保存数据库、JSON 快照、索引、日志和运行清单。运行产物不得回写 `data/` 或
+`contracts/`。
 
-## 智能架构空编排
+## 智能算法空边界
 
-`AppCoordinator.run_intelligence_architecture` 是统一的智能能力空结果编排入口。
-它不需要 Django、PostgreSQL/pgvector、DeepSeek 密钥或模型数据：
+`AppCoordinator.run_intelligence_architecture` 保留为智能能力脚手架入口。
+M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、DeepSeek 密钥或
+模型训练数据：
 
-1. M0 返回 Django 外层 `skipped` 作业。
+1. M0 为保持 legacy `ArchitectureScaffoldResult.is_empty()` 语义返回 Django
+   作业 `skipped`；真实 Web 由独立部署入口启动并通过 health 检查。
 2. M2 返回 `backend=pgvector`、`status=empty` 的逻辑索引和空 RAG 审计。
 3. M7 返回 DeepSeek 评分空结果，M9 返回 DeepSeek 教师叙述空结果。
 4. M5 返回 DINA 认知诊断和 BKT 知识追踪空运行。
@@ -573,7 +623,8 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
 6. M9 为空标定返回 `insufficient_data` 质量报告。
 7. 编排器将上述值组合为 `ArchitectureScaffoldResult(status="empty")`。
 
-该入口只组织并返回显式空结果，不伪造真实模型运行。
+该入口不伪造真实模型运行。M0 已实现的 Web/Worker/PostgreSQL 能力不应被写成
+算法空实现。
 
 ## 新工程师入口与推荐顺序
 
@@ -599,7 +650,7 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
 
 | 模块 | 当前可运行行为 | 真实实现与启用条件 |
 |---|---|---|
-| M0 | SQLite/JSONL/快照基线；Django 准备作业 `skipped` | M0 实现 Django 页面/权限/表单；持久化适配器切 PostgreSQL |
+| M0 | 配置、日志、SQLite/PostgreSQL、真实 Django/权限/表单、流程恢复、leased Worker | 在目标环境完成生产容量、备份与真实 PostgreSQL 验收 |
 | M1 | 仅固定本地文本解析与段落切分 | 在 parser registry 后增加可替换解析器 |
 | M2 | 词法匹配基线；pgvector 逻辑索引/审计为 `empty` | 实现 embedding 适配器、pgvector 迁移/重建与检索评估 |
 | M3 | 只接受教师确认 JSON，不自动抽取知识 | schema validator 后的教师审核工作流 |
@@ -619,7 +670,8 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
 - 禁止核心内部 HTTP、路由装饰器、网络客户端和绕过 `AppCoordinator` 的编排。
 - 禁止真实姓名、学号、邮箱、电话、身份映射、密钥和真实 `.env`。
 - 禁止 DeepSeek 以外的 LLM、本地模型权重、硬编码 `DEEPSEEK_API_KEY`，以及未经教师审核的高风险自动评分。
-- 禁止在当前空实现中访问网络、连接 PostgreSQL/pgvector、读取密钥或伪造模型指标。
+- 智能空实现禁止访问模型网络、连接 pgvector、读取 DeepSeek 密钥或伪造
+  DINA/BKT/IRT/模型质量指标；M0 仅按显式配置连接 SQLite/PostgreSQL。
 - 禁止把数据库、日志、索引、快照、模型文件或真实课程资料写入受管数据目录。
 - 所有路径、JSON/CSV、时间、引用、分数和版本都必须在系统边界校验；错误只
   返回稳定代码和相对/安全信息。

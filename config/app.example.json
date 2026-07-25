@@ -1,29 +1,50 @@
 {
-  "course_id": "example-course",
-  "database_path": "runtime/course_insight.db",
+  "environment": "development",
   "runtime_dir": "runtime",
-  "log_level": "INFO",
-  "export_snapshots": true,
-  "persistence": {
-    "current_backend": "sqlite",
-    "target_backend": "postgresql",
-    "database_url_env": "DATABASE_URL"
+  "config_dir": "config",
+  "database": {
+    "backend": "sqlite",
+    "sqlite_path": "runtime/course_insight.db",
+    "url_env": "DATABASE_URL",
+    "pool_min_size": 1,
+    "pool_max_size": 10,
+    "connect_timeout_seconds": 10.0
   },
-  "vector_retrieval": {
-    "target_backend": "pgvector",
-    "database_url_env": "VECTOR_DATABASE_URL",
-    "status": "empty"
+  "logging": {
+    "level": "INFO",
+    "mode": "rotating_file",
+    "directory": "logs",
+    "filename": "app.log",
+    "rotation_max_bytes": 10485760,
+    "backup_count": 5
   },
-  "llm": {
-    "provider": "deepseek",
-    "model_env": "DEEPSEEK_MODEL",
-    "api_key_env": "DEEPSEEK_API_KEY",
-    "status": "empty"
+  "outbox": {
+    "batch_size": 100,
+    "poll_interval_seconds": 1.0,
+    "lease_seconds": 30.0,
+    "max_retries": 8,
+    "retry_base_seconds": 1.0,
+    "retry_max_seconds": 300.0,
+    "retry_jitter_ratio": 0.2,
+    "heartbeat_interval_seconds": 10.0
   },
   "web": {
-    "framework": "django",
     "secret_key_env": "DJANGO_SECRET_KEY",
     "allowed_hosts_env": "DJANGO_ALLOWED_HOSTS",
-    "status": "empty"
+    "csrf_trusted_origins_env": "DJANGO_CSRF_TRUSTED_ORIGINS",
+    "allowed_hosts": [
+      "localhost",
+      "127.0.0.1"
+    ],
+    "csrf_trusted_origins": [],
+    "secure_cookie": false,
+    "session_timeout_seconds": 3600
+  },
+  "security": {
+    "session_cookie_httponly": true,
+    "session_cookie_samesite": "Lax",
+    "max_request_body_bytes": 1048576,
+    "login_failure_limit": 5,
+    "login_failure_window_seconds": 300
   }
 }

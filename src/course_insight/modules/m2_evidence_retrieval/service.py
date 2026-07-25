@@ -73,11 +73,17 @@ class M2EvidenceRetrievalService:
             checksum=hashlib.sha256(checksum_payload.encode("utf-8")).hexdigest(),
             status="ready",
         )
-        self._indexed_packages[index_id] = course_package
-        self._index_refs[index_id] = index_ref
         save = getattr(self._repository, "save_index", None)
         if callable(save):
             save(index_ref)
+        self._indexed_packages = {
+            **self._indexed_packages,
+            index_id: course_package.model_copy(deep=True),
+        }
+        self._index_refs = {
+            **self._index_refs,
+            index_id: index_ref.model_copy(deep=True),
+        }
         return index_ref
 
     def initialize_vector_store(

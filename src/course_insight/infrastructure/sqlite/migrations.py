@@ -4,29 +4,49 @@ from __future__ import annotations
 
 import sqlite3
 
+from course_insight.infrastructure.sqlite.module_recovery_schema import (
+    M5_CLASS_STATES_SQL as _M5_CLASS_STATES_SQL,
+    M5_CLASS_STATES_V4_SQL as _M5_CLASS_STATES_V4_SQL,
+    M5_LEARNER_STATES_SQL as _M5_LEARNER_STATES_SQL,
+    M5_LEARNER_STATES_V4_SQL as _M5_LEARNER_STATES_V4_SQL,
+    MODULE_RECOVERY_TABLES as _MODULE_RECOVERY_TABLES,
+)
+from course_insight.infrastructure.sqlite.outbox_migration import (
+    LEARNING_EVENTS_SQL as _M0_LEARNING_EVENTS_SQL,
+    LEGACY_OUTBOX_SQL as _EVENT_OUTBOX_SQL,
+    OUTBOX_V7_MIGRATION_NAME as _OUTBOX_V7_MIGRATION_NAME,
+    migrate_outbox_v6_to_v7,
+    validate_m0_storage_schema,
+    validate_outbox_schema,
+)
+from course_insight.infrastructure.sqlite.workflow_migration import (
+    ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL as _M0_ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL,
+    ASSESSMENT_RUNS_V5_SQL as _M0_ASSESSMENT_RUNS_V5_SQL,
+    ASSESSMENT_RUNS_V6_SQL as _M0_ASSESSMENT_RUNS_V6_SQL,
+    ASSESSMENT_RUNS_V9_SQL as _M0_ASSESSMENT_RUNS_SQL,
+    ASSESSMENT_RUNS_SUBMIT_INDEX_SQL as _M0_ASSESSMENT_RUNS_SUBMIT_INDEX_SQL,
+    migrate_workflow_v5_to_v6,
+    migrate_workflow_v7_to_v8,
+    migrate_workflow_v8_to_v9,
+)
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 9
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
+_MODULE_RECOVERY_MIGRATION_NAME = "module_owned_recovery"
+_ASSESSMENT_WORKFLOW_MIGRATION_NAME = "m0_assessment_workflow"
+_ASSESSMENT_WORKFLOW_REFS_MIGRATION_NAME = "m0_assessment_workflow_refs"
+_ASSESSMENT_WORKFLOW_REVIEW_GUARD_MIGRATION_NAME = (
+    "m0_assessment_workflow_review_guard"
+)
+_ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME = (
+    "m0_assessment_workflow_recovery_freeze"
+)
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
     name TEXT NOT NULL UNIQUE CHECK (length(name) > 0)
-)
-"""
-_M0_LEARNING_EVENTS_SQL = """
-CREATE TABLE IF NOT EXISTS m0_learning_events (
-    event_id TEXT PRIMARY KEY CHECK (length(event_id) > 0),
-    idempotency_key TEXT NOT NULL UNIQUE CHECK (length(idempotency_key) > 0),
-    event_type TEXT NOT NULL CHECK (length(event_type) > 0),
-    occurred_at TEXT NOT NULL CHECK (length(occurred_at) > 0),
-    payload TEXT NOT NULL CHECK (
-        CASE WHEN json_valid(payload)
-            THEN json(payload) = payload
-            ELSE 0
-        END
-    )
 )
 """
 _INITIAL_TABLE_STATEMENTS = (
@@ -152,22 +172,6 @@ _INITIAL_TABLE_STATEMENTS = (
     )
     """,
 )
-_EVENT_OUTBOX_SQL = """
-CREATE TABLE IF NOT EXISTS m0_event_outbox (
-    event_id TEXT PRIMARY KEY
-        REFERENCES m0_learning_events(event_id) ON DELETE CASCADE,
-    record TEXT NOT NULL CHECK (
-        CASE WHEN json_valid(record)
-            THEN json(record) = record
-            ELSE 0
-        END
-    )
-)
-"""
-_M0_SCHEMA_DEFINITIONS = (
-    ("m0_learning_events", _M0_LEARNING_EVENTS_SQL),
-    ("m0_event_outbox", _EVENT_OUTBOX_SQL),
-)
 _M6_DECISION_SQL = """
 CREATE TABLE IF NOT EXISTS m6_tutoring_decisions (
     decision_id TEXT PRIMARY KEY CHECK (length(decision_id) > 0),
@@ -238,8 +242,6 @@ _M6_DECISION_FOREIGN_KEY = (
         "NONE",
     ),
 )
-
-
 def current_schema_version(connection: sqlite3.Connection) -> int:
     """Return zero before initialization or the greatest applied version."""
 
@@ -253,6 +255,17 @@ def current_schema_version(connection: sqlite3.Connection) -> int:
         "SELECT COALESCE(MAX(version), 0) FROM schema_migrations"
     ).fetchone()
     return int(row[0])
+
+
+def _applied_schema_versions(
+    connection: sqlite3.Connection,
+) -> set[int]:
+    return {
+        int(row[0])
+        for row in connection.execute(
+            "SELECT version FROM schema_migrations"
+        ).fetchall()
+    }
 
 
 def _m6_decision_columns(
@@ -377,12 +390,65 @@ def _normalized_table_schema_sql(
 def validate_m0_schema(connection: sqlite3.Connection) -> None:
     """Reject missing or weakened M0 persistence structures."""
 
-    for table_name, expected_sql in _M0_SCHEMA_DEFINITIONS:
-        if _normalized_table_schema_sql(
+    validate_m0_storage_schema(
+        connection,
+        schema_version=current_schema_version(connection),
+    )
+    if current_schema_version(connection) >= 6:
+        _validate_assessment_workflow_schema(
             connection,
-            table_name,
-        ) != _normalize_create_table_sql(expected_sql):
-            raise RuntimeError("M0 schema is incompatible")
+            schema_version=current_schema_version(connection),
+        )
+
+
+def _validate_assessment_workflow_schema(
+    connection: sqlite3.Connection,
+    *,
+    schema_version: int,
+) -> None:
+    expected_sql = (
+        _M0_ASSESSMENT_RUNS_SQL
+        if schema_version >= 9
+        else _M0_ASSESSMENT_RUNS_V6_SQL
+    )
+    if _normalized_table_schema_sql(
+        connection,
+        "m0_assessment_runs",
+    ) != _normalize_create_table_sql(expected_sql):
+        raise RuntimeError(
+            "m0_assessment_runs schema is incompatible with workflow recovery"
+        )
+    index_row = connection.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'index' AND name = 'm0_one_submit_per_paper'
+        """
+    ).fetchone()
+    if index_row is None or _normalize_create_table_sql(
+        str(index_row[0])
+    ) != _normalize_create_table_sql(_M0_ASSESSMENT_RUNS_SUBMIT_INDEX_SQL):
+        raise RuntimeError(
+            "m0 assessment submit uniqueness is incompatible"
+        )
+    if schema_version < 8:
+        return
+    review_index_row = connection.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'index'
+          AND name = 'm0_one_nonterminal_review_per_paper'
+        """
+    ).fetchone()
+    if review_index_row is None or _normalize_create_table_sql(
+        str(review_index_row[0])
+    ) != _normalize_create_table_sql(
+        _M0_ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL
+    ):
+        raise RuntimeError(
+            "m0 assessment review linearity is incompatible"
+        )
 
 
 def _normalized_m6_decision_schema_sql(connection: sqlite3.Connection) -> str:
@@ -404,6 +470,116 @@ def _validate_m6_decision_schema(connection: sqlite3.Connection) -> None:
         raise RuntimeError("M6 decision data violates foreign keys")
 
 
+def _migrate_m5_learner_scope(connection: sqlite3.Connection) -> None:
+    """Replace the legacy learner-only uniqueness key without losing rows."""
+
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info('m5_learner_states')"
+        ).fetchall()
+    }
+    if {"course_id", "class_id"} <= columns:
+        return
+    connection.execute(_M5_LEARNER_STATES_V4_SQL)
+    connection.execute(
+        """
+        INSERT INTO m5_learner_states_v4(
+            snapshot_id,
+            course_id,
+            class_id,
+            learner_id,
+            state_version,
+            payload
+        )
+        SELECT
+            snapshot_id,
+            json_extract(payload, '$.course_id'),
+            json_extract(payload, '$.class_id'),
+            learner_id,
+            state_version,
+            payload
+        FROM m5_learner_states
+        """
+    )
+    connection.execute("DROP TABLE m5_learner_states")
+    connection.execute(
+        "ALTER TABLE m5_learner_states_v4 RENAME TO m5_learner_states"
+    )
+
+
+def _migrate_m5_class_scope(connection: sqlite3.Connection) -> None:
+    """Add course-aware authority to legacy class-state identities."""
+
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info('m5_class_states')"
+        ).fetchall()
+    }
+    if {"course_id", "state_version"} <= columns:
+        return
+    connection.execute(_M5_CLASS_STATES_V4_SQL)
+    connection.execute(
+        """
+        INSERT INTO m5_class_states_v4(
+            snapshot_id,
+            course_id,
+            class_id,
+            state_version,
+            aggregation_policy_version,
+            payload
+        )
+        SELECT
+            snapshot_id,
+            json_extract(payload, '$.course_id'),
+            class_id,
+            ROW_NUMBER() OVER (
+                PARTITION BY json_extract(payload, '$.course_id'), class_id
+                ORDER BY
+                    julianday(json_extract(payload, '$.updated_at')),
+                    snapshot_id
+            ),
+            aggregation_policy_version,
+            payload
+        FROM m5_class_states
+        """
+    )
+    connection.execute("DROP TABLE m5_class_states")
+    connection.execute(
+        "ALTER TABLE m5_class_states_v4 RENAME TO m5_class_states"
+    )
+
+
+def _validate_module_recovery_schema(connection: sqlite3.Connection) -> None:
+    learner_schema = _normalized_table_schema_sql(
+        connection,
+        "m5_learner_states",
+    ).replace('"m5_learner_states"', "m5_learner_states")
+    if learner_schema != _normalize_create_table_sql(
+        _M5_LEARNER_STATES_SQL
+    ):
+        raise RuntimeError(
+            "m5_learner_states schema is incompatible with module recovery"
+        )
+    class_schema = _normalized_table_schema_sql(
+        connection,
+        "m5_class_states",
+    ).replace('"m5_class_states"', "m5_class_states")
+    if class_schema != _normalize_create_table_sql(_M5_CLASS_STATES_SQL):
+        raise RuntimeError(
+            "m5_class_states schema is incompatible with module recovery"
+        )
+    for table_name, expected_sql in _MODULE_RECOVERY_TABLES:
+        if _normalized_table_schema_sql(
+            connection,
+            table_name,
+        ) != _normalize_create_table_sql(expected_sql):
+            raise RuntimeError(
+                f"{table_name} schema is incompatible with module recovery"
+            )
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     """Apply every pending migration in one explicit immediate transaction."""
 
@@ -413,34 +589,116 @@ def migrate(connection: sqlite3.Connection) -> None:
     try:
         connection.execute(_SCHEMA_MIGRATIONS_SQL)
         version = current_schema_version(connection)
+        applied_versions = _applied_schema_versions(connection)
         if version > SCHEMA_VERSION:
             raise RuntimeError("database schema is newer than this application")
-        if version < 1:
+        if 1 not in applied_versions:
             for statement in _INITIAL_TABLE_STATEMENTS:
                 connection.execute(statement)
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                 (1, _INITIAL_MIGRATION_NAME),
             )
-            version = 1
-        if version < 2:
+            applied_versions.add(1)
+        if 2 not in applied_versions:
             connection.execute(_EVENT_OUTBOX_SQL)
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                 (2, _OUTBOX_MIGRATION_NAME),
             )
-            version = 2
+            applied_versions.add(2)
         validate_m0_schema(connection)
-        if version < 3:
+        if 3 not in applied_versions:
             connection.execute(_M6_DECISION_SQL)
             _validate_m6_decision_schema(connection)
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                 (3, _M6_DECISION_MIGRATION_NAME),
             )
-            version = 3
+            applied_versions.add(3)
         else:
             _validate_m6_decision_schema(connection)
+        if 4 not in applied_versions:
+            _migrate_m5_learner_scope(connection)
+            _migrate_m5_class_scope(connection)
+            for _, statement in _MODULE_RECOVERY_TABLES:
+                connection.execute(statement)
+            _validate_module_recovery_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (4, _MODULE_RECOVERY_MIGRATION_NAME),
+            )
+            applied_versions.add(4)
+        else:
+            _validate_module_recovery_schema(connection)
+        if 5 not in applied_versions:
+            connection.execute(_M0_ASSESSMENT_RUNS_V5_SQL)
+            connection.execute(_M0_ASSESSMENT_RUNS_SUBMIT_INDEX_SQL)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (5, _ASSESSMENT_WORKFLOW_MIGRATION_NAME),
+            )
+            applied_versions.add(5)
+        if 6 not in applied_versions:
+            migrate_workflow_v5_to_v6(connection)
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=6,
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (6, _ASSESSMENT_WORKFLOW_REFS_MIGRATION_NAME),
+            )
+            applied_versions.add(6)
+        else:
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=(
+                    9
+                    if 9 in applied_versions
+                    else min(max(applied_versions), 7)
+                ),
+            )
+        if 7 not in applied_versions:
+            migrate_outbox_v6_to_v7(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (7, _OUTBOX_V7_MIGRATION_NAME),
+            )
+            applied_versions.add(7)
+        validate_outbox_schema(connection, schema_version=7)
+        if 8 not in applied_versions:
+            migrate_workflow_v7_to_v8(connection)
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=9 if 9 in applied_versions else 8,
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (8, _ASSESSMENT_WORKFLOW_REVIEW_GUARD_MIGRATION_NAME),
+            )
+            applied_versions.add(8)
+        else:
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=9 if 9 in applied_versions else 8,
+            )
+        if 9 not in applied_versions:
+            migrate_workflow_v8_to_v9(connection)
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=9,
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (9, _ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME),
+            )
+        else:
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=SCHEMA_VERSION,
+            )
+        validate_outbox_schema(connection, schema_version=SCHEMA_VERSION)
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:

@@ -6,9 +6,22 @@
 路径 `$` 表示完整契约，`$[]` 表示列表元素，点路径表示组成字段。
 服务之间必须传递契约对象，不得用无类型字典代替。
 
-当前 v2 智能架构仅返回空结果：DeepSeek 不发起 API 请求，pgvector
-不建立连接，DINA/BKT/IRT 不运行估计。这些边界仍是 MVP 架构
-的正式组成部分，不是新模块。
+当前 v2 智能算法边界仍返回空结果：DeepSeek 不发起 API 请求，pgvector
+不建立连接，DINA/BKT/IRT 不运行估计。这些边界仍是 MVP 架构的正式组成部分，
+不是新模块。M0 的 Web、配置、日志、Worker 与数据库适配器不是算法占位，
+已经有真实实现。
+
+## 2026-07-25 运维入口
+
+在保留上述契约边界不变的前提下，当前代码提供以下运维入口：
+
+- 根 `manage.py`：Django 命令总入口；
+- `python manage.py sync_roles --check|--dry-run|--apply`：roles 初始化/同步；
+- `python manage.py run_outbox_worker [--once]`：M0 outbox Worker；
+- `python scripts/migrate_sqlite_to_postgres.py --project-root ...`：显式 SQLite→PostgreSQL 导入。
+
+真实 PostgreSQL 步骤仍需当次环境验证；没有受保护的 live test 数据库时会明确
+跳过，不能把跳过写成已通过。
 
 ## 22 个根契约
 
@@ -44,7 +57,7 @@
 | `ActorContext` | M0 Django 鉴权边界 | `AppCoordinator`、所有受授权用例 | 可构造伪匿名上下文 |
 | `AssessmentSubmission` | M0 Django 学生表单 | `M8.prepare_scoring` | `answers` 是题目实例 ID 到字符串/布尔/整数/有限浮点答案的映射 |
 | `TeacherReviewSubmission` | M0 Django 教师表单 | `M9.record_teacher_review` | 使用 `confirm/override/reject`，并完整携带总分、分项覆盖和教师意见 |
-| `AsyncJobStatus` | M0 作业边界 | M0 页面/调用方 | Django 作业 `skipped` |
+| `AsyncJobStatus` | M0 作业边界 | legacy intelligence scaffold | Django 作业固定 `skipped`；不代表真实 Web 未实现 |
 | `EmbeddingModelRef` | M2 检索配置 | M2 索引器 | `empty` |
 | `RetrievalPolicy` | M2 检索配置 | M2 检索器 | 允许词法/向量/混合策略 |
 | `RetrievalAudit` | M2 | M7/M9 审计与运维 | `empty`，无证据 ID |
@@ -86,12 +99,62 @@ Repository 恢复最新权威游标；全新会话从 S1/turn 0 开始。相同�
 `TUTORING_REFERENCE_MISMATCH`。
 
 `AppCoordinator.run_intelligence_architecture(...) -> ArchitectureScaffoldResult`
-用于组织并返回智能架构的空实现结果。它依次请求 M0 Django 外层状态、M2 pgvector
-索引引用和检索审计、M7/M9 DeepSeek 空生成、M5 DINA/BKT 空运行、
-M8 IRT 空标定与空选题、M9 证据不足质量报告。任何组件产生
-非空值，组合契约都必须拒绝。
+保留为 legacy 智能能力脚手架入口。为保持既有
+`ArchitectureScaffoldResult.is_empty()` 公共语义，M0 的
+`prepare_django_frontend()` 继续返回 `skipped`；M2 pgvector、M7/M9 DeepSeek、
+M5 DINA/BKT、M8 IRT/自适应选择和 M9 模型质量也保持空或证据不足状态。
+真实 Django Web/health 由独立进程入口提供，不依赖该脚手架，也不把完整领域契约
+存入 Session。
+
+## M0 多请求 Web 用例
+
+在不改变既有 `run_assessment_cycle()` 与 `run_teacher_review_cycle()` 签名的
+前提下，用户已批准增加以下应用层入口：
+
+| 用例 | 作用 | 权威数据恢复 |
+|---|---|---|
+| `start_assessment(...)` | 创建 M4 TaskPlan、M8 AssessmentPaper 和 M0 流程索引 | M0 仅保存关联 ID |
+| `submit_assessment(...)` | 恢复试卷后执行既有评分、状态、辅导、反馈、分析链 | M4/M5/M7/M8/M9 自有 Repository |
+| `get_student_assessment(...)` | 校验 actor/course/class/learner 后读取结果与反馈 | M8 评分、M7 反馈 |
+| `get_teacher_review_context(...)` | 校验教师课程/班级作用域并读取复核上下文 | M8/M5/M9 |
+| `review_assessment(...)` | 复用既有复核链并追加新审计版本 | M8/M5/M9 |
+
+操作使用稳定幂等键、短 lease、CAS 版本与 checkpoint 恢复。相同操作重放返回
+同一权威结果；Repository 采用“同 ID 同 payload 成功、同 ID 不同 payload
+冲突”。跨模块仍只传现有 Pydantic 契约，Django Request、ORM、Session、
+Psycopg 对象和无类型字典不会进入 M1—M9。
+
+新操作行会冻结完整的知识包/证据索引身份与内容 checksum，以及被消费的两份
+policy 字节 checksum。M5 更新前另以 `state_inputs_frozen` checkpoint 固定精确
+learner/class 前态；恢复时按完整作用域与版本/快照 ID 读取，绝不以当时的 latest
+状态替代。长模块调用通过 M0 lease heartbeat 续租，旧 owner 失租后不能推进或写
+终态。M5/M9 的附加冻结入口对 policy 单次读取，并以同一份字节完成 checksum
+比较和解析；既有公开方法签名保持不变。
+
+pre-v9 行只允许一次受限兼容接管：旧不可变 identity 必须一致，新增字段必须全部
+为 NULL，当前知识包/课程包必须与已持久化 TaskPlan 锚点一致。部分填充、冲突或
+缺少必要精确状态引用的行返回稳定冲突并保持原值。
 
 完整机器可检验映射位于
 [`contracts/contract_provenance.json`](../contracts/contract_provenance.json)，
 加载与一致性检查位于
 [`contracts/provenance.py`](../src/course_insight/contracts/provenance.py)。
+
+## 接口运维补充
+
+- 配置优先级与 secret 边界见 [deployment.md](deployment.md)；
+- PostgreSQL 迁移 CLI、`partial_envelope_rows` 与源数据限制见
+  [postgresql_migration.md](postgresql_migration.md)；
+- outbox Worker 的 at-least-once 语义、`app.log` 与审计 JSONL 区别见
+  [outbox_worker.md](outbox_worker.md)。
+
+## roles 与 Worker 命令语义
+
+- `python manage.py sync_roles --apply` 把 `roles.csv` 视为该来源管理授权的完整
+  期望状态，不是仅追加 patch。
+- 之前由该来源管理、现在从 CSV 省略的 grant 会在同一事务中写成
+  `is_active=false`、设置 `revoked_at`；用户不再拥有该角色的有效 grant 时，
+  对应 Django Group membership 也会移除。
+- `--dry-run` 和 `--apply` 都在普通 `revoke=<n>` 摘要中报告省略导致的撤销。
+- `python manage.py run_outbox_worker --once` 若最终 snapshot 的
+  `last_error_code` 非空，会以命令失败退出，便于自动化发现数据库或 sink 故障。

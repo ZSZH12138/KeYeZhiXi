@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -16,7 +17,6 @@ from course_insight.contracts.state import (
     LearnerStateSnapshot,
     MisconceptionStrength,
 )
-from course_insight.infrastructure.json_io import read_json
 
 
 @dataclass(frozen=True)
@@ -36,15 +36,40 @@ class StatePolicy:
     def from_path(cls, path: Path) -> "StatePolicy":
         """Load a strict policy document without silently applying defaults."""
 
-        payload = read_json(path)
         try:
+            content = path.read_bytes()
+        except (OSError, TypeError, ValueError) as exc:
+            raise DomainError(
+                code="STATE_POLICY_INVALID",
+                module="m5",
+                message="state policy could not be loaded",
+                details={
+                    "policy": "state",
+                    "reason": type(exc).__name__,
+                },
+                recoverable=True,
+            ) from exc
+        return cls.from_bytes(content)
+
+    @classmethod
+    def from_bytes(cls, content: bytes) -> "StatePolicy":
+        """Parse one already-read strict policy document."""
+
+        try:
+            payload = json.loads(
+                content.decode("utf-8"),
+                parse_constant=_reject_nonfinite_json_constant,
+            )
             policy = cls(**payload)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, UnicodeError, ValueError) as exc:
             raise DomainError(
                 code="STATE_POLICY_INVALID",
                 module="m5",
                 message="state policy fields are missing or invalid",
-                details={"path": str(path)},
+                details={
+                    "policy": "state",
+                    "reason": type(exc).__name__,
+                },
             ) from exc
         probabilities = (
             policy.consolidating_threshold,
@@ -64,9 +89,13 @@ class StatePolicy:
                 code="STATE_POLICY_INVALID",
                 module="m5",
                 message="state policy thresholds or scope are inconsistent",
-                details={"path": str(path)},
+                details={"policy": "state"},
             )
         return policy
+
+
+def _reject_nonfinite_json_constant(value: str) -> Any:
+    raise ValueError(f"non-finite JSON constant is not allowed: {value}")
 
 
 def audit_version_key(record: ScoreAuditRecord) -> str:

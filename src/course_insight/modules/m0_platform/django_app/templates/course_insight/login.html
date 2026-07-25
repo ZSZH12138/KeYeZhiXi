@@ -1,0 +1,12 @@
+{% extends "course_insight/base.html" %}
+{% block title %}登录 · 课业智析{% endblock %}
+{% block content %}
+  <h1>登录</h1>
+  <p class="muted">请使用管理员分配的伪匿名账号。</p>
+  <form method="post" action="{% url 'login' %}">
+    {% csrf_token %}
+    {{ form.as_p }}
+    {% if next %}<input type="hidden" name="next" value="{{ next }}">{% endif %}
+    <button type="submit">登录</button>
+  </form>
+{% endblock %}

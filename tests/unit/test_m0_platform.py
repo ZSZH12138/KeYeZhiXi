@@ -147,7 +147,7 @@ def test_append_learning_events_collapses_same_batch_duplicates(
     assert outbox_count == 1
 
 
-def test_later_append_delivers_prior_outbox_once(
+def test_later_append_does_not_deliver_prior_outbox(
     service: M0PlatformService,
     tmp_path: Path,
 ) -> None:
@@ -157,8 +157,7 @@ def test_later_append_delivers_prior_outbox_once(
     service.append_learning_events([_event(2)])
 
     audit_path = tmp_path / "runtime" / "audit" / "learning_events.jsonl"
-    assert audit_path.read_text(encoding="utf-8").count("\n") == 1
-    assert '"event_id":"event_1"' in audit_path.read_text(encoding="utf-8")
+    assert not audit_path.exists()
     with connect_sqlite(_database_path(service)) as connection:
         pending_ids = [
             row[0]
@@ -166,10 +165,10 @@ def test_later_append_delivers_prior_outbox_once(
                 "SELECT event_id FROM m0_event_outbox ORDER BY event_id"
             ).fetchall()
         ]
-    assert pending_ids == ["event_2"]
+    assert pending_ids == ["event_1", "event_2"]
 
 
-def test_initialize_delivers_outbox_left_by_previous_process(
+def test_initialize_does_not_deliver_outbox_left_by_previous_process(
     service: M0PlatformService,
     tmp_path: Path,
 ) -> None:
@@ -184,12 +183,12 @@ def test_initialize_delivers_outbox_left_by_previous_process(
     restarted_service.initialize()
 
     audit_path = tmp_path / "runtime" / "audit" / "learning_events.jsonl"
-    assert '"event_id":"event_1"' in audit_path.read_text(encoding="utf-8")
+    assert not audit_path.exists()
     with connect_sqlite(_database_path(service)) as connection:
         outbox_count = connection.execute(
             "SELECT COUNT(*) FROM m0_event_outbox"
         ).fetchone()[0]
-    assert outbox_count == 0
+    assert outbox_count == 1
 
 
 def test_event_and_outbox_roll_back_together_on_outbox_failure(
@@ -340,7 +339,28 @@ def test_initialize_rejects_weakened_m0_event_constraints(
     assert "CHECK" not in schema_sql.upper()
 
 
-def test_prepare_django_frontend_remains_skipped(
+def test_prepare_django_frontend_preserves_legacy_skipped_contract(
+    service: M0PlatformService,
+) -> None:
+    service.initialize()
+    actor = ActorContext(
+        actor_id="pseudonym_teacher",
+        role="teacher",
+        course_ids=["course_1"],
+        class_ids=["class_1"],
+        issued_at=NOW,
+    )
+
+    status = service.prepare_django_frontend(actor, NOW)
+
+    assert status.status == "skipped"
+    assert status.progress == 0.0
+    assert status.result_ref is None
+    assert status.error_code is None
+    assert status.finished_at == NOW
+
+
+def test_prepare_django_frontend_does_not_require_runtime_readiness(
     service: M0PlatformService,
 ) -> None:
     actor = ActorContext(

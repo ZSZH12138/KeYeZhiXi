@@ -1,0 +1,10 @@
+{% extends "course_insight/base.html" %}
+{% block title %}开始测评 · 课业智析{% endblock %}
+{% block content %}
+  <h1>开始测评</h1>
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">生成试卷</button>
+  </form>
+{% endblock %}
