@@ -47,6 +47,7 @@ _TABLE_ORDER = (
     "m0_event_outbox",
     "m0_assessment_runs",
     "m4_task_plans",
+    "m4_intent_decisions",
     "m5_learner_states",
     "m5_class_states",
     "m5_state_updates",
@@ -73,6 +74,9 @@ _SOURCE_SELECTS = {
         SELECT * FROM m0_assessment_runs ORDER BY operation_id
     """,
     "m4_task_plans": "SELECT * FROM m4_task_plans ORDER BY task_id",
+    "m4_intent_decisions": """
+        SELECT * FROM m4_intent_decisions ORDER BY request_key
+    """,
     "m5_learner_states": """
         SELECT * FROM m5_learner_states
         ORDER BY course_id, class_id, learner_id, state_version
@@ -114,6 +118,7 @@ _IDENTITY_COLUMNS = {
     "m0_event_outbox": ("event_id",),
     "m0_assessment_runs": ("operation_id",),
     "m4_task_plans": ("task_id",),
+    "m4_intent_decisions": ("request_key",),
     "m5_learner_states": (
         "course_id",
         "class_id",
@@ -337,6 +342,30 @@ def _read_and_validate_source(
     return read_and_validate_source(source)
 
 
+def import_table_order() -> tuple[str, ...]:
+    """Return the immutable fixed import order."""
+
+    return _TABLE_ORDER
+
+
+def source_table_columns(table: str) -> tuple[str, ...]:
+    """Return the exact supported SQLite source shape for one table."""
+
+    from course_insight.infrastructure.postgresql.sqlite_import_destination import (
+        _COLUMNS,
+    )
+
+    if table not in _TABLE_ORDER:
+        raise ValueError("table is outside the migration allowlist")
+    if table == "m4_intent_decisions":
+        return _COLUMNS[table]
+    return tuple(
+        column
+        for column in _COLUMNS[table]
+        if column not in {"payload_checksum", "schema_version"}
+    )
+
+
 def _validate_contract_identity(
     table: str,
     row: Any,
@@ -456,4 +485,6 @@ __all__ = [
     "PreparedImportRow",
     "SQLiteToPostgresMigrator",
     "TableMigrationReport",
+    "import_table_order",
+    "source_table_columns",
 ]

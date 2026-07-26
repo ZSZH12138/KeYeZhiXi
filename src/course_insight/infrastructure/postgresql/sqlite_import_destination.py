@@ -84,6 +84,23 @@ _COLUMNS = {
         "payload_checksum",
         "schema_version",
     ),
+    "m4_intent_decisions": (
+        "request_key",
+        "resolved_task_type",
+        "decision_status",
+        "decision_source",
+        "adapter_id",
+        "adapter_version",
+        "policy_version",
+        "confidence",
+        "margin",
+        "input_checksum",
+        "reason_codes_json",
+        "shadow_json",
+        "schema_version",
+        "payload_checksum",
+        "created_at",
+    ),
     "m5_learner_states": (
         "snapshot_id",
         "course_id",
@@ -194,6 +211,7 @@ _IDENTITIES = {
     "m0_event_outbox": ("event_id",),
     "m0_assessment_runs": ("operation_id",),
     "m4_task_plans": ("task_id",),
+    "m4_intent_decisions": ("request_key",),
     "m5_learner_states": (
         "course_id",
         "class_id",
@@ -214,6 +232,9 @@ _IDENTITIES = {
 _JSON_COLUMNS = {
     "m0_learning_events": frozenset({"payload"}),
     "m4_task_plans": frozenset({"payload"}),
+    "m4_intent_decisions": frozenset(
+        {"reason_codes_json", "shadow_json"}
+    ),
     "m5_learner_states": frozenset({"payload"}),
     "m5_class_states": frozenset({"payload"}),
     "m5_state_updates": frozenset({"payload"}),
@@ -242,6 +263,7 @@ _TIMESTAMP_COLUMNS = {
     "m0_assessment_runs": frozenset(
         {"lease_until", "created_at", "updated_at"}
     ),
+    "m4_intent_decisions": frozenset({"created_at"}),
     "m8_scoring_results": frozenset({"finalized_at"}),
     "m9_teacher_analytics": frozenset({"generated_at"}),
 }

@@ -566,6 +566,7 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
         "0007_m9_teacher_analytics.sql",
         "0008_m0_review_workflow.sql",
         "0009_m0_workflow_recovery_freeze.sql",
+        "0010_m4_intent_decisions.sql",
     )
     all_sql = "\n".join(migration.sql for migration in migrations)
     for table_name in CORE_TABLES:
@@ -579,6 +580,32 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
     assert "TEXT" in all_sql
     assert "CHAR(64)" in all_sql
     assert "BOOLEAN" in MIGRATION_TABLE_SQL
+
+
+def test_m4_intent_migration_is_checksum_locked_and_constraint_complete() -> None:
+    migration = load_migrations()[-1]
+
+    assert migration.version == 10
+    assert migration.name == "m4_intent_decisions"
+    assert migration.checksum == hashlib.sha256(
+        migration.path.read_bytes()
+    ).hexdigest()
+    assert len(migration.checksum) == 64
+    sql = migration.sql
+    assert "CREATE TABLE m4_intent_decisions" in sql
+    assert "request_key TEXT PRIMARY KEY" in sql
+    assert "confidence DOUBLE PRECISION" in sql
+    assert "margin DOUBLE PRECISION" in sql
+    assert "reason_codes_json JSONB NOT NULL" in sql
+    assert "shadow_json JSONB" in sql
+    assert "created_at TIMESTAMPTZ NOT NULL" in sql
+    assert "decision_status IN (" in sql
+    assert "resolved_task_type IN (" in sql
+    assert "decision_source IN (" in sql
+    assert "jsonb_typeof(reason_codes_json) = 'array'" in sql
+    assert "jsonb_typeof(shadow_json) = 'object'" in sql
+    assert "schema_version = 1" in sql
+    assert sql.count("~ '^[0-9a-f]{64}$'") == 2
 
 
 def test_contract_payload_tables_store_checksum_and_schema_version() -> None:

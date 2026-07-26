@@ -31,6 +31,10 @@ from course_insight.infrastructure.postgresql.pool import (
 from course_insight.modules.m4_task_orchestration.identity import (
     canonical_idempotency_key,
 )
+from course_insight.modules.m4_task_orchestration.intent import IntentStatus
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    StoredIntentDecision,
+)
 from course_insight.modules.m6_tutoring_fsm.identity import (
     EvidenceIdentity,
     derive_identifier,
@@ -95,6 +99,32 @@ def _m4_plan(token: str, created_at: datetime) -> tuple[TaskPlan, str]:
 
 def _fingerprint(token: str, kind: str) -> str:
     return hashlib.sha256(f"{kind}:{token}".encode("utf-8")).hexdigest()
+
+
+def _m4_intent(token: str, *, adapter_version: str = "v1") -> StoredIntentDecision:
+    return StoredIntentDecision(
+        request_key=_fingerprint(token, "intent-request"),
+        resolved_task_type="practice",
+        decision_status=IntentStatus.ACCEPTED,
+        decision_source="active_model",
+        adapter_id="live-adapter",
+        adapter_version=adapter_version,
+        policy_version="intent-policy-v1",
+        confidence=0.91,
+        margin=0.31,
+        input_checksum=_fingerprint(token, "private-input"),
+        reason_codes=("model_accepted",),
+        created_at=NOW,
+        shadow_label="qa",
+        shadow_status=IntentStatus.ACCEPTED,
+        shadow_adapter_id="shadow-adapter",
+        shadow_adapter_version="shadow-v1",
+        shadow_confidence=0.82,
+        shadow_margin=0.22,
+        shadow_reason_codes=("shadow_accepted",),
+        shadow_agrees=False,
+        _generate_checksum=True,
+    )
 
 
 def _m6_record(
@@ -235,6 +265,48 @@ def test_real_postgres_m4_concurrency_jsonb_checksum_and_recovery(
                 connection.execute(
                     "DELETE FROM m4_task_plans WHERE task_id = %s",
                     (first.task_id,),
+                )
+
+
+def test_real_postgres_m4_intent_round_trip_first_writer_and_checksums(
+    postgres_pool: PostgresPool,
+) -> None:
+    token = uuid4().hex
+    repository = PostgresM4Repository(postgres_pool)
+    first = _m4_intent(token)
+    competitor = _m4_intent(token, adapter_version="v2")
+    try:
+        winner = repository.insert_or_get_intent_decision(first)
+        replay = repository.insert_or_get_intent_decision(competitor)
+        restored = PostgresM4Repository(postgres_pool).get_intent_decision(
+            first.request_key
+        )
+
+        assert winner == replay == restored == first
+        with postgres_pool.connection() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS row_count,
+                    MIN(pg_typeof(reason_codes_json)::text) AS reason_type,
+                    MIN(pg_typeof(created_at)::text) AS created_at_type,
+                    MIN(payload_checksum) AS payload_checksum
+                FROM m4_intent_decisions
+                WHERE request_key = %s
+                """,
+                (first.request_key,),
+            ).fetchone()
+        assert row is not None
+        assert int(row["row_count"]) == 1
+        assert row["reason_type"] == "jsonb"
+        assert row["created_at_type"] == "timestamp with time zone"
+        assert row["payload_checksum"] == first.payload_checksum
+    finally:
+        with postgres_pool.connection() as connection:
+            with connection.transaction():
+                connection.execute(
+                    "DELETE FROM m4_intent_decisions WHERE request_key = %s",
+                    (first.request_key,),
                 )
 
 

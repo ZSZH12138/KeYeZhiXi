@@ -9,6 +9,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from psycopg.types.json import Jsonb
 
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.contracts.events import LearningEvent
@@ -18,6 +19,7 @@ from course_insight.infrastructure.postgresql.sqlite_import import (
     PreparedImportRow,
     SQLiteToPostgresMigrator,
 )
+from course_insight.infrastructure.postgresql import sqlite_import
 from course_insight.infrastructure.postgresql.sqlite_import import (
     _validate_contract_identity,
 )
@@ -28,6 +30,10 @@ from course_insight.infrastructure.sqlite import SCHEMA_VERSION
 from course_insight.infrastructure.sqlite.m4_repository import SQLiteM4Repository
 from course_insight.infrastructure.sqlite.m0_repository import SQLiteM0Repository
 from course_insight.modules.m0_platform.workflow import AssessmentRun
+from course_insight.modules.m4_task_orchestration.intent import IntentStatus
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    StoredIntentDecision,
+)
 
 
 NOW = datetime(2026, 7, 25, 8, 0, tzinfo=timezone.utc)
@@ -60,6 +66,42 @@ def _source_with_plans(path: Path, seeds: str = "a") -> Path:
     for seed in seeds:
         plan, key = _plan(seed)
         repository.save_task_plan(plan, key)
+    return path
+
+
+def _decision(seed: str) -> StoredIntentDecision:
+    return StoredIntentDecision(
+        request_key=seed * 64,
+        resolved_task_type="practice",
+        decision_status=IntentStatus.ACCEPTED,
+        decision_source="active_model",
+        adapter_id="test-adapter",
+        adapter_version=f"adapter-{seed}",
+        policy_version="intent-policy-v1",
+        confidence=0.91,
+        margin=0.31,
+        input_checksum=hashlib.sha256(
+            f"private-{seed}".encode("utf-8")
+        ).hexdigest(),
+        reason_codes=("model_accepted",),
+        created_at=NOW + timedelta(seconds=ord(seed)),
+        shadow_label="qa",
+        shadow_status=IntentStatus.ACCEPTED,
+        shadow_adapter_id="shadow-adapter",
+        shadow_adapter_version="shadow-v1",
+        shadow_confidence=0.82,
+        shadow_margin=0.22,
+        shadow_reason_codes=("shadow_accepted",),
+        shadow_agrees=False,
+        _generate_checksum=True,
+    )
+
+
+def _source_with_intents(path: Path, seeds: str = "a") -> Path:
+    repository = SQLiteM4Repository(path)
+    repository.initialize()
+    for seed in seeds:
+        repository.insert_or_get_intent_decision(_decision(seed))
     return path
 
 
@@ -143,6 +185,113 @@ def test_dry_run_validates_without_writing_and_writes_safe_report(
     assert decoded["partial_envelope_rows"] == 0
 
 
+def test_import_manifest_includes_exact_m4_intent_columns() -> None:
+    assert "m4_intent_decisions" in sqlite_import.import_table_order()
+    assert sqlite_import.source_table_columns("m4_intent_decisions") == (
+        "request_key",
+        "resolved_task_type",
+        "decision_status",
+        "decision_source",
+        "adapter_id",
+        "adapter_version",
+        "policy_version",
+        "confidence",
+        "margin",
+        "input_checksum",
+        "reason_codes_json",
+        "shadow_json",
+        "schema_version",
+        "payload_checksum",
+        "created_at",
+    )
+
+
+def test_intent_import_reports_empty_and_checksum_verified_rows(
+    tmp_path: Path,
+) -> None:
+    empty_source = _source_with_intents(tmp_path / "empty.sqlite3", "")
+    empty = SQLiteToPostgresMigrator(
+        source_path=empty_source,
+        destination=_MemoryDestination(),
+    ).run(mode="dry-run")
+    empty_table = next(
+        table for table in empty.tables if table.table == "m4_intent_decisions"
+    )
+    assert empty_table.source_count == empty_table.verified_count == 0
+
+    source = _source_with_intents(tmp_path / "source.sqlite3", "ab")
+    destination = _MemoryDestination()
+    report = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=destination,
+    ).run(mode="apply", batch_size=1)
+    intent_table = next(
+        table for table in report.tables if table.table == "m4_intent_decisions"
+    )
+    assert intent_table.source_count == intent_table.verified_count == 2
+    assert len(intent_table.checksum_digest) == 64
+    assert {
+        row.checksum
+        for (table, _), row in destination.rows.items()
+        if table == "m4_intent_decisions"
+    } == {_decision("a").payload_checksum, _decision("b").payload_checksum}
+
+
+def test_intent_import_resumes_after_partial_batches_without_overwrite(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_intents(tmp_path / "source.sqlite3", "ab")
+    destination = _MemoryDestination(fail_identity=("b" * 64,))
+    report_path = tmp_path / "report.json"
+    migrator = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=destination,
+    )
+
+    with pytest.raises(MigrationError, match="MIGRATION_BATCH_FAILED"):
+        migrator.run(mode="apply", batch_size=1, report_path=report_path)
+
+    partial = json.loads(report_path.read_text(encoding="utf-8"))
+    assert partial["completed_batches"] == 1
+    assert ("m4_intent_decisions", ("a" * 64,)) in destination.rows
+    destination.fail_identity = None
+
+    resumed = migrator.run(mode="apply", batch_size=1, report_path=report_path)
+
+    assert resumed.status == "completed"
+    assert len(
+        [
+            key
+            for key in destination.rows
+            if key[0] == "m4_intent_decisions"
+        ]
+    ) == 2
+
+
+def test_intent_import_rejects_tampered_checksum_before_target_write(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_intents(tmp_path / "source.sqlite3")
+    connection = __import__("sqlite3").connect(source)
+    try:
+        connection.execute(
+            "UPDATE m4_intent_decisions SET payload_checksum = ?",
+            ("0" * 64,),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    destination = _MemoryDestination()
+
+    with pytest.raises(MigrationError, match="SOURCE_VALIDATION_FAILED"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=destination,
+        ).run(mode="apply")
+
+    assert destination.apply_calls == 0
+
+
 def test_apply_is_batched_verified_and_idempotent(tmp_path: Path) -> None:
     source = _source_with_plans(tmp_path / "source.sqlite3", "ab")
     destination = _MemoryDestination()
@@ -211,6 +360,7 @@ def test_apply_uses_snapshot_checksum_from_reader_not_pre_read_file_hash(
                 "m0_event_outbox",
                 "m0_assessment_runs",
                 "m4_task_plans",
+                "m4_intent_decisions",
                 "m5_learner_states",
                 "m5_class_states",
                 "m5_state_updates",
@@ -517,6 +667,65 @@ def _prepared_plan_row() -> PreparedImportRow:
     )
 
 
+def _prepared_intent_row() -> PreparedImportRow:
+    decision = _decision("a")
+    shadow = decision.shadow_payload()
+    columns = (
+        "request_key",
+        "resolved_task_type",
+        "decision_status",
+        "decision_source",
+        "adapter_id",
+        "adapter_version",
+        "policy_version",
+        "confidence",
+        "margin",
+        "input_checksum",
+        "reason_codes_json",
+        "shadow_json",
+        "schema_version",
+        "payload_checksum",
+        "created_at",
+    )
+    values = (
+        decision.request_key,
+        decision.resolved_task_type,
+        decision.decision_status.value,
+        decision.decision_source,
+        decision.adapter_id,
+        decision.adapter_version,
+        decision.policy_version,
+        decision.confidence,
+        decision.margin,
+        decision.input_checksum,
+        json.dumps(
+            list(decision.reason_codes),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        json.dumps(
+            shadow,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        decision.schema_version,
+        decision.payload_checksum,
+        decision.created_at.isoformat(),
+    )
+    return PreparedImportRow(
+        table="m4_intent_decisions",
+        columns=columns,
+        values=values,
+        identity=(decision.request_key,),
+        version=(decision.schema_version,),
+        checksum=str(decision.payload_checksum),
+        fingerprint="e" * 64,
+        contract_validated=True,
+    )
+
+
 def test_postgres_destination_uses_one_transaction_and_fixed_allowlist() -> None:
     row = _prepared_plan_row()
     selected = dict(zip(row.columns, row.values, strict=True))
@@ -579,6 +788,30 @@ def test_postgres_destination_supports_post_commit_verify_and_empty_batches() ->
     )
     with pytest.raises(ValueError, match="allowlist"):
         destination.apply_batch("m4_task_plans", (invalid_columns,))
+
+
+def test_postgres_destination_upserts_and_verifies_m4_intent_json_and_utc() -> None:
+    row = _prepared_intent_row()
+    selected = dict(zip(row.columns, row.values, strict=True))
+    selected["reason_codes_json"] = json.loads(selected["reason_codes_json"])
+    selected["shadow_json"] = json.loads(selected["shadow_json"])
+    selected["created_at"] = datetime.fromisoformat(selected["created_at"])
+    connection = _FakePostgresConnection(selected)
+    destination = PostgresImportDestination(_FakePool(connection))
+
+    destination.apply_batch("m4_intent_decisions", (row,))
+
+    insert, parameters = next(
+        execution
+        for execution in connection.executed
+        if execution[0].lstrip().startswith(
+            "INSERT INTO m4_intent_decisions"
+        )
+    )
+    assert "ON CONFLICT (request_key) DO NOTHING" in insert
+    assert isinstance(parameters[10], Jsonb)
+    assert isinstance(parameters[11], Jsonb)
+    assert parameters[14].tzinfo is timezone.utc
 
 
 def test_cli_defaults_to_dry_run_without_database_url(
