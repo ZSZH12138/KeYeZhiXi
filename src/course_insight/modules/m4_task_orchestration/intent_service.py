@@ -41,6 +41,9 @@ RequestKeyFactory = Callable[[Mapping[str, str]], str]
 _DECISION_SCHEMA_VERSION = 1
 _DETERMINISTIC_ADAPTER_ID = "m4-deterministic-intent"
 _DETERMINISTIC_ADAPTER_VERSION = "1"
+_ACCEPTED_DECISION_SOURCES = frozenset(
+    {"legal_hint", "high_precision_rule", "legacy_rule", "active_model"}
+)
 @dataclass(frozen=True, slots=True)
 class IntentRequest:
     """Private request value; it is never persisted as a whole."""
@@ -108,6 +111,8 @@ class StoredIntentDecision:
         object.__setattr__(self, "shadow_reason_codes", _validated_reason_codes(
             self.shadow_reason_codes
         ))
+        _validate_created_at(self.created_at)
+        object.__setattr__(self, "created_at", self.created_at.astimezone(timezone.utc))
         self._validate_fields()
         calculated = self.recalculate_payload_checksum()
         if _generate_checksum and self.payload_checksum is None:
@@ -204,6 +209,14 @@ class StoredIntentDecision:
             self.decision_status, self.resolved_task_type, prefix="decision"
         )
         _validate_nonblank("decision_source", self.decision_source)
+        if (
+            self.decision_status is IntentStatus.ACCEPTED
+            and self.decision_source not in _ACCEPTED_DECISION_SOURCES
+        ) or (
+            self.decision_status is not IntentStatus.ACCEPTED
+            and self.decision_source != "refusal"
+        ):
+            raise ValueError("intent decision source is inconsistent with status")
         _validate_nonblank("adapter_id", self.adapter_id)
         _validate_nonblank("adapter_version", self.adapter_version)
         _validate_nonblank("policy_version", self.policy_version)
@@ -276,6 +289,8 @@ class M4IntentService:
             raise ValueError("request key factory must be callable")
         if mode in {"shadow", "active"} and adapter is None:
             raise ValueError(f"{mode} intent mode requires an adapter")
+        if adapter is not None and not isinstance(adapter, IntentAdapter):
+            raise ValueError("adapter must implement IntentAdapter")
         _validate_nonblank("policy_version", policy_version)
         self._repository = repository
         self._request_key_factory = request_key_factory
@@ -355,7 +370,7 @@ class M4IntentService:
         if not normalized_text:
             return self._refusal(IntentStatus.INVALID, ("blank_student_text",))
         hint = normalize_hint(request.task_type_hint)
-        if request.task_type_hint is not None:
+        if hint:
             if hint not in SUPPORTED_TASK_TYPES:
                 return self._refusal(IntentStatus.INVALID, ("unsupported_hint",))
             return self._deterministic_accept(
@@ -695,8 +710,6 @@ def _safe_adapter_metadata(adapter: IntentAdapter) -> tuple[str, str]:
             else "unavailable"
         ),
     )
-
-
 def _invalid_attempt(
     reason_code: str,
     adapter_id: str,
@@ -711,20 +724,14 @@ def _invalid_attempt(
         margin=None,
         reason_codes=(reason_code,),
     )
-
-
 def _outcome_adapter_metadata(
     attempt: _AdapterAttempt | None,
 ) -> tuple[str, str]:
     if attempt is None:
         return _DETERMINISTIC_ADAPTER_ID, _DETERMINISTIC_ADAPTER_VERSION
     return attempt.adapter_id, attempt.adapter_version
-
-
 def _merge_reasons(*groups: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(code for group in groups for code in group))
-
-
 def _validated_reason_codes(value: object) -> tuple[str, ...]:
     if not isinstance(value, (list, tuple)):
         raise ValueError("reason codes must be a list or tuple")
@@ -732,8 +739,6 @@ def _validated_reason_codes(value: object) -> tuple[str, ...]:
     if any(not isinstance(code, str) or not code.strip() for code in normalized):
         raise ValueError("reason codes must contain nonblank strings")
     return normalized
-
-
 def _validate_status_and_label(
     status: object,
     label: object,
@@ -748,8 +753,6 @@ def _validate_status_and_label(
         raise ValueError(f"accepted {prefix} requires a task type")
     if status is not IntentStatus.ACCEPTED and label is not None:
         raise ValueError(f"non-accepted {prefix} cannot have a task type")
-
-
 def _validate_optional_probability(name: str, value: object) -> None:
     if value is None:
         return
@@ -760,13 +763,9 @@ def _validate_optional_probability(name: str, value: object) -> None:
         or not 0.0 <= float(value) <= 1.0
     ):
         raise ValueError(f"{name} must be a finite probability or None")
-
-
 def _validate_nonblank(name: str, value: object) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must not be blank")
-
-
 def _validate_sha256(name: str, value: object) -> None:
     if (
         not isinstance(value, str)
@@ -774,8 +773,6 @@ def _validate_sha256(name: str, value: object) -> None:
         or any(character not in "0123456789abcdef" for character in value)
     ):
         raise ValueError(f"{name} must be a lowercase SHA-256 digest")
-
-
 def _validate_created_at(value: object) -> None:
     if (
         not isinstance(value, datetime)
@@ -783,8 +780,6 @@ def _validate_created_at(value: object) -> None:
         or value.utcoffset() is None
     ):
         raise ValueError("created_at must be timezone-aware")
-
-
 def _unsupported(message: str, **details: object) -> DomainError:
     return DomainError(
         code="UNSUPPORTED_TASK",

@@ -4,8 +4,8 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import replace
-from datetime import datetime, timezone
-from typing import Any
+from datetime import datetime, timedelta, timezone
+from typing import Any, cast
 
 import pytest
 
@@ -173,6 +173,18 @@ def test_same_context_different_hint_or_text_has_distinct_private_decision() -> 
     assert len(repository.intent_decisions) == 2
 
 
+def test_blank_and_absent_hint_share_one_unpoisoned_rule_decision() -> None:
+    repository = InMemoryM4Repository()
+    service = _make_intent_service(repository, mode="rules")
+
+    blank_hint = service.resolve(**_request("请安排练习", "   "))
+    absent_hint = service.resolve(**_request("请安排练习", None))
+
+    assert blank_hint == absent_hint == "practice"
+    assert len(repository.intent_decisions) == 1
+    assert _only_decision(repository).decision_source == "high_precision_rule"
+
+
 def test_shadow_prediction_is_audited_but_cannot_override_rule() -> None:
     adapter = RecordingAdapter(
         IntentPrediction.accepted(
@@ -283,6 +295,19 @@ def test_rules_mode_never_calls_injected_adapter() -> None:
 
     assert service.resolve(**_request("请给我练习")) == "practice"
     assert adapter.calls == ()
+
+
+@pytest.mark.parametrize("mode", ["shadow", "active"])
+def test_model_mode_rejects_non_adapter_wiring_at_construction(mode: str) -> None:
+    with pytest.raises(ValueError, match="IntentAdapter"):
+        M4IntentService(
+            InMemoryM4Repository(),
+            _canonical_key,
+            mode=cast(Any, mode),
+            adapter=cast(Any, object()),
+            policy=IntentPolicy(min_confidence=0.70, min_margin=0.10),
+            policy_version="policy-1",
+        )
 
 
 def test_blank_text_refuses_before_adapter_and_is_replayable() -> None:
@@ -507,6 +532,74 @@ def test_stored_decision_checksum_detects_field_tampering() -> None:
             resolved_task_type="diagnostic",
             payload_checksum=stored.payload_checksum,
         )
+
+
+@pytest.mark.parametrize("decision_source", ["refusal", "invented_source"])
+def test_accepted_decision_rejects_illegal_source_at_construction(
+    decision_source: str,
+) -> None:
+    repository = InMemoryM4Repository()
+    assert _make_intent_service(repository).resolve(**_request("练习")) == "practice"
+    stored = _only_decision(repository)
+
+    with pytest.raises(ValueError, match="decision source"):
+        replace(
+            stored,
+            decision_source=decision_source,
+            payload_checksum=None,
+            _generate_checksum=True,
+        )
+
+
+def test_refusal_rejects_accepted_source_at_construction() -> None:
+    repository = InMemoryM4Repository()
+    with pytest.raises(DomainError):
+        _make_intent_service(repository).resolve(**_request(RAW_PRIVATE_TEXT))
+    stored = _only_decision(repository)
+
+    with pytest.raises(ValueError, match="decision source"):
+        replace(
+            stored,
+            decision_source="legacy_rule",
+            payload_checksum=None,
+            _generate_checksum=True,
+        )
+
+
+def test_replay_rejects_checksum_valid_semantically_illegal_source() -> None:
+    repository = InMemoryM4Repository()
+    service = _make_intent_service(repository)
+    assert service.resolve(**_request("练习")) == "practice"
+    poisoned = _only_decision(repository)
+    object.__setattr__(poisoned, "decision_source", "refusal")
+    object.__setattr__(
+        poisoned,
+        "payload_checksum",
+        poisoned.recalculate_payload_checksum(),
+    )
+
+    with pytest.raises(RuntimeError, match="corrupt"):
+        service.resolve(**_request("练习"))
+
+
+def test_equivalent_created_at_offsets_have_one_utc_canonical_checksum() -> None:
+    repository = InMemoryM4Repository()
+    assert _make_intent_service(repository).resolve(**_request("练习")) == "practice"
+    stored = _only_decision(repository)
+    offset_created_at = stored.created_at.astimezone(
+        timezone(timedelta(hours=8))
+    )
+
+    equivalent = replace(
+        stored,
+        created_at=offset_created_at,
+        payload_checksum=None,
+        _generate_checksum=True,
+    )
+
+    assert equivalent.created_at.tzinfo is timezone.utc
+    assert equivalent.created_at == stored.created_at
+    assert equivalent.payload_checksum == stored.payload_checksum
 
 
 def test_persisted_decision_cannot_omit_payload_checksum() -> None:
