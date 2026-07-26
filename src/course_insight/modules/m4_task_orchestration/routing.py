@@ -2,11 +2,16 @@
 
 from __future__ import annotations
 
-import re
 from collections.abc import Mapping
 
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import KnowledgeBundle
+from course_insight.modules.m4_task_orchestration.intent_identity import (
+    normalize_hint,
+)
+from course_insight.modules.m4_task_orchestration.intent_rules import (
+    resolve_task_type_from_rules,
+)
 
 
 ASSESSMENT_TASK_TYPES = frozenset(
@@ -16,44 +21,6 @@ SUPPORTED_TASK_TYPES = frozenset({"qa", *ASSESSMENT_TASK_TYPES})
 ASSESSMENT_WORKFLOW = ("M8", "M2", "M7", "M5", "M6", "M9")
 QA_WORKFLOW = ("M2", "M7", "M6")
 
-_TASK_TEXT_RULES = (
-    ("diagnostic", ("diagnostic", "diagnosis", "诊断", "摸底")),
-    ("correction", ("correction", "correct my", "订正", "纠错", "错题")),
-    ("practice", ("practice", "exercise", "练习", "训练")),
-    (
-        "stage_assessment",
-        (
-            "stage assessment",
-            "assessment",
-            "exam",
-            "阶段测评",
-            "阶段测试",
-            "测评",
-            "考试",
-            "考核",
-        ),
-    ),
-    (
-        "qa",
-        (
-            "question",
-            "explain",
-            "why",
-            "how",
-            "what",
-            "问答",
-            "提问",
-            "解释",
-            "为什么",
-            "怎么",
-            "如何",
-            "?",
-            "？",
-        ),
-    ),
-)
-
-
 def resolve_task_type(student_text: str, task_type_hint: str | None) -> str:
     """Resolve a supported task using hint-first deterministic rules."""
 
@@ -61,16 +28,16 @@ def resolve_task_type(student_text: str, task_type_hint: str | None) -> str:
     if not normalized_text:
         _raise_unsupported("student task text must not be blank")
     if task_type_hint is not None:
-        normalized_hint = "_".join(task_type_hint.split()).casefold()
+        normalized_hint = normalize_hint(task_type_hint)
         if normalized_hint not in SUPPORTED_TASK_TYPES:
             _raise_unsupported(
                 "task type is not supported",
                 task_type=normalized_hint,
             )
         return normalized_hint
-    for task_type, keywords in _TASK_TEXT_RULES:
-        if any(_contains_keyword(normalized_text, keyword) for keyword in keywords):
-            return task_type
+    resolved_task_type = resolve_task_type_from_rules(normalized_text)
+    if resolved_task_type is not None:
+        return resolved_task_type
     _raise_unsupported("student task text could not be classified")
 
 
@@ -130,15 +97,6 @@ def workflow_for(task_type: str) -> list[str]:
         else QA_WORKFLOW
     )
     return list(source)
-
-
-def _contains_keyword(text: str, keyword: str) -> bool:
-    if keyword.isascii() and keyword not in {"?"}:
-        return re.search(
-            rf"(?<!\w){re.escape(keyword)}(?!\w)",
-            text,
-        ) is not None
-    return keyword in text
 
 
 def _raise_unsupported(message: str, **details: str) -> None:

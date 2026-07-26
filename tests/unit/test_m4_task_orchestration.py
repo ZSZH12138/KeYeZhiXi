@@ -227,16 +227,17 @@ def test_text_rules_recognize_all_task_types(
     assert plan.task_type == expected
 
 
-def test_conflicting_keywords_use_fixed_specificity_order() -> None:
+def test_conflicting_keywords_are_rejected_instead_of_using_tuple_order() -> None:
     service, _ = _service()
 
-    plan = _create(
-        service,
-        student_text="diagnostic practice assessment",
-        task_type_hint=None,
-    )
+    with pytest.raises(DomainError) as captured:
+        _create(
+            service,
+            student_text="diagnostic practice assessment",
+            task_type_hint=None,
+        )
 
-    assert plan.task_type == "diagnostic"
+    assert captured.value.code == "UNSUPPORTED_TASK"
 
 
 @pytest.mark.parametrize(
