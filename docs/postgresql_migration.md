@@ -31,8 +31,10 @@
     payload checksum。该表没有学生原文列；公开 `TaskPlan` 和既有 M4 表不扩字段。
 - `src/course_insight/infrastructure/postgresql/sqlite_import.py`
   - 显式、可恢复、批量提交的导入编排
+- `src/course_insight/infrastructure/postgresql/sqlite_import_checkpoint.py`
+  - 与逻辑源快照、SQLite schema、PostgreSQL migration、目标及批计划绑定的原子 checkpoint
 - `src/course_insight/infrastructure/postgresql/sqlite_import_cli.py`
-  - `--project-root`、`--dry-run`、`--apply` 命令入口
+  - `--project-root`、`--dry-run`、`--apply`、`--checkpoint` 命令入口
 - `scripts/migrate_sqlite_to_postgres.py`
   - 包装脚本
 
@@ -42,12 +44,15 @@
 
 ```shell
 python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --dry-run
-python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --apply
+python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --checkpoint runtime/migration-checkpoint.json --apply
 ```
 
 语义是：
 1. `--dry-run`：先验证 SQLite 源与批处理计划。
-2. `--apply`：通过 `--project-root` 加载单一 `PlatformSettings`，要求解析后的 `database.backend=postgresql` 且 `database.url` 可用；然后执行 PostgreSQL schema migration，再分批导入。
+2. `--apply`：通过 `--project-root` 加载单一 `PlatformSettings`，要求解析后的
+   `database.backend=postgresql` 且 `database.url` 可用；然后执行 PostgreSQL
+   schema migration，再分批导入。`--checkpoint` 应指向仅供本次迁移使用的持久文件；
+   若省略，CLI 使用 `<report>.checkpoint.json`。
 
 若配置非法、后端不是 PostgreSQL、或解析后 URL 缺失，CLI 会安全输出 `MIGRATION_CONFIGURATION_INVALID` 并返回错误码 `2`。它不再直接硬编码读取 `DATABASE_URL`，而是复用 `config/app.json.database.url_env` 与统一配置加载链。
 
@@ -55,6 +60,31 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 处在同一个 PostgreSQL 事务中；该批任何一行失败，整个批次回滚。报告会在每批
 成功后更新 `completed_batches`，重复执行使用相同权威身份并校验 payload，
 同 ID 不同内容会失败而不是静默覆盖。
+
+### checkpoint 与跨进程恢复
+
+`--apply` 在首批写入前原子创建 checkpoint，并在每一个已回读校验且已提交的
+PostgreSQL 批次后，用同目录临时文件、`fsync` 和原子替换推进
+`next_batch_index`。进程在任意批次间退出后，使用相同命令和同一 checkpoint
+启动新进程即可恢复：
+
+1. 重新读取并验证完整 SQLite 逻辑快照；
+2. 严格核对 checkpoint checksum、格式版本、SQLite schema version、
+   PostgreSQL migration version、逻辑源快照 checksum、批大小、固定表顺序及
+   批次数；
+3. 核对由已解析目标的 host / port / database / user 等非密码字段计算的、
+   不泄漏 DSN 或凭据的 SHA-256 目标指纹；
+4. 对 checkpoint 标记为已提交的每一批执行目标回读校验；
+5. 只从第一个未完成批次继续写入；完成后把 checkpoint 原子标记为
+   `status=completed`。
+
+checkpoint 只保存摘要、版本和计数，不保存 DSN、源路径、行身份、学生文本或
+payload。checkpoint 被编辑、损坏、来自不同逻辑源、不同目标、不同 schema /
+migration version 或不同批计划时，导入器会在新的目标写入前用稳定错误码拒绝，
+不会猜测恢复。仅轮换同一目标的密码不会改变目标指纹；host、port、database、
+user 或 service 绑定变化会安全拒绝旧 checkpoint。运维人员应先确认目标和既有
+批次，再为新的迁移显式使用新的 checkpoint 文件，不得手工修改旧 checkpoint
+以绕过绑定。
 
 ## `source_file_checksum` 的精确定义
 

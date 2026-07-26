@@ -147,6 +147,9 @@ class _MemoryDestination:
         self.fail_identity = fail_identity
         self.apply_calls = 0
         self.verify_calls = 0
+        self.applied_batches: list[
+            tuple[str, tuple[tuple[object, ...], ...]]
+        ] = []
 
     def apply_batch(
         self,
@@ -154,6 +157,9 @@ class _MemoryDestination:
         rows: tuple[PreparedImportRow, ...],
     ) -> None:
         self.apply_calls += 1
+        self.applied_batches.append(
+            (table, tuple(row.identity for row in rows))
+        )
         snapshot = deepcopy(self.rows)
         try:
             for row in rows:
@@ -271,28 +277,59 @@ def test_intent_import_reports_empty_and_checksum_verified_rows(
     } == {_decision("a").payload_checksum, _decision("b").payload_checksum}
 
 
-def test_intent_import_resumes_after_partial_batches_without_overwrite(
+def test_intent_import_checkpoint_resumes_new_instance_at_first_incomplete_batch(
     tmp_path: Path,
 ) -> None:
     source = _source_with_intents(tmp_path / "source.sqlite3", "ab")
     destination = _MemoryDestination(fail_identity=("b" * 64,))
     report_path = tmp_path / "report.json"
-    migrator = SQLiteToPostgresMigrator(
-        source_path=source,
-        destination=destination,
-    )
+    checkpoint_path = tmp_path / "checkpoint.json"
+    destination_fingerprint = "d" * 64
 
     with pytest.raises(MigrationError, match="MIGRATION_BATCH_FAILED"):
-        migrator.run(mode="apply", batch_size=1, report_path=report_path)
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=destination,
+            destination_fingerprint=destination_fingerprint,
+        ).run(
+            mode="apply",
+            batch_size=1,
+            report_path=report_path,
+            checkpoint_path=checkpoint_path,
+        )
 
     partial = json.loads(report_path.read_text(encoding="utf-8"))
     assert partial["completed_batches"] == 1
+    checkpoint = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    assert checkpoint["status"] == "applying"
+    assert checkpoint["next_batch_index"] == 1
     assert ("m4_intent_decisions", ("a" * 64,)) in destination.rows
     destination.fail_identity = None
 
-    resumed = migrator.run(mode="apply", batch_size=1, report_path=report_path)
+    resumed = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=destination,
+        destination_fingerprint=destination_fingerprint,
+    ).run(
+        mode="apply",
+        batch_size=1,
+        report_path=report_path,
+        checkpoint_path=checkpoint_path,
+    )
 
     assert resumed.status == "completed"
+    assert resumed.completed_batches == 2
+    assert destination.verify_calls == 1
+    assert destination.apply_calls == 3
+    assert destination.applied_batches[-1] == (
+        "m4_intent_decisions",
+        (("b" * 64,),),
+    )
+    completed_checkpoint = json.loads(
+        checkpoint_path.read_text(encoding="utf-8")
+    )
+    assert completed_checkpoint["status"] == "completed"
+    assert completed_checkpoint["next_batch_index"] == 2
     assert len(
         [
             key
@@ -300,6 +337,174 @@ def test_intent_import_resumes_after_partial_batches_without_overwrite(
             if key[0] == "m4_intent_decisions"
         ]
     ) == 2
+
+
+def test_import_rejects_tampered_checkpoint_before_target_access(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "ab")
+    destination = _MemoryDestination(
+        fail_identity=(f"task_{'b' * 64}",)
+    )
+    checkpoint_path = tmp_path / "checkpoint.json"
+    with pytest.raises(MigrationError, match="MIGRATION_BATCH_FAILED"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=destination,
+            destination_fingerprint="d" * 64,
+        ).run(
+            mode="apply",
+            batch_size=1,
+            checkpoint_path=checkpoint_path,
+        )
+
+    tampered = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    tampered["next_batch_index"] = 0
+    checkpoint_path.write_text(json.dumps(tampered), encoding="utf-8")
+    before_apply_calls = destination.apply_calls
+    before_verify_calls = destination.verify_calls
+
+    with pytest.raises(MigrationError, match="MIGRATION_CHECKPOINT_INVALID"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=destination,
+            destination_fingerprint="d" * 64,
+        ).run(
+            mode="apply",
+            batch_size=1,
+            checkpoint_path=checkpoint_path,
+        )
+
+    assert destination.apply_calls == before_apply_calls
+    assert destination.verify_calls == before_verify_calls
+
+
+def test_import_redacts_structurally_malformed_checkpoint(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "ab")
+    destination = _MemoryDestination(
+        fail_identity=(f"task_{'b' * 64}",)
+    )
+    checkpoint_path = tmp_path / "checkpoint.json"
+    with pytest.raises(MigrationError, match="MIGRATION_BATCH_FAILED"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=destination,
+            destination_fingerprint="d" * 64,
+        ).run(
+            mode="apply",
+            batch_size=1,
+            checkpoint_path=checkpoint_path,
+        )
+
+    malformed = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+    malformed["status"] = ["student-private-text"]
+    malformed.pop("checkpoint_checksum")
+    unsigned = json.dumps(
+        malformed,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    malformed["checkpoint_checksum"] = hashlib.sha256(
+        unsigned.encode("utf-8")
+    ).hexdigest()
+    checkpoint_path.write_text(json.dumps(malformed), encoding="utf-8")
+    before_apply_calls = destination.apply_calls
+
+    with pytest.raises(MigrationError, match="MIGRATION_CHECKPOINT_INVALID"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=destination,
+            destination_fingerprint="d" * 64,
+        ).run(
+            mode="apply",
+            batch_size=1,
+            checkpoint_path=checkpoint_path,
+        )
+
+    assert destination.apply_calls == before_apply_calls
+
+
+def test_import_rejects_checkpoint_for_changed_logical_source(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "ab")
+    destination = _MemoryDestination(
+        fail_identity=(f"task_{'b' * 64}",)
+    )
+    checkpoint_path = tmp_path / "checkpoint.json"
+    with pytest.raises(MigrationError, match="MIGRATION_BATCH_FAILED"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=destination,
+            destination_fingerprint="d" * 64,
+        ).run(
+            mode="apply",
+            batch_size=1,
+            checkpoint_path=checkpoint_path,
+        )
+
+    plan, key = _plan("c")
+    SQLiteM4Repository(source).save_task_plan(plan, key)
+    before_apply_calls = destination.apply_calls
+    destination.fail_identity = None
+
+    with pytest.raises(
+        MigrationError,
+        match="MIGRATION_CHECKPOINT_SOURCE_MISMATCH",
+    ):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=destination,
+            destination_fingerprint="d" * 64,
+        ).run(
+            mode="apply",
+            batch_size=1,
+            checkpoint_path=checkpoint_path,
+        )
+
+    assert destination.apply_calls == before_apply_calls
+
+
+def test_import_rejects_checkpoint_for_another_destination(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "ab")
+    destination = _MemoryDestination(
+        fail_identity=(f"task_{'b' * 64}",)
+    )
+    checkpoint_path = tmp_path / "checkpoint.json"
+    with pytest.raises(MigrationError, match="MIGRATION_BATCH_FAILED"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=destination,
+            destination_fingerprint="d" * 64,
+        ).run(
+            mode="apply",
+            batch_size=1,
+            checkpoint_path=checkpoint_path,
+        )
+    destination.fail_identity = None
+    before_apply_calls = destination.apply_calls
+
+    with pytest.raises(
+        MigrationError,
+        match="MIGRATION_CHECKPOINT_DESTINATION_MISMATCH",
+    ):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=destination,
+            destination_fingerprint="e" * 64,
+        ).run(
+            mode="apply",
+            batch_size=1,
+            checkpoint_path=checkpoint_path,
+        )
+
+    assert destination.apply_calls == before_apply_calls
 
 
 def test_intent_import_rejects_tampered_checksum_before_target_write(
@@ -997,6 +1202,24 @@ def test_cli_defaults_to_dry_run_without_database_url(
     assert str(source.resolve()) not in output
 
 
+def test_cli_destination_binding_excludes_rotatable_credentials() -> None:
+    from course_insight.infrastructure.postgresql import sqlite_import_cli
+
+    first = sqlite_import_cli._destination_fingerprint(
+        "postgresql://importer:first-secret@db.internal:5432/course"
+    )
+    rotated = sqlite_import_cli._destination_fingerprint(
+        "postgresql://importer:second-secret@db.internal:5432/course"
+    )
+    another_database = sqlite_import_cli._destination_fingerprint(
+        "postgresql://importer:first-secret@db.internal:5432/other"
+    )
+
+    assert first == rotated
+    assert first != another_database
+    assert len(first) == 64
+
+
 def test_cli_apply_requires_database_url_without_echoing_environment(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],
@@ -1083,6 +1306,7 @@ def test_cli_explicit_apply_runs_validation_then_closes_pool(
 
     pool = _Pool()
     migrations: list[object] = []
+    checkpoint = tmp_path / "migration-checkpoint.json"
     monkeypatch.setattr(
         sqlite_import_cli,
         "create_postgres_pool",
@@ -1107,6 +1331,8 @@ def test_cli_explicit_apply_runs_validation_then_closes_pool(
             str(source),
             "--report",
             str(tmp_path / "report.json"),
+            "--checkpoint",
+            str(checkpoint),
             "--project-root",
             str(project_root),
             "--apply",
@@ -1121,6 +1347,13 @@ def test_cli_explicit_apply_runs_validation_then_closes_pool(
     assert migrations == [pool]
     assert pool.closed is True
     assert len(destination.rows) == 1
+    persisted_checkpoint = json.loads(checkpoint.read_text(encoding="utf-8"))
+    assert persisted_checkpoint["status"] == "completed"
+    assert persisted_checkpoint["next_batch_index"] == 1
+    assert persisted_checkpoint["destination_fingerprint"] == (
+        "338b6cc7b54e73b710144747a9d7adbe"
+        "2f73f9e94f33eb31ed7a2b7d8e366e5e"
+    )
 
 
 def test_internal_scope_columns_do_not_require_nonexistent_public_fields() -> None:

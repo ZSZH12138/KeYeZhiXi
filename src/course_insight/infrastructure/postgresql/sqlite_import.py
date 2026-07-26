@@ -35,6 +35,18 @@ from course_insight.contracts.tutoring import (
     StudentFeedbackPackage,
 )
 from course_insight.infrastructure.json_io import dumps_json, write_json
+from course_insight.infrastructure.postgresql.migration_runner import (
+    SCHEMA_VERSION as POSTGRES_MIGRATION_VERSION,
+)
+from course_insight.infrastructure.postgresql.sqlite_import_checkpoint import (
+    CheckpointBinding,
+    CheckpointError,
+    CheckpointState,
+    load_or_create_checkpoint,
+    validate_destination_fingerprint,
+    validated_checkpoint_path,
+    write_checkpoint,
+)
 from course_insight.infrastructure.postgresql.sqlite_import_destination import (
     PostgresImportDestination,
 )
@@ -186,6 +198,13 @@ class ImportDestination(Protocol):
     ) -> None:
         """Insert and verify one batch in exactly one transaction."""
 
+    def verify_batch(
+        self,
+        table: str,
+        rows: tuple[PreparedImportRow, ...],
+    ) -> None:
+        """Verify that a previously committed batch still matches."""
+
 
 @dataclass(frozen=True, slots=True)
 class TableMigrationReport:
@@ -244,9 +263,13 @@ class SQLiteToPostgresMigrator:
         *,
         source_path: str | os.PathLike[str],
         destination: ImportDestination,
+        destination_fingerprint: str | None = None,
     ) -> None:
         self._source_path = Path(source_path)
         self._destination = destination
+        self._destination_fingerprint = validate_destination_fingerprint(
+            destination_fingerprint
+        )
 
     def run(
         self,
@@ -254,6 +277,7 @@ class SQLiteToPostgresMigrator:
         mode: MigrationMode = "dry-run",
         batch_size: int = 500,
         report_path: str | os.PathLike[str] | None = None,
+        checkpoint_path: str | os.PathLike[str] | None = None,
     ) -> MigrationReport:
         if mode not in {"dry-run", "apply"}:
             raise ValueError("mode must be 'dry-run' or 'apply'")
@@ -261,6 +285,19 @@ class SQLiteToPostgresMigrator:
             raise ValueError("batch_size must be between 1 and 10000")
         source = _validated_source_path(self._source_path)
         target_report = _validated_report_path(source, report_path)
+        target_checkpoint = validated_checkpoint_path(
+            source,
+            checkpoint_path,
+            report_path=target_report,
+        )
+        if (
+            mode == "apply"
+            and target_checkpoint is not None
+            and self._destination_fingerprint is None
+        ):
+            raise ValueError(
+                "destination_fingerprint is required with checkpoint_path"
+            )
         try:
             (
                 rows_by_table,
@@ -289,23 +326,79 @@ class SQLiteToPostgresMigrator:
             _write_report(target_report, report)
             return report
 
+        batches = _planned_batches(rows_by_table, batch_size=batch_size)
         completed_batches = 0
-        try:
-            for table in _TABLE_ORDER:
-                rows = rows_by_table[table]
-                for start in range(0, len(rows), batch_size):
-                    batch = rows[start : start + batch_size]
-                    self._destination.apply_batch(table, batch)
-                    completed_batches += 1
-                    _write_report(
-                        target_report,
-                        _completed_report(
-                            report,
-                            rows_by_table,
-                            completed_batches=completed_batches,
-                            status="applying",
+        checkpoint_binding: CheckpointBinding | None = None
+        if target_checkpoint is not None:
+            destination_fingerprint = self._destination_fingerprint
+            if destination_fingerprint is None:
+                raise ValueError("destination_fingerprint is required")
+            checkpoint_binding = CheckpointBinding(
+                source_snapshot_checksum=source_checksum,
+                source_schema_version=SCHEMA_VERSION,
+                migration_version=POSTGRES_MIGRATION_VERSION,
+                destination_fingerprint=destination_fingerprint,
+                batch_size=batch_size,
+                total_batches=len(batches),
+                partial_envelope_rows=partial_count,
+                table_order=_TABLE_ORDER,
+            )
+            try:
+                checkpoint = load_or_create_checkpoint(
+                    target_checkpoint,
+                    checkpoint_binding,
+                )
+            except CheckpointError as error:
+                raise MigrationError(error.code) from None
+            completed_batches = checkpoint.next_batch_index
+            try:
+                for table, batch in batches[:completed_batches]:
+                    self._destination.verify_batch(table, batch)
+            except Exception:
+                _write_report(
+                    target_report,
+                    _completed_report(
+                        report,
+                        rows_by_table,
+                        completed_batches=completed_batches,
+                        status="failed",
+                        error_code=(
+                            "MIGRATION_CHECKPOINT_TARGET_MISMATCH"
                         ),
-                    )
+                    ),
+                )
+                raise MigrationError(
+                    "MIGRATION_CHECKPOINT_TARGET_MISMATCH"
+                ) from None
+        try:
+            for table, batch in batches[completed_batches:]:
+                self._destination.apply_batch(table, batch)
+                completed_batches += 1
+                if target_checkpoint is not None:
+                    if checkpoint_binding is None:
+                        raise RuntimeError("checkpoint binding missing")
+                    try:
+                        write_checkpoint(
+                            target_checkpoint,
+                            checkpoint_binding,
+                            CheckpointState(
+                                status="applying",
+                                next_batch_index=completed_batches,
+                            ),
+                        )
+                    except CheckpointError as error:
+                        raise MigrationError(error.code) from None
+                _write_report(
+                    target_report,
+                    _completed_report(
+                        report,
+                        rows_by_table,
+                        completed_batches=completed_batches,
+                        status="applying",
+                    ),
+                )
+        except MigrationError:
+            raise
         except Exception:
             _write_report(
                 target_report,
@@ -328,6 +421,20 @@ class SQLiteToPostgresMigrator:
                 else "completed_with_source_limitations"
             ),
         )
+        if target_checkpoint is not None:
+            if checkpoint_binding is None:
+                raise RuntimeError("checkpoint binding missing")
+            try:
+                write_checkpoint(
+                    target_checkpoint,
+                    checkpoint_binding,
+                    CheckpointState(
+                        status="completed",
+                        next_batch_index=completed_batches,
+                    ),
+                )
+            except CheckpointError as error:
+                raise MigrationError(error.code) from None
         _write_report(target_report, completed)
         return completed
 
@@ -427,6 +534,19 @@ def _completed_report(
             in {"completed", "completed_with_source_limitations"},
         ),
         error_code=error_code,
+    )
+
+
+def _planned_batches(
+    rows_by_table: dict[str, tuple[PreparedImportRow, ...]],
+    *,
+    batch_size: int,
+) -> tuple[tuple[str, tuple[PreparedImportRow, ...]], ...]:
+    return tuple(
+        (table, rows[start : start + batch_size])
+        for table in _TABLE_ORDER
+        for rows in (rows_by_table[table],)
+        for start in range(0, len(rows), batch_size)
     )
 
 
