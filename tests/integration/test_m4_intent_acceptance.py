@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -33,6 +34,12 @@ from course_insight.modules.m4_task_orchestration.service import (
     M4TaskOrchestrationService,
 )
 from scripts.export_schemas import public_contract_types
+
+
+pytestmark = pytest.mark.filterwarnings(
+    "ignore:Setting the shape on a NumPy array has been deprecated:"
+    "DeprecationWarning:joblib.numpy_pickle"
+)
 
 
 NOW = datetime(2026, 7, 26, tzinfo=timezone.utc)
@@ -127,6 +134,79 @@ def _settings(tmp_path: Path) -> PlatformSettings:
         ),
         logging=LoggingSettings(directory=runtime_dir / "logs"),
         intent=IntentSettings(),
+    )
+
+
+def _trained_artifact(tmp_path: Path, *, name: str = "artifact") -> Path:
+    pytest.importorskip("joblib")
+    pytest.importorskip("sklearn")
+    from scripts.train_m4_intent import train_and_publish
+
+    examples = {
+        "correction": "correctum", "diagnostic": "diagnum",
+        "out_of_scope": "outsideum", "practice": "praxium",
+        "qa": "queryum", "stage_assessment": "stageum",
+    }
+    dataset = tmp_path / f"{name}.jsonl"
+    dataset.write_text(
+        "".join(
+            json.dumps(
+                {
+                    "text": f"{token} {split}",
+                    "label": label,
+                    "group_id": f"{split}-{label}",
+                    "split": split,
+                },
+                ensure_ascii=False,
+            )
+            + "\n"
+            for split in ("train", "validation", "test")
+            for label, token in examples.items()
+        ),
+        encoding="utf-8",
+    )
+    artifact = tmp_path / name
+    train_and_publish(
+        input_path=dataset,
+        output_dir=artifact,
+        seed=17,
+        min_confidence=0.0,
+        min_margin=0.0,
+    )
+    return artifact
+
+
+def _factory_with_intent(
+    tmp_path: Path,
+    *,
+    mode: str,
+    model_dir: Path,
+    min_confidence: float = 0.70,
+    min_margin: float = 0.10,
+):
+    settings = _settings(tmp_path).model_copy(
+        update={
+            "intent": IntentSettings(
+                mode=mode,  # type: ignore[arg-type]
+                backend="sklearn",
+                model_dir=model_dir,
+                min_confidence=min_confidence,
+                min_margin=min_margin,
+            )
+        }
+    )
+    application = build_application(settings)
+    application.m0_service.initialize()
+    return application
+
+
+def _set_artifact_version(artifact: Path, version: str) -> None:
+    manifest_path = artifact / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["adapter_version"] = version
+    manifest_path.write_text(
+        json.dumps(manifest, sort_keys=True),
+        encoding="utf-8",
     )
 
 
@@ -278,6 +358,32 @@ def test_stage1_shadow_audits_without_changing_the_task_plan(tmp_path: Path) -> 
     assert '"label":"practice"' in shadow_json
 
 
+def test_stage1_public_factory_shadow_records_real_artifact_audit(
+    tmp_path: Path,
+) -> None:
+    artifact = _trained_artifact(tmp_path)
+    application = _factory_with_intent(
+        tmp_path,
+        mode="shadow",
+        model_dir=artifact,
+    )
+    try:
+        plan = _create_plan(
+            application.m4_service,
+            student_text="请解释这个概念",
+        )
+    finally:
+        application.close()
+
+    assert plan.task_type == "qa"
+    with sqlite3.connect(tmp_path / "runtime" / "course_insight.sqlite3") as connection:
+        source, shadow_json = connection.execute(
+            "SELECT decision_source, shadow_json FROM m4_intent_decisions"
+        ).fetchone()
+    assert source == "legacy_rule"
+    assert shadow_json is not None
+
+
 def test_stage1_active_accepts_only_predictions_passing_both_thresholds(
     tmp_path: Path,
 ) -> None:
@@ -309,6 +415,90 @@ def test_stage1_active_accepts_only_predictions_passing_both_thresholds(
 
     assert accepted.task_type == "practice"
     assert accepted.workflow == _ASSESSMENT_WORKFLOW
+
+
+def test_stage1_public_factory_active_enforces_thresholds(tmp_path: Path) -> None:
+    artifact = _trained_artifact(tmp_path)
+    accepted_app = _factory_with_intent(
+        tmp_path / "accepted",
+        mode="active",
+        model_dir=artifact,
+        min_confidence=0.0,
+        min_margin=0.0,
+    )
+    try:
+        accepted = _create_plan(
+            accepted_app.m4_service,
+            student_text="praxium train",
+        )
+    finally:
+        accepted_app.close()
+    assert accepted.task_type == "practice"
+
+    rejected_root = tmp_path / "rejected"
+    rejected_app = _factory_with_intent(
+        rejected_root,
+        mode="active",
+        model_dir=artifact,
+        min_confidence=1.0,
+        min_margin=1.0,
+    )
+    try:
+        with pytest.raises(DomainError) as captured:
+            _create_plan(
+                rejected_app.m4_service,
+                student_text="diagnum train",
+            )
+    finally:
+        rejected_app.close()
+    assert captured.value.code == "UNSUPPORTED_TASK"
+    with sqlite3.connect(rejected_root / "runtime" / "course_insight.sqlite3") as connection:
+        decision = connection.execute(
+            "SELECT decision_status, decision_source FROM m4_intent_decisions"
+        ).fetchone()
+        task_count = connection.execute(
+            "SELECT COUNT(*) FROM m4_task_plans"
+        ).fetchone()[0]
+    assert decision == ("abstained", "refusal")
+    assert task_count == 0
+
+
+def test_stage1_public_factory_active_oos_refuses_and_replays_without_task_plan(
+    tmp_path: Path,
+) -> None:
+    artifact = _trained_artifact(tmp_path)
+    application = _factory_with_intent(
+        tmp_path,
+        mode="active",
+        model_dir=artifact,
+        min_confidence=0.0,
+        min_margin=0.0,
+    )
+    try:
+        for _ in range(2):
+            with pytest.raises(DomainError) as captured:
+                _create_plan(
+                    application.m4_service,
+                    student_text="outsideum train",
+                )
+            assert captured.value.code == "UNSUPPORTED_TASK"
+            assert captured.value.recoverable is True
+    finally:
+        application.close()
+
+    with sqlite3.connect(tmp_path / "runtime" / "course_insight.sqlite3") as connection:
+        decision = connection.execute(
+            "SELECT decision_status, decision_source FROM m4_intent_decisions"
+        ).fetchone()
+        decision_count = connection.execute(
+            "SELECT COUNT(*) FROM m4_intent_decisions"
+        ).fetchone()[0]
+        task_count = connection.execute(
+            "SELECT COUNT(*) FROM m4_task_plans"
+        ).fetchone()[0]
+    assert decision == ("out_of_scope", "refusal")
+    assert decision_count == 1
+    assert task_count == 0
 
 
 def test_stage1_exact_replay_survives_restart_and_adapter_version_change(
@@ -348,3 +538,51 @@ def test_stage1_exact_replay_survives_restart_and_adapter_version_change(
             "SELECT adapter_version FROM m4_intent_decisions"
         ).fetchone()[0]
     assert adapter_version == "active-v1"
+
+
+def test_stage1_public_factory_restart_replays_first_real_artifact_version(
+    tmp_path: Path,
+) -> None:
+    first_artifact = _trained_artifact(tmp_path, name="artifact-v1")
+    _set_artifact_version(first_artifact, "stage1-v1")
+    first_app = _factory_with_intent(
+        tmp_path / "first",
+        mode="active",
+        model_dir=first_artifact,
+        min_confidence=0.0,
+        min_margin=0.0,
+    )
+    try:
+        first = _create_plan(
+            first_app.m4_service,
+            student_text="praxium train",
+        )
+    finally:
+        first_app.close()
+
+    second_artifact = _trained_artifact(tmp_path, name="artifact-v2")
+    _set_artifact_version(second_artifact, "stage1-v2")
+    second_app = _factory_with_intent(
+        tmp_path / "first",
+        mode="active",
+        model_dir=second_artifact,
+        min_confidence=0.0,
+        min_margin=0.0,
+    )
+    try:
+        replay = _create_plan(
+            second_app.m4_service,
+            student_text="praxium train",
+        )
+    finally:
+        second_app.close()
+
+    assert replay == first
+    with sqlite3.connect(
+        tmp_path / "first" / "runtime" / "course_insight.sqlite3"
+    ) as connection:
+        source, version = connection.execute(
+            "SELECT decision_source, adapter_version FROM m4_intent_decisions"
+        ).fetchone()
+    assert source == "active_model"
+    assert version == "stage1-v1"

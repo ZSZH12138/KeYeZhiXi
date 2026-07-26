@@ -33,9 +33,11 @@ course_package_id, blueprint_id`。所以不同 hint/文本可产生不同的私
   被 legacy 规则覆盖。模型 abstain 可回退到唯一 legacy 规则。
 
 规则没有“先命中即胜”的跨类优先级。高精度与 legacy 命中合并后若出现多个类别，
-`rules`/`shadow` 拒绝并记录 `conflicting_high_precision_rules`；`active` 仅可由
-通过双阈值的模型解决，模型失败时不得从冲突候选中猜选。空文本、非法 hint、OOS、
-冲突和未识别请求均以可恢复 `UNSUPPORTED_TASK` 返回；错误与日志不得回显原文。
+且存在高精度命中时，`rules`/`shadow` 拒绝并记录
+`conflicting_high_precision_rules`；只有纯 legacy 多标签时记录
+`conflicting_legacy_rules`。`active` 仅可由通过双阈值的模型解决上述冲突，模型失败
+时不得从冲突候选中猜选。空文本、非法 hint、OOS、冲突和未识别请求均以可恢复
+`UNSUPPORTED_TASK` 返回；错误与日志不得回显原文。
 
 ## 配置与可信 artifact 边界
 
@@ -105,8 +107,9 @@ SQLite schema v10 和 PostgreSQL core migration `0010_m4_intent_decisions.sql`
 该表和监控只能包含 request key、`input_checksum`、任务标签/状态、决策来源、
 adapter id/version、policy version、confidence、margin、原因码、shadow JSON、
 payload checksum 与 UTC `created_at`。推荐按模式、来源、状态、原因码、adapter/
-policy 版本聚合：决策量、接受率、拒绝率、OOS 率、阈值 abstain 率、shadow
-agreement、模型异常和重放率。不得记录、导出、查询展示或告警携带原始学生文本。
+policy 版本聚合：决策量、接受率、拒绝率、OOS 率、阈值 abstain 率、
+`conflicting_high_precision_rules`、`conflicting_legacy_rules`、shadow agreement、
+模型异常和重放率。不得记录、导出、查询展示或告警携带原始学生文本。
 
 真实 PostgreSQL live test 仍是破坏性受保护操作：仅在
 `COURSE_INSIGHT_TEST_DATABASE_URL` 与 `COURSE_INSIGHT_TEST_DATABASE_NAME` 指向
