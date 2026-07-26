@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Protocol
+from typing import TYPE_CHECKING, Protocol
 
 from course_insight.contracts.tasking import TaskPlan
+
+if TYPE_CHECKING:
+    from course_insight.modules.m4_task_orchestration.intent_service import (
+        StoredIntentDecision,
+    )
 
 
 _TASK_TABLE = "m4_task_plans"
@@ -25,3 +30,15 @@ class M4Repository(Protocol):
 
     def get_task_plan(self, task_id: str) -> TaskPlan | None:
         """Load one task plan by stable identity."""
+
+    def get_intent_decision(
+        self,
+        request_key: str,
+    ) -> StoredIntentDecision | None:
+        """Load the first private intent decision for an exact request key."""
+
+    def insert_or_get_intent_decision(
+        self,
+        decision: StoredIntentDecision,
+    ) -> StoredIntentDecision:
+        """Atomically insert a decision or return the first-writer winner."""

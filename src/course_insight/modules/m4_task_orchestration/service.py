@@ -10,13 +10,15 @@ from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.state import LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    M4IntentService,
+)
 from course_insight.modules.m4_task_orchestration.repository import M4Repository
 from course_insight.modules.m4_task_orchestration.routing import (
     resolve_blueprint_id,
     resolve_task_type,
     workflow_for,
 )
-
 
 IdempotencyKeyFactory = Callable[[Mapping[str, str | None]], str]
 
@@ -30,12 +32,14 @@ class M4TaskOrchestrationService:
         idempotency_key_factory: IdempotencyKeyFactory,
         *,
         blueprint_by_task_type: Mapping[str, str] | None = None,
+        intent_service: M4IntentService | None = None,
     ) -> None:
         self._repository = repository
         self._idempotency_key_factory = idempotency_key_factory
         self._blueprint_by_task_type = MappingProxyType(
             dict(blueprint_by_task_type or {})
         )
+        self._intent_service = intent_service
 
     def create_task_plan(
         self,
@@ -57,15 +61,38 @@ class M4TaskOrchestrationService:
         错误码：UNSUPPORTED_TASK。
         """
 
-        task_type = resolve_task_type(student_text, task_type_hint)
-        self._validate_inputs(
-            course_id=course_id,
-            class_id=class_id,
-            learner_id=learner_id,
-            session_id=session_id,
-            knowledge_bundle=knowledge_bundle,
-            learner_state_snapshot=learner_state_snapshot,
+        if self._intent_service is not None:
+            self._validate_inputs(
+                course_id=course_id,
+                class_id=class_id,
+                learner_id=learner_id,
+                session_id=session_id,
+                knowledge_bundle=knowledge_bundle,
+                learner_state_snapshot=learner_state_snapshot,
+            )
+        task_type = (
+            resolve_task_type(student_text, task_type_hint)
+            if self._intent_service is None
+            else self._intent_service.resolve(
+                student_text=student_text,
+                task_type_hint=task_type_hint,
+                course_id=course_id,
+                class_id=class_id,
+                learner_id=learner_id,
+                session_id=session_id,
+                knowledge_bundle_id=knowledge_bundle.knowledge_bundle_id,
+                course_package_id=knowledge_bundle.course_package_id,
+            )
         )
+        if self._intent_service is None:
+            self._validate_inputs(
+                course_id=course_id,
+                class_id=class_id,
+                learner_id=learner_id,
+                session_id=session_id,
+                knowledge_bundle=knowledge_bundle,
+                learner_state_snapshot=learner_state_snapshot,
+            )
         blueprint_id = resolve_blueprint_id(
             task_type=task_type,
             course_id=course_id,

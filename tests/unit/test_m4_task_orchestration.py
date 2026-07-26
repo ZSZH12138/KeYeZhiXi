@@ -15,6 +15,11 @@ from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m4_task_orchestration.service import (
     M4TaskOrchestrationService,
 )
+from course_insight.modules.m4_task_orchestration.intent_policy import IntentPolicy
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    M4IntentService,
+    StoredIntentDecision,
+)
 from course_insight.modules.m4_task_orchestration.stubs import (
     M4TaskOrchestrationServiceStub,
 )
@@ -39,6 +44,7 @@ def _canonical_key(identity: Mapping[str, str | None]) -> str:
 class _MemoryRepository:
     def __init__(self) -> None:
         self._plans: dict[str, TaskPlan] = {}
+        self._intent_decisions: dict[str, StoredIntentDecision] = {}
 
     def insert_or_get_task_plan(
         self,
@@ -51,6 +57,25 @@ class _MemoryRepository:
         stored = plan.model_copy(deep=True)
         self._plans = {**self._plans, idempotency_key: stored}
         return stored.model_copy(deep=True)
+
+    def get_intent_decision(
+        self,
+        request_key: str,
+    ) -> StoredIntentDecision | None:
+        return self._intent_decisions.get(request_key)
+
+    def insert_or_get_intent_decision(
+        self,
+        decision: StoredIntentDecision,
+    ) -> StoredIntentDecision:
+        existing = self._intent_decisions.get(decision.request_key)
+        if existing is not None:
+            return existing
+        self._intent_decisions = {
+            **self._intent_decisions,
+            decision.request_key: decision,
+        }
+        return decision
 
     @property
     def count(self) -> int:
@@ -137,11 +162,14 @@ def _service(
     repository: _MemoryRepository | None = None,
     key_factory: Any = _canonical_key,
     blueprint_by_task_type: Mapping[str, str] | None = None,
+    intent_service: M4IntentService | None = None,
 ) -> tuple[M4TaskOrchestrationService, _MemoryRepository]:
     selected_repository = repository or _MemoryRepository()
     kwargs: dict[str, Any] = {}
     if blueprint_by_task_type is not None:
         kwargs["blueprint_by_task_type"] = blueprint_by_task_type
+    if intent_service is not None:
+        kwargs["intent_service"] = intent_service
     service = M4TaskOrchestrationService(
         selected_repository,
         key_factory,
@@ -188,6 +216,96 @@ def test_valid_hint_selects_each_supported_task_type(task_type: str) -> None:
     )
 
     assert plan.task_type == task_type
+
+
+def test_injected_intent_pipeline_preserves_eight_field_task_plan_identity() -> None:
+    repository = _MemoryRepository()
+    task_key_factory = _RecordingKeyFactory()
+    intent_service = M4IntentService(
+        repository,
+        _canonical_key,
+        mode="rules",
+        policy=IntentPolicy(min_confidence=0.70, min_margin=0.10),
+        policy_version="policy-1",
+    )
+    service, _ = _service(
+        repository=repository,
+        key_factory=task_key_factory,
+        intent_service=intent_service,
+    )
+
+    plan = _create(
+        service,
+        student_text="请安排练习",
+        task_type_hint=None,
+    )
+
+    assert plan.task_type == "practice"
+    assert task_key_factory.identities == [
+        {
+            "course_id": "course_1",
+            "class_id": "class_1",
+            "learner_id": "pseudonym_learner",
+            "session_id": "session_1",
+            "task_type": "practice",
+            "knowledge_bundle_id": "bundle_1",
+            "course_package_id": "package_1",
+            "blueprint_id": "blueprint_stage",
+        }
+    ]
+
+
+def test_intent_refusal_never_creates_a_task_plan() -> None:
+    repository = _MemoryRepository()
+    intent_service = M4IntentService(
+        repository,
+        _canonical_key,
+        mode="rules",
+        policy=IntentPolicy(min_confidence=0.70, min_margin=0.10),
+        policy_version="policy-1",
+    )
+    service, _ = _service(
+        repository=repository,
+        intent_service=intent_service,
+    )
+
+    with pytest.raises(DomainError) as captured:
+        _create(
+            service,
+            student_text="这个请求不属于支持的任务",
+            task_type_hint=None,
+        )
+
+    assert captured.value.code == "UNSUPPORTED_TASK"
+    assert captured.value.recoverable is True
+    assert repository.count == 0
+    assert len(repository._intent_decisions) == 1
+
+
+def test_injected_intent_service_preserves_bundle_validation_error() -> None:
+    repository = _MemoryRepository()
+    intent_service = M4IntentService(
+        repository,
+        _canonical_key,
+        mode="rules",
+        policy=IntentPolicy(min_confidence=0.70, min_margin=0.10),
+        policy_version="policy-1",
+    )
+    service, _ = _service(
+        repository=repository,
+        intent_service=intent_service,
+    )
+    invalid_bundle = _bundle().model_copy(
+        update={"knowledge_bundle_id": ""},
+        deep=True,
+    )
+
+    with pytest.raises(DomainError) as captured:
+        _create(service, knowledge_bundle=invalid_bundle)
+
+    assert captured.value.code == "KNOWLEDGE_BUNDLE_MISMATCH"
+    assert repository.count == 0
+    assert repository._intent_decisions == {}
 
 
 def test_valid_hint_has_priority_over_text_keywords() -> None:
