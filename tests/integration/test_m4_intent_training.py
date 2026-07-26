@@ -611,6 +611,50 @@ def test_evaluation_uses_five_task_macro_and_excludes_oos_accepts() -> None:
     assert report["counts"]["covered_in_scope"] == 4
 
 
+def test_selective_accuracy_counts_oos_requests_wrongly_accepted_as_tasks() -> None:
+    class _FakePipeline:
+        def predict_proba(self, texts: list[str]) -> list[list[float]]:
+            del texts
+            predictions = [
+                *SUPPORTED_INTENT_LABELS,
+                *(["out_of_scope"] * 9),
+                "qa",
+            ]
+            rows: list[list[float]] = []
+            for predicted in predictions:
+                row = [0.01] * len(EXPECTED_LABELS)
+                row[EXPECTED_LABELS.index(predicted)] = 0.95
+                rows.append(row)
+            return rows
+
+    examples = (
+        *(
+            _example(label, index)
+            for index, label in enumerate(SUPPORTED_INTENT_LABELS)
+        ),
+        *(
+            _example("out_of_scope", index + len(SUPPORTED_INTENT_LABELS))
+            for index in range(10)
+        ),
+    )
+
+    report = train_m4_intent._evaluate_partition(
+        _FakePipeline(),
+        examples,
+        group_count=15,
+        thresholds={"min_confidence": 0.7, "min_margin": 0.1},
+    )
+    gate = train_m4_intent._production_gate(report, sample_only=False)
+
+    assert report["task_coverage"] == pytest.approx(1.0)
+    assert report["selective_accuracy"] == pytest.approx(5 / 6)
+    assert report["counts"]["accepted_predictions"] == 6
+    assert report["counts"]["selective_correct"] == 5
+    assert report["out_of_scope_recall"] == pytest.approx(0.9)
+    assert gate["checks"]["selective_accuracy"] is False
+    assert gate["passed"] is False
+
+
 def test_training_rejects_output_outside_runtime_boundary(
     tmp_path: Path,
 ) -> None:

@@ -62,8 +62,8 @@ def test_intent_prediction_is_frozen_and_rejects_unsupported_labels() -> None:
 
 
 def test_reason_codes_are_recursively_immutable_values() -> None:
-    prediction_codes = ["adapter_reason"]
-    outcome_codes = ["policy_reason"]
+    prediction_codes = ["outside_supported_scope"]
+    outcome_codes = ["below_min_confidence"]
     prediction = IntentPrediction(
         label="qa",
         scores=COMPLETE_QA_SCORES,
@@ -83,14 +83,35 @@ def test_reason_codes_are_recursively_immutable_values() -> None:
     prediction_codes.append("changed_after_construction")
     outcome_codes.append("changed_after_construction")
 
-    assert prediction.reason_codes == ("adapter_reason",)
-    assert outcome.reason_codes == ("policy_reason",)
+    assert prediction.reason_codes == ("outside_supported_scope",)
+    assert outcome.reason_codes == ("below_min_confidence",)
     assert isinstance(prediction.reason_codes, tuple)
     assert isinstance(outcome.reason_codes, tuple)
     with pytest.raises(AttributeError):
         prediction.reason_codes.append("mutate")  # type: ignore[attr-defined]
     with pytest.raises(AttributeError):
         outcome.reason_codes.append("mutate")  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    "unsafe_reason_code",
+    [
+        "13800138000",
+        "2026001234",
+        "student_answer",
+    ],
+)
+def test_reason_codes_reject_pii_and_unregistered_free_form_tokens(
+    unsafe_reason_code: str,
+) -> None:
+    with pytest.raises(ValueError, match="registered"):
+        IntentPrediction.accepted(
+            "qa",
+            COMPLETE_QA_SCORES,
+            "fixture",
+            "1",
+            reason_codes=(unsafe_reason_code,),
+        )
 
 
 def test_prediction_scores_are_complete_validated_and_recursively_immutable() -> None:

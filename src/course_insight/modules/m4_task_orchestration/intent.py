@@ -22,6 +22,33 @@ _SAFE_TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:+-]*\Z")
 _MAX_ADAPTER_TOKEN_LENGTH = 128
 _MAX_REASON_CODE_LENGTH = 64
 _MAX_REASON_CODES = 16
+_REGISTERED_REASON_CODES = frozenset(
+    {
+        "adapter_abstained",
+        "adapter_exception",
+        "adapter_failed",
+        "adapter_invalid",
+        "adapter_out_of_scope",
+        "adapter_unavailable",
+        "below_min_confidence",
+        "below_min_margin",
+        "blank_student_text",
+        "conflicting_high_precision_rules",
+        "conflicting_legacy_rules",
+        "malformed_prediction",
+        "missing_adapter",
+        "model_abstained",
+        "model_accepted",
+        "no_supported_intent",
+        "out_of_scope_competitor",
+        "outside_supported_scope",
+        "shadow_accepted",
+        "unsafe_adapter_metadata",
+        "unsafe_prediction_metadata",
+        "unsupported_hint",
+        *(f"high_precision:{label}" for label in SUPPORTED_INTENT_LABELS),
+    }
+)
 
 
 class IntentStatus(StrEnum):
@@ -190,6 +217,8 @@ def _normalize_reason_codes(reason_codes: object) -> tuple[str, ...]:
             code,
             max_length=_MAX_REASON_CODE_LENGTH,
         )
+        if code not in _REGISTERED_REASON_CODES:
+            raise ValueError("reason code must be a registered audit code")
     return normalized
 
 

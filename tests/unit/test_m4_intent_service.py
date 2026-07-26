@@ -880,6 +880,7 @@ def test_non_fail_closed_policy_can_fallback_after_malformed_prediction() -> Non
         ({"adapter_id": r"C:\private\student.txt"}, "unsafe_prediction_metadata"),
         ({"adapter_version": "other-safe-version"}, "unsafe_prediction_metadata"),
         ({"reason_codes": ("student raw text",)}, "unsafe_prediction_metadata"),
+        ({"reason_codes": ("13800138000",)}, "unsafe_prediction_metadata"),
     ],
 )
 def test_prediction_metadata_is_untrusted_and_never_leaks(
@@ -1152,7 +1153,7 @@ def test_stored_decision_normalizes_integer_scores_before_checksum() -> None:
         confidence=1,
         margin=0,
         input_checksum="b" * 64,
-        reason_codes=("accepted",),
+        reason_codes=("model_accepted",),
         created_at=NOW,
         shadow_label="qa",
         shadow_status=IntentStatus.ACCEPTED,
@@ -1160,7 +1161,7 @@ def test_stored_decision_normalizes_integer_scores_before_checksum() -> None:
         shadow_adapter_version="1",
         shadow_confidence=1,
         shadow_margin=0,
-        shadow_reason_codes=("shadow-accepted",),
+        shadow_reason_codes=("shadow_accepted",),
         shadow_agrees=False,
         _generate_checksum=True,
     )
@@ -1175,7 +1176,7 @@ def test_stored_decision_normalizes_integer_scores_before_checksum() -> None:
         confidence=1.0,
         margin=0.0,
         input_checksum="b" * 64,
-        reason_codes=("accepted",),
+        reason_codes=("model_accepted",),
         created_at=NOW,
         shadow_label="qa",
         shadow_status=IntentStatus.ACCEPTED,
@@ -1183,7 +1184,7 @@ def test_stored_decision_normalizes_integer_scores_before_checksum() -> None:
         shadow_adapter_version="1",
         shadow_confidence=1.0,
         shadow_margin=0.0,
-        shadow_reason_codes=("shadow-accepted",),
+        shadow_reason_codes=("shadow_accepted",),
         shadow_agrees=False,
         _generate_checksum=True,
     )
@@ -1208,7 +1209,7 @@ def test_stored_decision_accepts_only_exact_legacy_v1_score_checksum() -> None:
         confidence=1.0,
         margin=0.0,
         input_checksum="b" * 64,
-        reason_codes=("accepted",),
+        reason_codes=("model_accepted",),
         created_at=NOW,
         shadow_label="qa",
         shadow_status=IntentStatus.ACCEPTED,
@@ -1216,7 +1217,7 @@ def test_stored_decision_accepts_only_exact_legacy_v1_score_checksum() -> None:
         shadow_adapter_version="1",
         shadow_confidence=1.0,
         shadow_margin=0.0,
-        shadow_reason_codes=("shadow-accepted",),
+        shadow_reason_codes=("shadow_accepted",),
         shadow_agrees=False,
         _generate_checksum=True,
     )

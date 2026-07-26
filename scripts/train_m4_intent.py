@@ -269,7 +269,7 @@ def _evaluate_partition(
         raise TrainingError("intent model evaluation failed") from None
 
     predicted: list[str] = []
-    covered_in_scope: list[bool] = []
+    accepted_predictions: list[bool] = []
     for row in probability_rows:
         ranked = sorted(
             range(len(EXPECTED_LABELS)),
@@ -281,7 +281,7 @@ def _evaluate_partition(
         margin = confidence - float(row[second_index])
         predicted_label = EXPECTED_LABELS[top_index]
         predicted.append(predicted_label)
-        covered_in_scope.append(
+        accepted_predictions.append(
             predicted_label != "out_of_scope"
             and confidence >= thresholds["min_confidence"]
             and margin >= thresholds["min_margin"]
@@ -317,15 +317,16 @@ def _evaluate_partition(
         is_task and is_covered
         for is_task, is_covered in zip(
             task_truth,
-            covered_in_scope,
+            accepted_predictions,
             strict=True,
         )
     ]
     covered_count = sum(covered_task)
+    accepted_count = sum(accepted_predictions)
     selective_correct = sum(
-        is_covered and is_correct
-        for is_covered, is_correct in zip(
-            covered_task,
+        is_accepted and is_correct
+        for is_accepted, is_correct in zip(
+            accepted_predictions,
             correct,
             strict=True,
         )
@@ -354,8 +355,8 @@ def _evaluate_partition(
             else None
         ),
         "selective_accuracy": (
-            selective_correct / covered_count
-            if covered_count
+            selective_correct / accepted_count
+            if accepted_count
             else None
         ),
         "confusion_matrix": {
@@ -370,6 +371,7 @@ def _evaluate_partition(
             "in_scope_examples": task_example_count,
             "groups": group_count,
             "covered_in_scope": covered_count,
+            "accepted_predictions": accepted_count,
             "selective_correct": selective_correct,
             "correct": sum(correct),
             "labels": label_counts,

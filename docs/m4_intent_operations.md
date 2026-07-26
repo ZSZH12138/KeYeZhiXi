@@ -104,6 +104,9 @@ course_package_id, blueprint_id`。所以不同 hint/文本可产生不同的私
 OOS recall、`task_coverage`、selective accuracy、固定 6×6 confusion matrix、
 组间重叠、`production_gate` 与 `evidence_scope`。生产门禁必须使用受控离线数据与
 预先批准的阈值；sample-only artifact 的 `eligible/passed` 始终为 false。
+`task_coverage` 只衡量真实五任务样本中达到双阈值并被接收的比例；selective
+accuracy 的分母则包含所有被自动接收为五任务的样本，因此把真实 OOS 却被误接收
+为任务的样本计为错误，不能通过缩小分母抬高生产门禁结果。
 
 推荐部署序列：
 
@@ -129,6 +132,8 @@ payload checksum 与 UTC `created_at`。推荐按模式、来源、状态、原�
 policy 版本聚合：决策量、接受率、拒绝率、OOS 率、阈值 abstain 率、
 `conflicting_high_precision_rules`、`conflicting_legacy_rules`、shadow agreement、
 模型异常和重放率。不得记录、导出、查询展示或告警携带原始学生文本。
+原因码属于固定、经审查的协议注册表，不是适配器自由文本；任何未注册原因码都会
+在边界映射为固定的 `unsafe_prediction_metadata`，不得持久化或返回原值。
 
 真实 PostgreSQL live test 仍是破坏性受保护操作：仅在
 `COURSE_INSIGHT_TEST_DATABASE_URL` 与 `COURSE_INSIGHT_TEST_DATABASE_NAME` 指向
