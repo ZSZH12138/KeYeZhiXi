@@ -6,6 +6,10 @@ import hashlib
 from collections.abc import Mapping
 from types import MappingProxyType
 
+from course_insight.modules.m4_task_orchestration.normalization import (
+    normalize_intent_text,
+)
+
 
 def build_intent_request_identity(
     *,
@@ -44,7 +48,9 @@ def input_checksum(student_text: str) -> str:
 
     if not isinstance(student_text, str):
         raise ValueError("student_text must be a string")
-    return hashlib.sha256(_normalize_text(student_text).encode("utf-8")).hexdigest()
+    return hashlib.sha256(
+        normalize_intent_text(student_text).encode("utf-8")
+    ).hexdigest()
 
 
 def normalize_hint(task_type_hint: str | None) -> str:
@@ -54,13 +60,7 @@ def normalize_hint(task_type_hint: str | None) -> str:
         return ""
     if not isinstance(task_type_hint, str):
         raise ValueError("task_type_hint must be a string or None")
-    return "_".join(task_type_hint.split()).casefold()
-
-
-def _normalize_text(student_text: str) -> str:
-    return " ".join(student_text.split()).casefold()
-
-
+    return normalize_intent_text(task_type_hint).replace(" ", "_")
 def _validate_nonblank(name: str, value: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must not be blank")

@@ -23,16 +23,36 @@ from course_insight.modules.m4_task_orchestration.intent_rules import (
 )
 
 
+COMPLETE_QA_SCORES = {
+    "qa": 0.89,
+    "diagnostic": 0.68,
+    "practice": 0.03,
+    "correction": 0.02,
+    "stage_assessment": 0.01,
+}
+
+
 def test_intent_prediction_is_frozen_and_rejects_unsupported_labels() -> None:
-    prediction = IntentPrediction.accepted("qa", 0.89, 0.21, "fixture", "1")
+    prediction = IntentPrediction.accepted(
+        "qa",
+        COMPLETE_QA_SCORES,
+        "fixture",
+        "1",
+    )
 
     with pytest.raises(FrozenInstanceError):
         prediction.label = "practice"  # type: ignore[misc]
     with pytest.raises(ValueError, match="supported"):
-        IntentPrediction.accepted("out_of_scope", 0.89, 0.21, "fixture", "1")
+        IntentPrediction.accepted(
+            "out_of_scope",
+            COMPLETE_QA_SCORES,
+            "fixture",
+            "1",
+        )
     with pytest.raises(ValueError, match="status"):
         IntentPrediction(
             label=None,
+            scores=COMPLETE_QA_SCORES,
             confidence=0.89,
             margin=0.21,
             status="accepted",  # type: ignore[arg-type]
@@ -46,6 +66,7 @@ def test_reason_codes_are_recursively_immutable_values() -> None:
     outcome_codes = ["policy_reason"]
     prediction = IntentPrediction(
         label="qa",
+        scores=COMPLETE_QA_SCORES,
         confidence=0.89,
         margin=0.21,
         status=IntentStatus.ACCEPTED,
@@ -70,6 +91,50 @@ def test_reason_codes_are_recursively_immutable_values() -> None:
         prediction.reason_codes.append("mutate")  # type: ignore[attr-defined]
     with pytest.raises(AttributeError):
         outcome.reason_codes.append("mutate")  # type: ignore[attr-defined]
+
+
+def test_prediction_scores_are_complete_validated_and_recursively_immutable() -> None:
+    mutable_scores = dict(COMPLETE_QA_SCORES)
+    prediction = IntentPrediction.accepted(
+        "qa",
+        mutable_scores,
+        "fixture",
+        "1",
+    )
+    mutable_scores["qa"] = 0.01
+
+    assert dict(prediction.scores) == COMPLETE_QA_SCORES
+    assert prediction.confidence == pytest.approx(0.89)
+    assert prediction.margin == pytest.approx(0.21)
+    with pytest.raises(TypeError):
+        prediction.scores["qa"] = 0.01  # type: ignore[index]
+    with pytest.raises(ValueError, match="exact"):
+        IntentPrediction.accepted(
+            "qa",
+            {key: value for key, value in COMPLETE_QA_SCORES.items() if key != "qa"},
+            "fixture",
+            "1",
+        )
+    with pytest.raises(ValueError, match="top"):
+        IntentPrediction(
+            label="practice",
+            scores=COMPLETE_QA_SCORES,
+            confidence=0.89,
+            margin=0.21,
+            status=IntentStatus.ACCEPTED,
+            adapter_id="fixture",
+            adapter_version="1",
+        )
+    with pytest.raises(ValueError, match="non-accepted"):
+        IntentPrediction(
+            label="qa",
+            scores=COMPLETE_QA_SCORES,
+            confidence=0.89,
+            margin=0.21,
+            status=IntentStatus.ABSTAINED,
+            adapter_id="fixture",
+            adapter_version="1",
+        )
 
 
 def test_private_request_identity_separates_hint_and_normalized_text() -> None:
@@ -106,6 +171,30 @@ def test_private_request_identity_separates_hint_and_normalized_text() -> None:
         practice["course_id"] = "changed"  # type: ignore[index]
 
 
+def test_nfkc_compatibility_text_has_one_identity_and_rule_result() -> None:
+    assert input_checksum("ＷＨＹ　ＡＬＧＥＢＲＡ") == input_checksum("why algebra")
+    base = dict(
+        course_id="c1",
+        class_id="cl1",
+        learner_id="l1",
+        session_id="s1",
+        knowledge_bundle_id="kb1",
+        course_package_id="cp1",
+        student_text="same",
+    )
+    assert build_intent_request_identity(
+        **base,
+        task_type_hint="ＳＴＡＧＥ　ＡＳＳＥＳＳＭＥＮＴ",
+    ) == build_intent_request_identity(
+        **base,
+        task_type_hint="stage assessment",
+    )
+    assert (
+        match_high_precision_rules("ＰＲＡＣＴＩＣＥ　 fractions").resolved_label
+        == "practice"
+    )
+
+
 def test_conflicting_rule_families_do_not_use_first_match_priority() -> None:
     match = match_high_precision_rules("请先给我诊断，再安排练习")
 
@@ -115,17 +204,91 @@ def test_conflicting_rule_families_do_not_use_first_match_priority() -> None:
     assert resolve_task_type_from_rules("diagnostic exam") is None
 
 
+@pytest.mark.parametrize("text", ["how photosynthesis works", "what is the weather?"])
+def test_broad_english_question_tokens_are_not_high_precision(text: str) -> None:
+    assert match_high_precision_rules(text).labels == ()
+
+
 @pytest.mark.parametrize(
-    ("prediction", "status"),
+    ("kind", "scores", "confidence", "margin", "status"),
     [
-        (IntentPrediction.accepted("qa", 0.89, 0.21, "fixture", "1"), "accepted"),
-        (IntentPrediction.accepted("qa", 0.69, 0.21, "fixture", "1"), "abstained"),
-        (IntentPrediction.accepted("qa", 0.89, 0.09, "fixture", "1"), "abstained"),
-        (IntentPrediction.out_of_scope(0.92, 0.30, "fixture", "1"), "out_of_scope"),
+        (
+            "accepted",
+            COMPLETE_QA_SCORES,
+            None,
+            None,
+            "accepted",
+        ),
+        (
+            "accepted",
+            {
+                **COMPLETE_QA_SCORES,
+                "qa": 0.69,
+                "diagnostic": 0.48,
+            },
+            None,
+            None,
+            "abstained",
+        ),
+        (
+            "accepted",
+            {
+                **COMPLETE_QA_SCORES,
+                "diagnostic": 0.80,
+            },
+            None,
+            None,
+            "abstained",
+        ),
+        (
+            "out_of_scope",
+            COMPLETE_QA_SCORES,
+            0.92,
+            0.30,
+            "out_of_scope",
+        ),
     ],
 )
 def test_policy_requires_confidence_and_margin(
-    prediction: IntentPrediction,
+    kind: str,
+    scores: dict[str, float],
+    confidence: float | None,
+    margin: float | None,
     status: str,
 ) -> None:
+    prediction = (
+        IntentPrediction.accepted("qa", scores, "fixture", "1")
+        if kind == "accepted"
+        else IntentPrediction.out_of_scope(
+            scores,
+            confidence,
+            margin,
+            "fixture",
+            "1",
+        )
+    )
     assert IntentPolicy(0.70, 0.10).accept(prediction).status == status
+
+
+@pytest.mark.parametrize("status", [IntentStatus.UNAVAILABLE, IntentStatus.FAILED])
+def test_policy_preserves_normal_no_score_adapter_status(
+    status: IntentStatus,
+) -> None:
+    prediction = IntentPrediction(
+        label=None,
+        scores={
+            "qa": 0.0,
+            "diagnostic": 0.0,
+            "practice": 0.0,
+            "correction": 0.0,
+            "stage_assessment": 0.0,
+        },
+        confidence=None,
+        margin=None,
+        status=status,
+        adapter_id="fixture",
+        adapter_version="1",
+        reason_codes=(f"adapter_{status.value}",),
+    )
+
+    assert IntentPolicy(0.70, 0.10).accept(prediction).status is status

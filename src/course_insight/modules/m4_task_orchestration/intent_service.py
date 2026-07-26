@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import math
 from collections.abc import Callable, Mapping
 from dataclasses import InitVar, dataclass, replace
 from datetime import datetime, timezone
@@ -24,6 +23,25 @@ from course_insight.modules.m4_task_orchestration.intent_identity import (
 from course_insight.modules.m4_task_orchestration.intent_policy import (
     IntentDecisionOutcome,
     IntentPolicy,
+)
+from course_insight.modules.m4_task_orchestration.intent_persistence_validation import (
+    legacy_v1_integer_score_payload_checksum as _legacy_v1_integer_score_payload_checksum,
+    normalized_probability as _normalized_probability,
+    validate_audit_token as _validate_audit_token,
+    validate_created_at as _validate_created_at,
+    validate_nonblank as _validate_nonblank,
+    validate_optional_probability as _validate_optional_probability,
+    validate_sha256 as _validate_sha256,
+    validate_status_and_label as _validate_status_and_label,
+    validated_reason_codes as _validated_reason_codes,
+)
+from course_insight.modules.m4_task_orchestration.intent_validation import (
+    PredictionBoundaryError,
+    inspect_adapter_metadata,
+    validate_prediction,
+)
+from course_insight.modules.m4_task_orchestration.normalization import (
+    normalize_intent_text,
 )
 from course_insight.modules.m4_task_orchestration.intent_rules import (
     RuleMatch,
@@ -247,9 +265,9 @@ class StoredIntentDecision:
             and self.decision_source != "refusal"
         ):
             raise ValueError("intent decision source is inconsistent with status")
-        _validate_nonblank("adapter_id", self.adapter_id)
-        _validate_nonblank("adapter_version", self.adapter_version)
-        _validate_nonblank("policy_version", self.policy_version)
+        _validate_audit_token("adapter_id", self.adapter_id)
+        _validate_audit_token("adapter_version", self.adapter_version)
+        _validate_audit_token("policy_version", self.policy_version)
         _validate_optional_probability("confidence", self.confidence)
         _validate_optional_probability("margin", self.margin)
         if self.decision_source == "active_model" and (
@@ -279,8 +297,11 @@ class StoredIntentDecision:
         _validate_status_and_label(
             self.shadow_status, self.shadow_label, prefix="shadow"
         )
-        _validate_nonblank("shadow_adapter_id", self.shadow_adapter_id)
-        _validate_nonblank("shadow_adapter_version", self.shadow_adapter_version)
+        _validate_audit_token("shadow_adapter_id", self.shadow_adapter_id)
+        _validate_audit_token(
+            "shadow_adapter_version",
+            self.shadow_adapter_version,
+        )
         _validate_optional_probability("shadow_confidence", self.shadow_confidence)
         _validate_optional_probability("shadow_margin", self.shadow_margin)
         if self.shadow_status is IntentStatus.ACCEPTED and (
@@ -300,6 +321,7 @@ class _AdapterAttempt:
     adapter_version: str
     confidence: float | None
     margin: float | None
+    scores: Mapping[str, float] | None
     reason_codes: tuple[str, ...]
 class M4IntentService:
     """Resolve private learner intent with first-writer replay authority."""
@@ -355,7 +377,10 @@ class M4IntentService:
             knowledge_bundle_id=knowledge_bundle_id,
             course_package_id=course_package_id,
         )
-        normalized_text = _normalize_text(request.student_text)
+        try:
+            normalized_text = normalize_intent_text(request.student_text)
+        except ValueError as error:
+            raise _unsupported("student task text must be a string") from error
         request_key = self._build_request_key(request, normalized_text)
         checksum = input_checksum(normalized_text)
         persisted = self._repository.get_intent_decision(request_key)
@@ -469,10 +494,9 @@ class M4IntentService:
             if policy_outcome.status is IntentStatus.ACCEPTED:
                 return self._model_accept(attempt, policy_outcome.reason_codes)
             attempt = _attempt_with_policy(attempt, policy_outcome)
-        if (
-            attempt.status is IntentStatus.OUT_OF_SCOPE
-            and not high_precision_conflict
-        ):
+        if attempt.status is IntentStatus.INVALID and self._policy.fail_closed:
+            return self._model_refusal(attempt)
+        if not self._policy.fallback_to_rules and not high_precision_conflict:
             return self._model_refusal(attempt)
         return self._legacy_or_refusal(
             legacy,
@@ -632,34 +656,52 @@ class M4IntentService:
                 _DETERMINISTIC_ADAPTER_ID,
                 _DETERMINISTIC_ADAPTER_VERSION,
             )
-        adapter_id, adapter_version = _safe_adapter_metadata(self._adapter)
+        adapter_id, adapter_version, metadata_is_safe = inspect_adapter_metadata(
+            self._adapter
+        )
+        if not metadata_is_safe:
+            return _invalid_attempt(
+                "unsafe_adapter_metadata",
+                adapter_id,
+                adapter_version,
+            )
         try:
             raw_prediction = self._adapter.predict(normalized_text)
         except Exception:
             return _AdapterAttempt(
                 label=None,
-                status=IntentStatus.ABSTAINED,
+                status=IntentStatus.FAILED,
                 adapter_id=adapter_id,
                 adapter_version=adapter_version,
                 confidence=None,
                 margin=None,
+                scores=None,
                 reason_codes=("adapter_exception",),
             )
         try:
-            prediction = _validated_prediction(raw_prediction)
-        except (AttributeError, TypeError, ValueError):
+            prediction = validate_prediction(
+                raw_prediction,
+                adapter_id=adapter_id,
+                adapter_version=adapter_version,
+            )
+        except PredictionBoundaryError as error:
             return _invalid_attempt(
-                "malformed_prediction",
+                error.reason_code,
                 adapter_id,
                 adapter_version,
             )
         return _AdapterAttempt(
             label=prediction.label,
             status=prediction.status,
-            adapter_id=prediction.adapter_id,
-            adapter_version=prediction.adapter_version,
-            confidence=float(prediction.confidence),
-            margin=float(prediction.margin),
+            adapter_id=adapter_id,
+            adapter_version=adapter_version,
+            confidence=(
+                None
+                if prediction.confidence is None
+                else float(prediction.confidence)
+            ),
+            margin=None if prediction.margin is None else float(prediction.margin),
+            scores=prediction.scores,
             reason_codes=prediction.reason_codes,
         )
     def _resolve_persisted(
@@ -691,32 +733,20 @@ class M4IntentService:
         )
     def _created_at(self) -> datetime:
         return datetime.now(timezone.utc)
-def _normalize_text(student_text: str) -> str:
-    if not isinstance(student_text, str):
-        raise _unsupported("student task text must be a string")
-    return " ".join(student_text.split()).casefold()
-def _validated_prediction(raw_prediction: object) -> IntentPrediction:
-    if not isinstance(raw_prediction, IntentPrediction):
-        raise ValueError("adapter returned a non-prediction value")
-    prediction = IntentPrediction(
-        label=raw_prediction.label,
-        confidence=raw_prediction.confidence,
-        margin=raw_prediction.margin,
-        status=raw_prediction.status,
-        adapter_id=raw_prediction.adapter_id,
-        adapter_version=raw_prediction.adapter_version,
-        reason_codes=raw_prediction.reason_codes,
-    )
-    if prediction.status is not IntentStatus.ACCEPTED and prediction.label is not None:
-        raise ValueError("non-accepted predictions cannot have a label")
-    return prediction
 def _prediction_from_attempt(attempt: _AdapterAttempt) -> IntentPrediction:
-    if attempt.label is None or attempt.confidence is None or attempt.margin is None:
+    if (
+        attempt.label is None
+        or attempt.confidence is None
+        or attempt.margin is None
+        or attempt.scores is None
+    ):
         raise ValueError("accepted adapter attempt is incomplete")
-    return IntentPrediction.accepted(
+    return IntentPrediction(
         label=attempt.label,
+        scores=attempt.scores,
         confidence=attempt.confidence,
         margin=attempt.margin,
+        status=IntentStatus.ACCEPTED,
         adapter_id=attempt.adapter_id,
         adapter_version=attempt.adapter_version,
         reason_codes=attempt.reason_codes,
@@ -732,26 +762,8 @@ def _attempt_with_policy(
         adapter_version=attempt.adapter_version,
         confidence=attempt.confidence,
         margin=attempt.margin,
+        scores=attempt.scores,
         reason_codes=policy_outcome.reason_codes,
-    )
-def _safe_adapter_metadata(adapter: IntentAdapter) -> tuple[str, str]:
-    try:
-        adapter_id = adapter.adapter_id
-    except Exception:
-        adapter_id = None
-    try:
-        adapter_version = adapter.adapter_version
-    except Exception:
-        adapter_version = None
-    return (
-        adapter_id
-        if isinstance(adapter_id, str) and adapter_id.strip()
-        else "invalid-adapter",
-        (
-            adapter_version
-            if isinstance(adapter_version, str) and adapter_version.strip()
-            else "unavailable"
-        ),
     )
 def _invalid_attempt(
     reason_code: str,
@@ -765,6 +777,7 @@ def _invalid_attempt(
         adapter_version=adapter_version,
         confidence=None,
         margin=None,
+        scores=None,
         reason_codes=(reason_code,),
     )
 def _outcome_adapter_metadata(
@@ -775,95 +788,6 @@ def _outcome_adapter_metadata(
     return attempt.adapter_id, attempt.adapter_version
 def _merge_reasons(*groups: tuple[str, ...]) -> tuple[str, ...]:
     return tuple(dict.fromkeys(code for group in groups for code in group))
-def _validated_reason_codes(value: object) -> tuple[str, ...]:
-    if not isinstance(value, (list, tuple)):
-        raise ValueError("reason codes must be a list or tuple")
-    normalized = tuple(value)
-    if any(not isinstance(code, str) or not code.strip() for code in normalized):
-        raise ValueError("reason codes must contain nonblank strings")
-    return normalized
-def _validate_status_and_label(
-    status: object,
-    label: object,
-    *,
-    prefix: str,
-) -> None:
-    if not isinstance(status, IntentStatus):
-        raise ValueError(f"{prefix} status is invalid")
-    if label is not None and label not in SUPPORTED_TASK_TYPES:
-        raise ValueError(f"{prefix} task type is unsupported")
-    if status is IntentStatus.ACCEPTED and label is None:
-        raise ValueError(f"accepted {prefix} requires a task type")
-    if status is not IntentStatus.ACCEPTED and label is not None:
-        raise ValueError(f"non-accepted {prefix} cannot have a task type")
-def _validate_optional_probability(name: str, value: object) -> None:
-    if value is None:
-        return
-    if (
-        isinstance(value, bool)
-        or not isinstance(value, (int, float))
-        or not math.isfinite(float(value))
-        or not 0.0 <= float(value) <= 1.0
-    ):
-        raise ValueError(f"{name} must be a finite probability or None")
-def _normalized_probability(value: object) -> object:
-    if isinstance(value, bool) or not isinstance(value, (int, float)):
-        return value
-    try:
-        return float(value)
-    except OverflowError:
-        return math.inf
-def _legacy_v1_integer_score_payload_checksum(
-    canonical_payload: dict[str, object],
-) -> str:
-    payload = {
-        **canonical_payload,
-        "confidence": _legacy_v1_integer_score(
-            canonical_payload["confidence"]
-        ),
-        "margin": _legacy_v1_integer_score(canonical_payload["margin"]),
-    }
-    shadow = canonical_payload["shadow"]
-    if type(shadow) is dict:
-        payload["shadow"] = {
-            **shadow,
-            "confidence": _legacy_v1_integer_score(shadow["confidence"]),
-            "margin": _legacy_v1_integer_score(shadow["margin"]),
-        }
-    serialized = json.dumps(
-        payload,
-        ensure_ascii=False,
-        allow_nan=False,
-        sort_keys=True,
-        separators=(",", ":"),
-    )
-    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
-def _legacy_v1_integer_score(value: object) -> object:
-    if (
-        type(value) is float
-        and math.isfinite(value)
-        and 0.0 <= value <= 1.0
-        and value.is_integer()
-    ):
-        return int(value)
-    return value
-def _validate_nonblank(name: str, value: object) -> None:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{name} must not be blank")
-def _validate_sha256(name: str, value: object) -> None:
-    if (
-        not isinstance(value, str)
-        or len(value) != 64
-        or any(character not in "0123456789abcdef" for character in value)
-    ):
-        raise ValueError(f"{name} must be a lowercase SHA-256 digest")
-def _validate_created_at(value: object) -> None:
-    if (
-        not isinstance(value, datetime)
-        or value.tzinfo is None
-        or value.utcoffset() is None
-    ):
-        raise ValueError("created_at must be timezone-aware")
 def _unsupported(message: str, **details: object) -> DomainError:
     return DomainError(
         code="UNSUPPORTED_TASK",

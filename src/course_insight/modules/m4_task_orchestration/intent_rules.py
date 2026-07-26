@@ -5,6 +5,10 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 
+from course_insight.modules.m4_task_orchestration.normalization import (
+    normalize_intent_text,
+)
+
 
 _SUPPORTED_LABELS = frozenset(
     {"qa", "diagnostic", "practice", "correction", "stage_assessment"}
@@ -15,7 +19,7 @@ _HIGH_PRECISION_RULES = (
     ("correction", ("correction", "订正", "纠错")),
     ("practice", ("practice", "练习")),
     ("stage_assessment", ("stage assessment", "阶段测评")),
-    ("qa", ("question", "explain", "why", "how", "what", "问答", "提问")),
+    ("qa", ("question", "explain", "why", "问答", "提问")),
 )
 
 _LEGACY_RULES = (
@@ -92,7 +96,7 @@ def _match(
     text: str,
     rules: tuple[tuple[str, tuple[str, ...]], ...],
 ) -> RuleMatch:
-    normalized_text = _normalize_text(text)
+    normalized_text = normalize_intent_text(text)
     labels = tuple(
         sorted(
             label
@@ -101,14 +105,6 @@ def _match(
         )
     )
     return RuleMatch(labels=labels)
-
-
-def _normalize_text(text: str) -> str:
-    if not isinstance(text, str):
-        raise ValueError("student task text must be a string")
-    return " ".join(text.split()).casefold()
-
-
 def _contains_keyword(text: str, keyword: str) -> bool:
     if keyword.isascii() and keyword not in {"?"}:
         return re.search(rf"(?<!\w){re.escape(keyword)}(?!\w)", text) is not None

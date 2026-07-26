@@ -296,7 +296,7 @@ def test_injected_intent_service_preserves_bundle_validation_error() -> None:
         intent_service=intent_service,
     )
     invalid_bundle = _bundle().model_copy(
-        update={"knowledge_bundle_id": ""},
+        update={"course_id": "another_course"},
         deep=True,
     )
 
@@ -305,7 +305,37 @@ def test_injected_intent_service_preserves_bundle_validation_error() -> None:
 
     assert captured.value.code == "KNOWLEDGE_BUNDLE_MISMATCH"
     assert repository.count == 0
-    assert repository._intent_decisions == {}
+    assert len(repository._intent_decisions) == 1
+
+
+def test_injected_intent_resolves_unsupported_hint_before_consistency_checks() -> None:
+    repository = _MemoryRepository()
+    intent_service = M4IntentService(
+        repository,
+        _canonical_key,
+        mode="rules",
+        policy=IntentPolicy(min_confidence=0.70, min_margin=0.10),
+        policy_version="policy-1",
+    )
+    service, _ = _service(
+        repository=repository,
+        intent_service=intent_service,
+    )
+    mismatched_bundle = _bundle().model_copy(
+        update={"course_id": "another_course"},
+        deep=True,
+    )
+
+    with pytest.raises(DomainError) as captured:
+        _create(
+            service,
+            task_type_hint="unsupported",
+            knowledge_bundle=mismatched_bundle,
+        )
+
+    assert captured.value.code == "UNSUPPORTED_TASK"
+    assert repository.count == 0
+    assert len(repository._intent_decisions) == 1
 
 
 def test_valid_hint_has_priority_over_text_keywords() -> None:

@@ -33,30 +33,24 @@ class IntentPolicy:
 
     min_confidence: float
     min_margin: float
+    fallback_to_rules: bool = True
+    fail_closed: bool = True
 
     def __post_init__(self) -> None:
         _validate_threshold("min_confidence", self.min_confidence)
         _validate_threshold("min_margin", self.min_margin)
+        if not isinstance(self.fallback_to_rules, bool):
+            raise ValueError("fallback_to_rules must be a boolean")
+        if not isinstance(self.fail_closed, bool):
+            raise ValueError("fail_closed must be a boolean")
 
     def accept(self, prediction: IntentPrediction) -> IntentDecisionOutcome:
         """Return the policy outcome without mutating the source prediction."""
 
-        if prediction.status is IntentStatus.OUT_OF_SCOPE:
+        if prediction.status is not IntentStatus.ACCEPTED:
             return IntentDecisionOutcome(
                 label=None,
-                status=IntentStatus.OUT_OF_SCOPE,
-                reason_codes=prediction.reason_codes,
-            )
-        if prediction.status is IntentStatus.INVALID:
-            return IntentDecisionOutcome(
-                label=None,
-                status=IntentStatus.INVALID,
-                reason_codes=prediction.reason_codes,
-            )
-        if prediction.status is IntentStatus.ABSTAINED:
-            return IntentDecisionOutcome(
-                label=None,
-                status=IntentStatus.ABSTAINED,
+                status=prediction.status,
                 reason_codes=prediction.reason_codes,
             )
 

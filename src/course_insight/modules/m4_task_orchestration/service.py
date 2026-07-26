@@ -61,15 +61,6 @@ class M4TaskOrchestrationService:
         错误码：UNSUPPORTED_TASK。
         """
 
-        if self._intent_service is not None:
-            self._validate_inputs(
-                course_id=course_id,
-                class_id=class_id,
-                learner_id=learner_id,
-                session_id=session_id,
-                knowledge_bundle=knowledge_bundle,
-                learner_state_snapshot=learner_state_snapshot,
-            )
         task_type = (
             resolve_task_type(student_text, task_type_hint)
             if self._intent_service is None
@@ -84,15 +75,14 @@ class M4TaskOrchestrationService:
                 course_package_id=knowledge_bundle.course_package_id,
             )
         )
-        if self._intent_service is None:
-            self._validate_inputs(
-                course_id=course_id,
-                class_id=class_id,
-                learner_id=learner_id,
-                session_id=session_id,
-                knowledge_bundle=knowledge_bundle,
-                learner_state_snapshot=learner_state_snapshot,
-            )
+        self._validate_inputs(
+            course_id=course_id,
+            class_id=class_id,
+            learner_id=learner_id,
+            session_id=session_id,
+            knowledge_bundle=knowledge_bundle,
+            learner_state_snapshot=learner_state_snapshot,
+        )
         blueprint_id = resolve_blueprint_id(
             task_type=task_type,
             course_id=course_id,
