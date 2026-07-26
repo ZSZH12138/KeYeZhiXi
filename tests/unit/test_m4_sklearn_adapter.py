@@ -218,6 +218,100 @@ def test_adapter_deserializes_the_same_bytes_that_passed_checksum(
     assert prediction.label == "practice"
 
 
+def test_adapter_rejects_hardlinked_model_artifact(
+    artifact_dir: Path,
+    tmp_path: Path,
+) -> None:
+    model_path = artifact_dir / "model.joblib"
+    outside_model = tmp_path / "outside-model.joblib"
+    outside_model.write_bytes(model_path.read_bytes())
+    model_path.unlink()
+    os.link(outside_model, model_path)
+
+    with pytest.raises(IntentArtifactError, match="unsafe"):
+        load_sklearn_intent_adapter(artifact_dir)
+
+
+def test_adapter_rejects_path_replacement_between_validation_and_open(
+    artifact_dir: Path,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacement_dir = _write_artifact(
+        tmp_path / "replacement",
+        artifact=_FixtureArtifact(probabilities=[OOS_PROBABILITIES]),
+    )
+    manifest_path = artifact_dir / "manifest.json"
+    model_path = artifact_dir / "model.joblib"
+    original_open = Path.open
+    swapped = False
+
+    def swap_pair_then_open(
+        path: Path,
+        *args: Any,
+        **kwargs: Any,
+    ) -> Any:
+        nonlocal swapped
+        if path == manifest_path and not swapped:
+            swapped = True
+            os.replace(manifest_path, artifact_dir / "original-manifest.json")
+            os.replace(model_path, artifact_dir / "original-model.joblib")
+            os.replace(replacement_dir / "manifest.json", manifest_path)
+            os.replace(replacement_dir / "model.joblib", model_path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", swap_pair_then_open)
+
+    with pytest.raises(IntentArtifactError, match="changed"):
+        load_sklearn_intent_adapter(artifact_dir)
+
+
+def test_adapter_rejects_model_changed_while_being_read(
+    artifact_dir: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    model_path = artifact_dir / "model.joblib"
+    original_open = Path.open
+
+    class MutatingReader:
+        def __init__(self, path: Path) -> None:
+            self._handle = original_open(path, "r+b")
+
+        def __enter__(self) -> MutatingReader:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            self._handle.close()
+
+        def fileno(self) -> int:
+            return self._handle.fileno()
+
+        def read(self, size: int = -1) -> bytes:
+            payload = self._handle.read(size)
+            os.ftruncate(self._handle.fileno(), len(payload) + 1)
+            return payload
+
+    def mutating_open(path: Path, *args: Any, **kwargs: Any) -> Any:
+        if path == model_path:
+            return MutatingReader(path)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", mutating_open)
+
+    with pytest.raises(IntentArtifactError, match="changed"):
+        load_sklearn_intent_adapter(artifact_dir)
+
+
+def test_adapter_rejects_oversized_model_before_reading(
+    artifact_dir: Path,
+) -> None:
+    with (artifact_dir / "model.joblib").open("r+b") as model_file:
+        model_file.truncate(64 * 1024 * 1024 + 1)
+
+    with pytest.raises(IntentArtifactError, match="model size"):
+        load_sklearn_intent_adapter(artifact_dir)
+
+
 @pytest.mark.parametrize("missing_name", ["manifest.json", "model.joblib"])
 def test_adapter_rejects_missing_artifact_files(
     artifact_dir: Path,

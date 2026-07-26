@@ -1,8 +1,36 @@
 from __future__ import annotations
 
+from importlib import metadata
 import subprocess
 import sys
 import textwrap
+
+from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
+
+
+def test_intent_packages_are_only_declared_for_intent_extra() -> None:
+    requirements = [
+        Requirement(value)
+        for value in metadata.requires("course-insight") or ()
+    ]
+
+    def enabled_names(extra: str) -> set[str]:
+        return {
+            canonicalize_name(requirement.name)
+            for requirement in requirements
+            if requirement.marker is None
+            or requirement.marker.evaluate({"extra": extra})
+        }
+
+    optional_names = {"scikit-learn", "joblib"}
+    assert optional_names.isdisjoint(enabled_names(""))
+    assert optional_names <= enabled_names("intent")
+    for requirement in requirements:
+        if canonicalize_name(requirement.name) in optional_names:
+            assert requirement.marker is not None
+            assert requirement.marker.evaluate({"extra": "intent"})
+            assert not requirement.marker.evaluate({"extra": ""})
 
 
 def test_rules_import_does_not_import_optional_packages() -> None:

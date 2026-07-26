@@ -10,6 +10,7 @@ from __future__ import annotations
 import importlib
 import json
 import math
+import os
 import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
@@ -28,6 +29,7 @@ from course_insight.modules.m4_task_orchestration.intent import (
 
 _MANIFEST_SCHEMA_VERSION = 1
 _MAX_MANIFEST_BYTES = 64 * 1024
+_MAX_MODEL_BYTES = 64 * 1024 * 1024
 _EXPECTED_LABELS = (
     "correction",
     "diagnostic",
@@ -122,10 +124,19 @@ def load_sklearn_intent_adapter(model_dir: Path) -> IntentAdapter:
     """Load a checksum-pinned trusted local artifact after strict validation."""
 
     root = _validated_model_root(model_dir)
-    manifest_path = _contained_regular_file(root, "manifest.json")
-    model_path = _contained_regular_file(root, "model.joblib")
-    manifest = _parse_manifest(manifest_path)
-    model_bytes = _read_model_bytes(model_path)
+    manifest_bytes = _read_stable_artifact_file(
+        root,
+        "manifest.json",
+        max_bytes=_MAX_MANIFEST_BYTES,
+        file_kind="manifest",
+    )
+    model_bytes = _read_stable_artifact_file(
+        root,
+        "model.joblib",
+        max_bytes=_MAX_MODEL_BYTES,
+        file_kind="model",
+    )
+    manifest = _parse_manifest(manifest_bytes)
     if sha256(model_bytes).hexdigest() != manifest.model_sha256:
         raise IntentArtifactError("model checksum mismatch")
 
@@ -174,35 +185,91 @@ def _validated_model_root(model_dir: object) -> Path:
     return root
 
 
-def _contained_regular_file(root: Path, name: str) -> Path:
+def _read_stable_artifact_file(
+    root: Path,
+    name: str,
+    *,
+    max_bytes: int,
+    file_kind: str,
+) -> bytes:
     candidate = root / name
     try:
-        if candidate.is_symlink():
+        validated = candidate.lstat()
+        if stat.S_ISLNK(validated.st_mode) or candidate.is_symlink():
             raise IntentArtifactError("artifact file is unsafe")
         resolved = candidate.resolve(strict=True)
         if not resolved.is_relative_to(root):
             raise IntentArtifactError("artifact file is unsafe")
-        if not stat.S_ISREG(resolved.stat().st_mode):
+        if not stat.S_ISREG(validated.st_mode):
             raise IntentArtifactError("artifact file is unavailable")
+        _require_single_link(validated)
+        _require_size_within_limit(validated.st_size, max_bytes, file_kind)
+
+        with candidate.open("rb") as artifact_file:
+            opened = os.fstat(artifact_file.fileno())
+            _require_stable_snapshot(validated, opened, file_kind)
+            _require_single_link(opened)
+            _require_size_within_limit(opened.st_size, max_bytes, file_kind)
+            payload = artifact_file.read(max_bytes + 1)
+            after_read = os.fstat(artifact_file.fileno())
+
+        if len(payload) > max_bytes:
+            _raise_size_error(file_kind)
+        _require_stable_snapshot(opened, after_read, file_kind)
+        _require_single_link(after_read)
+        if len(payload) != opened.st_size:
+            _raise_changed_error(file_kind)
+        return payload
     except IntentArtifactError:
         raise
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         raise IntentArtifactError("artifact file is unavailable") from None
-    return resolved
 
 
-def _parse_manifest(path: Path) -> _IntentManifest:
-    try:
-        size = path.stat().st_size
-        if size > _MAX_MANIFEST_BYTES:
-            raise IntentArtifactError("manifest size exceeds limit")
-        payload = path.read_bytes()
-    except IntentArtifactError:
-        raise
-    except OSError:
-        raise IntentArtifactError("manifest is unavailable") from None
-    if len(payload) > _MAX_MANIFEST_BYTES:
-        raise IntentArtifactError("manifest size exceeds limit")
+def _require_single_link(file_stat: os.stat_result) -> None:
+    if file_stat.st_nlink != 1:
+        raise IntentArtifactError("artifact file is unsafe")
+
+
+def _require_size_within_limit(
+    size: int,
+    max_bytes: int,
+    file_kind: str,
+) -> None:
+    if size < 0 or size > max_bytes:
+        _raise_size_error(file_kind)
+
+
+def _require_stable_snapshot(
+    expected: os.stat_result,
+    actual: os.stat_result,
+    file_kind: str,
+) -> None:
+    if (
+        not stat.S_ISREG(actual.st_mode)
+        or _snapshot_identity(expected) != _snapshot_identity(actual)
+    ):
+        _raise_changed_error(file_kind)
+
+
+def _snapshot_identity(file_stat: os.stat_result) -> tuple[int, int, int, int]:
+    return (
+        file_stat.st_dev,
+        file_stat.st_ino,
+        file_stat.st_size,
+        file_stat.st_mtime_ns,
+    )
+
+
+def _raise_size_error(file_kind: str) -> None:
+    raise IntentArtifactError(f"{file_kind} size exceeds limit")
+
+
+def _raise_changed_error(file_kind: str) -> None:
+    raise IntentArtifactError(f"{file_kind} artifact changed during validation")
+
+
+def _parse_manifest(payload: bytes) -> _IntentManifest:
     try:
         text = payload.decode("utf-8")
     except UnicodeDecodeError:
@@ -289,13 +356,6 @@ def _metadata_type(value: object, field_name: str) -> str:
             f"manifest {field_name} metadata is invalid"
         )
     return metadata_type
-
-
-def _read_model_bytes(path: Path) -> bytes:
-    try:
-        return path.read_bytes()
-    except OSError:
-        raise IntentArtifactError("model artifact is unavailable") from None
 
 
 def _validate_artifact(artifact: object, manifest: _IntentManifest) -> None:
