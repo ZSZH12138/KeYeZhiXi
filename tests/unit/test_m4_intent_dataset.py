@@ -156,6 +156,57 @@ def test_load_examples_rejects_duplicate_rows_without_echoing_text(
     assert private_text not in str(captured.value)
 
 
+def test_load_examples_rejects_same_content_across_groups_and_splits(
+    tmp_path: Path,
+) -> None:
+    private_text = "PRIVATE-DUPLICATE-CONTENT"
+    path = _write_rows(
+        tmp_path / "content-leak.jsonl",
+        [
+            {
+                "text": private_text,
+                "label": "qa",
+                "group_id": "train-group",
+                "split": "train",
+            },
+            {
+                "text": private_text,
+                "label": "qa",
+                "group_id": "test-group",
+                "split": "test",
+            },
+        ],
+    )
+
+    with pytest.raises(IntentDatasetError, match="duplicate") as captured:
+        load_examples(path)
+
+    assert private_text not in str(captured.value)
+
+
+def test_load_examples_rejects_normalized_content_with_conflicting_labels(
+    tmp_path: Path,
+) -> None:
+    path = _write_rows(
+        tmp_path / "normalized-conflict.jsonl",
+        [
+            {
+                "text": "Ａ  B",
+                "label": "qa",
+                "group_id": "qa-group",
+            },
+            {
+                "text": "a\tb",
+                "label": "diagnostic",
+                "group_id": "diagnostic-group",
+            },
+        ],
+    )
+
+    with pytest.raises(IntentDatasetError, match="duplicate"):
+        load_examples(path)
+
+
 def test_explicit_split_is_used_and_group_disjoint() -> None:
     examples = tuple(
         IntentExample(
@@ -225,6 +276,71 @@ def test_automatic_split_is_deterministic_label_complete_and_disjoint() -> None:
     assert set(first.validation_groups).isdisjoint(first.test_groups)
     for partition in (first.train, first.validation, first.test):
         assert {example.label for example in partition} == set(EXPECTED_LABELS)
+
+
+def test_automatic_split_finds_feasible_multilabel_group_assignment() -> None:
+    labels_by_group = {
+        "g0": {"correction", "out_of_scope", "qa"},
+        "g1": {"diagnostic", "out_of_scope", "qa"},
+        "g2": {"correction", "practice", "stage_assessment"},
+        "g3": {"diagnostic", "out_of_scope", "practice"},
+        "g4": {"correction", "stage_assessment"},
+        "g5": {"correction", "qa", "stage_assessment"},
+        "g6": {"diagnostic", "practice", "qa"},
+    }
+    examples = tuple(
+        IntentExample(
+            text=f"{group_id}-{label}",
+            label=label,
+            group_id=group_id,
+            split=None,
+        )
+        for group_id, labels in labels_by_group.items()
+        for label in sorted(labels)
+    )
+
+    partitions = split_by_group(examples, seed=1)
+
+    assert (
+        set(partitions.train_groups)
+        | set(partitions.validation_groups)
+        | set(partitions.test_groups)
+    ) == set(labels_by_group)
+    assert set(partitions.train_groups).isdisjoint(partitions.validation_groups)
+    assert set(partitions.train_groups).isdisjoint(partitions.test_groups)
+    assert set(partitions.validation_groups).isdisjoint(partitions.test_groups)
+    for partition in (partitions.train, partitions.validation, partitions.test):
+        assert {example.label for example in partition} == set(EXPECTED_LABELS)
+
+
+def test_automatic_split_includes_groups_beyond_signature_representatives() -> None:
+    examples = tuple(
+        IntentExample(
+            text=f"{label}-{index}",
+            label=label,
+            group_id=f"{label}-group-{index}",
+            split=None,
+        )
+        for label in EXPECTED_LABELS
+        for index in range(4)
+    )
+
+    partitions = split_by_group(examples, seed=17)
+
+    all_groups = {
+        example.group_id for example in examples
+    }
+    assigned_groups = (
+        set(partitions.train_groups)
+        | set(partitions.validation_groups)
+        | set(partitions.test_groups)
+    )
+    assert assigned_groups == all_groups
+    assert (
+        len(partitions.train_groups)
+        + len(partitions.validation_groups)
+        + len(partitions.test_groups)
+    ) == len(all_groups)
 
 
 def test_split_rejects_one_group_and_missing_required_labels() -> None:

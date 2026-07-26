@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import random
+import unicodedata
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -25,6 +26,11 @@ _BASE_FIELDS = frozenset({"text", "label", "group_id"})
 _ALL_FIELDS = frozenset({*_BASE_FIELDS, "split"})
 _MAX_ROW_BYTES = 64 * 1024
 _MAX_EXAMPLES = 1_000_000
+_LABEL_BITS = {
+    label: 1 << index for index, label in enumerate(EXPECTED_LABELS)
+}
+_FULL_LABEL_MASK = (1 << len(EXPECTED_LABELS)) - 1
+_PARTITION_COUNT = 3
 
 
 class IntentDatasetError(ValueError):
@@ -73,7 +79,7 @@ def load_dataset(path: Path) -> LoadedIntentDataset:
     if not isinstance(path, Path):
         raise IntentDatasetError("dataset path is invalid")
     examples: list[IntentExample] = []
-    seen: set[IntentExample] = set()
+    seen_content: set[str] = set()
     digest = sha256()
     byte_count = 0
     try:
@@ -90,9 +96,12 @@ def load_dataset(path: Path) -> LoadedIntentDataset:
                 if len(payload) > _MAX_ROW_BYTES:
                     raise IntentDatasetError("dataset row size exceeds limit")
                 example = _parse_line(payload, line_number=line_number)
-                if example in seen:
-                    raise IntentDatasetError("dataset contains duplicate rows")
-                seen.add(example)
+                content_key = _content_identity(example.text)
+                if content_key in seen_content:
+                    raise IntentDatasetError(
+                        "dataset contains duplicate content"
+                    )
+                seen_content.add(content_key)
                 examples.append(example)
                 if len(examples) > _MAX_EXAMPLES:
                     raise IntentDatasetError("dataset row count exceeds limit")
@@ -193,6 +202,21 @@ def _validated_examples(
     normalized = tuple(examples)
     if any(not isinstance(example, IntentExample) for example in normalized):
         raise IntentDatasetError("dataset examples are invalid")
+    seen_content: set[str] = set()
+    for example in normalized:
+        if (
+            not isinstance(example.text, str)
+            or not example.text.strip()
+            or example.label not in EXPECTED_LABELS
+            or not isinstance(example.group_id, str)
+            or not example.group_id.strip()
+            or example.split not in {*EXPECTED_SPLITS, None}
+        ):
+            raise IntentDatasetError("dataset examples are invalid")
+        content_key = _content_identity(example.text)
+        if content_key in seen_content:
+            raise IntentDatasetError("dataset contains duplicate content")
+        seen_content.add(content_key)
     return tuple(
         sorted(
             normalized,
@@ -239,29 +263,107 @@ def _automatic_partitions(
     if len(grouped) < 3:
         raise IntentDatasetError("dataset needs at least three groups")
 
-    by_signature: dict[tuple[str, ...], list[str]] = defaultdict(list)
+    by_signature: dict[int, list[str]] = defaultdict(list)
     for group_id, group_examples in grouped.items():
-        signature = tuple(sorted({example.label for example in group_examples}))
+        signature = 0
+        for example in group_examples:
+            signature |= _LABEL_BITS[example.label]
         by_signature[signature].append(group_id)
 
-    for attempt in range(256):
-        assigned: list[list[str]] = [[], [], []]
-        for signature in sorted(by_signature):
-            group_ids = sorted(by_signature[signature])
-            random.Random(f"{seed}:{attempt}:{'|'.join(signature)}").shuffle(
-                group_ids
-            )
-            offset = random.Random(
-                f"{seed}:{attempt}:offset:{'|'.join(signature)}"
-            ).randrange(3)
-            for index, group_id in enumerate(group_ids):
-                assigned[(index + offset) % 3].append(group_id)
-        candidate = _partitions_from_group_ids(examples, assigned)
-        if _partitions_have_all_labels(candidate):
-            return candidate
-    raise IntentDatasetError(
-        "dataset groups cannot provide all labels in every partition"
+    representatives: list[tuple[str, int]] = []
+    for signature in sorted(by_signature):
+        group_ids = sorted(by_signature[signature])
+        random.Random(f"{seed}:signature:{signature}").shuffle(group_ids)
+        representatives.extend(
+            (group_id, signature)
+            for group_id in group_ids[:_PARTITION_COUNT]
+        )
+    random.Random(f"{seed}:search").shuffle(representatives)
+    assigned = _search_complete_assignment(representatives, seed=seed)
+    if assigned is None:
+        raise IntentDatasetError(
+            "dataset groups cannot provide all labels in every partition"
+        )
+    _assign_remaining_groups(
+        assigned,
+        all_group_ids=tuple(grouped),
+        seed=seed,
     )
+    return _partitions_from_group_ids(examples, assigned)
+
+
+def _search_complete_assignment(
+    representatives: list[tuple[str, int]],
+    *,
+    seed: int,
+) -> list[list[str]] | None:
+    """Find three disjoint covers over a fixed 64^3 state space.
+
+    At most three groups per signature are required: a coverage solution never
+    needs more than one identical signature in the same partition. A state is
+    the six-bit label mask reached by each partition. Skipping is explicit, so
+    all feasible representative assignments are explored without a retry cap.
+    """
+
+    empty_state = (0, 0, 0)
+    goal = (_FULL_LABEL_MASK,) * _PARTITION_COUNT
+    states: dict[tuple[int, int, int], int] = {empty_state: 0}
+    goal_code: int | None = None
+    for index, (group_id, signature) in enumerate(representatives):
+        next_states = dict(states)
+        partition_order = list(range(_PARTITION_COUNT))
+        random.Random(f"{seed}:partition:{group_id}").shuffle(partition_order)
+        choice_shift = index * 2
+        for state, choice_code in states.items():
+            for partition_index in partition_order:
+                updated_mask = state[partition_index] | signature
+                if updated_mask == state[partition_index]:
+                    continue
+                updated_state = list(state)
+                updated_state[partition_index] = updated_mask
+                state_key = tuple(updated_state)
+                if state_key not in next_states:
+                    next_states[state_key] = choice_code | (
+                        (partition_index + 1) << choice_shift
+                    )
+        states = next_states
+        if goal in states:
+            goal_code = states[goal]
+            break
+    if goal_code is None:
+        return None
+
+    assigned: list[list[str]] = [
+        [] for _ in range(_PARTITION_COUNT)
+    ]
+    for index, (group_id, _) in enumerate(representatives):
+        choice = (goal_code >> (index * 2)) & 0b11
+        if choice:
+            assigned[choice - 1].append(group_id)
+    return assigned
+
+
+def _assign_remaining_groups(
+    assigned: list[list[str]],
+    *,
+    all_group_ids: tuple[str, ...],
+    seed: int,
+) -> None:
+    already_assigned = {
+        group_id
+        for partition in assigned
+        for group_id in partition
+    }
+    remaining = sorted(set(all_group_ids) - already_assigned)
+    random.Random(f"{seed}:remaining").shuffle(remaining)
+    for group_id in remaining:
+        partition_order = list(range(_PARTITION_COUNT))
+        random.Random(f"{seed}:balance:{group_id}").shuffle(partition_order)
+        partition_index = min(
+            partition_order,
+            key=lambda index: len(assigned[index]),
+        )
+        assigned[partition_index].append(group_id)
 
 
 def _partitions_from_group_ids(
@@ -339,6 +441,11 @@ def _snapshot_identity(file_stat: os.stat_result) -> tuple[int, int, int, int]:
         file_stat.st_size,
         file_stat.st_mtime_ns,
     )
+
+
+def _content_identity(text: str) -> str:
+    normalized = unicodedata.normalize("NFKC", text)
+    return " ".join(normalized.split()).casefold()
 
 
 class _DuplicateKey(ValueError):
