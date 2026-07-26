@@ -69,30 +69,35 @@ def _source_with_plans(path: Path, seeds: str = "a") -> Path:
     return path
 
 
-def _decision(seed: str) -> StoredIntentDecision:
+def _decision(
+    seed: str,
+    *,
+    status: IntentStatus = IntentStatus.ACCEPTED,
+) -> StoredIntentDecision:
+    accepted = status is IntentStatus.ACCEPTED
     return StoredIntentDecision(
         request_key=seed * 64,
-        resolved_task_type="practice",
-        decision_status=IntentStatus.ACCEPTED,
-        decision_source="active_model",
+        resolved_task_type="practice" if accepted else None,
+        decision_status=status,
+        decision_source="active_model" if accepted else "refusal",
         adapter_id="test-adapter",
         adapter_version=f"adapter-{seed}",
         policy_version="intent-policy-v1",
-        confidence=0.91,
-        margin=0.31,
+        confidence=0.91 if accepted else None,
+        margin=0.31 if accepted else None,
         input_checksum=hashlib.sha256(
             f"private-{seed}".encode("utf-8")
         ).hexdigest(),
-        reason_codes=("model_accepted",),
+        reason_codes=("model_accepted",) if accepted else ("unsupported_hint",),
         created_at=NOW + timedelta(seconds=ord(seed)),
-        shadow_label="qa",
-        shadow_status=IntentStatus.ACCEPTED,
-        shadow_adapter_id="shadow-adapter",
-        shadow_adapter_version="shadow-v1",
-        shadow_confidence=0.82,
-        shadow_margin=0.22,
-        shadow_reason_codes=("shadow_accepted",),
-        shadow_agrees=False,
+        shadow_label="qa" if accepted else None,
+        shadow_status=IntentStatus.ACCEPTED if accepted else None,
+        shadow_adapter_id="shadow-adapter" if accepted else None,
+        shadow_adapter_version="shadow-v1" if accepted else None,
+        shadow_confidence=0.82 if accepted else None,
+        shadow_margin=0.22 if accepted else None,
+        shadow_reason_codes=("shadow_accepted",) if accepted else (),
+        shadow_agrees=False if accepted else None,
         _generate_checksum=True,
     )
 
@@ -667,8 +672,11 @@ def _prepared_plan_row() -> PreparedImportRow:
     )
 
 
-def _prepared_intent_row() -> PreparedImportRow:
-    decision = _decision("a")
+def _prepared_intent_row(
+    *,
+    status: IntentStatus = IntentStatus.ACCEPTED,
+) -> PreparedImportRow:
+    decision = _decision("a", status=status)
     shadow = decision.shadow_payload()
     columns = (
         "request_key",
@@ -704,11 +712,15 @@ def _prepared_intent_row() -> PreparedImportRow:
             sort_keys=True,
             separators=(",", ":"),
         ),
-        json.dumps(
-            shadow,
-            ensure_ascii=False,
-            sort_keys=True,
-            separators=(",", ":"),
+        (
+            None
+            if shadow is None
+            else json.dumps(
+                shadow,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
         ),
         decision.schema_version,
         decision.payload_checksum,
@@ -796,6 +808,7 @@ def test_postgres_destination_upserts_and_verifies_m4_intent_json_and_utc() -> N
     selected["reason_codes_json"] = json.loads(selected["reason_codes_json"])
     selected["shadow_json"] = json.loads(selected["shadow_json"])
     selected["created_at"] = datetime.fromisoformat(selected["created_at"])
+    selected["_shadow_json_is_sql_null"] = False
     connection = _FakePostgresConnection(selected)
     destination = PostgresImportDestination(_FakePool(connection))
 
@@ -812,6 +825,57 @@ def test_postgres_destination_upserts_and_verifies_m4_intent_json_and_utc() -> N
     assert isinstance(parameters[10], Jsonb)
     assert isinstance(parameters[11], Jsonb)
     assert parameters[14].tzinfo is timezone.utc
+
+
+def test_refusal_with_null_shadow_imports_end_to_end(tmp_path: Path) -> None:
+    source = tmp_path / "source.sqlite3"
+    repository = SQLiteM4Repository(source)
+    repository.initialize()
+    refusal = _decision("a", status=IntentStatus.INVALID)
+    repository.insert_or_get_intent_decision(refusal)
+    expected = _prepared_intent_row(status=IntentStatus.INVALID)
+    selected = dict(zip(expected.columns, expected.values, strict=True))
+    selected["reason_codes_json"] = json.loads(
+        selected["reason_codes_json"]
+    )
+    selected["created_at"] = datetime.fromisoformat(selected["created_at"])
+    selected["_shadow_json_is_sql_null"] = True
+    connection = _FakePostgresConnection(selected)
+
+    report = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=PostgresImportDestination(_FakePool(connection)),
+    ).run(mode="apply", batch_size=1)
+
+    intent_report = next(
+        table for table in report.tables if table.table == "m4_intent_decisions"
+    )
+    assert intent_report.source_count == intent_report.verified_count == 1
+    insert_parameters = next(
+        parameters
+        for statement, parameters in connection.executed
+        if statement.lstrip().startswith(
+            "INSERT INTO m4_intent_decisions"
+        )
+    )
+    assert insert_parameters[11] is None
+
+
+def test_refusal_import_rejects_json_null_for_nullable_shadow() -> None:
+    expected = _prepared_intent_row(status=IntentStatus.INVALID)
+    selected = dict(zip(expected.columns, expected.values, strict=True))
+    selected["reason_codes_json"] = json.loads(
+        selected["reason_codes_json"]
+    )
+    selected["created_at"] = datetime.fromisoformat(selected["created_at"])
+    selected["_shadow_json_is_sql_null"] = False
+    connection = _FakePostgresConnection(selected)
+
+    with pytest.raises(MigrationError, match="TARGET_VERIFICATION_FAILED"):
+        PostgresImportDestination(_FakePool(connection)).apply_batch(
+            "m4_intent_decisions",
+            (expected,),
+        )
 
 
 def test_cli_defaults_to_dry_run_without_database_url(

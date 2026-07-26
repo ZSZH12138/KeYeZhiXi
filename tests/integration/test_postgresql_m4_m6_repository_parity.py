@@ -101,7 +101,14 @@ def _fingerprint(token: str, kind: str) -> str:
     return hashlib.sha256(f"{kind}:{token}".encode("utf-8")).hexdigest()
 
 
-def _m4_intent(token: str, *, adapter_version: str = "v1") -> StoredIntentDecision:
+def _m4_intent(
+    token: str,
+    *,
+    adapter_version: str = "v1",
+    integer_scores: bool = False,
+) -> StoredIntentDecision:
+    confidence = 1 if integer_scores else 0.91
+    margin = 0 if integer_scores else 0.31
     return StoredIntentDecision(
         request_key=_fingerprint(token, "intent-request"),
         resolved_task_type="practice",
@@ -110,8 +117,8 @@ def _m4_intent(token: str, *, adapter_version: str = "v1") -> StoredIntentDecisi
         adapter_id="live-adapter",
         adapter_version=adapter_version,
         policy_version="intent-policy-v1",
-        confidence=0.91,
-        margin=0.31,
+        confidence=confidence,
+        margin=margin,
         input_checksum=_fingerprint(token, "private-input"),
         reason_codes=("model_accepted",),
         created_at=NOW,
@@ -273,7 +280,7 @@ def test_real_postgres_m4_intent_round_trip_first_writer_and_checksums(
 ) -> None:
     token = uuid4().hex
     repository = PostgresM4Repository(postgres_pool)
-    first = _m4_intent(token)
+    first = _m4_intent(token, integer_scores=True)
     competitor = _m4_intent(token, adapter_version="v2")
     try:
         winner = repository.insert_or_get_intent_decision(first)
@@ -290,6 +297,8 @@ def test_real_postgres_m4_intent_round_trip_first_writer_and_checksums(
                     COUNT(*) AS row_count,
                     MIN(pg_typeof(reason_codes_json)::text) AS reason_type,
                     MIN(pg_typeof(created_at)::text) AS created_at_type,
+                    MIN(confidence) AS confidence,
+                    MIN(margin) AS margin,
                     MIN(payload_checksum) AS payload_checksum
                 FROM m4_intent_decisions
                 WHERE request_key = %s
@@ -300,6 +309,8 @@ def test_real_postgres_m4_intent_round_trip_first_writer_and_checksums(
         assert int(row["row_count"]) == 1
         assert row["reason_type"] == "jsonb"
         assert row["created_at_type"] == "timestamp with time zone"
+        assert row["confidence"] == 1.0
+        assert row["margin"] == 0.0
         assert row["payload_checksum"] == first.payload_checksum
     finally:
         with postgres_pool.connection() as connection:

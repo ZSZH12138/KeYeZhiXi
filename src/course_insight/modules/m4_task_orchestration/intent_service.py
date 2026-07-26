@@ -105,6 +105,17 @@ class StoredIntentDecision:
     _generate_checksum: InitVar[bool] = False
 
     def __post_init__(self, _generate_checksum: bool) -> None:
+        for field_name in (
+            "confidence",
+            "margin",
+            "shadow_confidence",
+            "shadow_margin",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _normalized_probability(getattr(self, field_name)),
+            )
         object.__setattr__(self, "reason_codes", _validated_reason_codes(
             self.reason_codes
         ))
@@ -763,6 +774,13 @@ def _validate_optional_probability(name: str, value: object) -> None:
         or not 0.0 <= float(value) <= 1.0
     ):
         raise ValueError(f"{name} must be a finite probability or None")
+def _normalized_probability(value: object) -> object:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return value
+    try:
+        return float(value)
+    except OverflowError:
+        return math.inf
 def _validate_nonblank(name: str, value: object) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must not be blank")

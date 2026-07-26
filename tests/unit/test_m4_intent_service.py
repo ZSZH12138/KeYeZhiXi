@@ -602,6 +602,62 @@ def test_equivalent_created_at_offsets_have_one_utc_canonical_checksum() -> None
     assert equivalent.payload_checksum == stored.payload_checksum
 
 
+def test_stored_decision_normalizes_integer_scores_before_checksum() -> None:
+    integer_scores = StoredIntentDecision(
+        request_key="a" * 64,
+        resolved_task_type="practice",
+        decision_status=IntentStatus.ACCEPTED,
+        decision_source="active_model",
+        adapter_id="adapter",
+        adapter_version="1",
+        policy_version="policy-1",
+        confidence=1,
+        margin=0,
+        input_checksum="b" * 64,
+        reason_codes=("accepted",),
+        created_at=NOW,
+        shadow_label="qa",
+        shadow_status=IntentStatus.ACCEPTED,
+        shadow_adapter_id="shadow-adapter",
+        shadow_adapter_version="1",
+        shadow_confidence=1,
+        shadow_margin=0,
+        shadow_reason_codes=("shadow-accepted",),
+        shadow_agrees=False,
+        _generate_checksum=True,
+    )
+    float_scores = StoredIntentDecision(
+        request_key="a" * 64,
+        resolved_task_type="practice",
+        decision_status=IntentStatus.ACCEPTED,
+        decision_source="active_model",
+        adapter_id="adapter",
+        adapter_version="1",
+        policy_version="policy-1",
+        confidence=1.0,
+        margin=0.0,
+        input_checksum="b" * 64,
+        reason_codes=("accepted",),
+        created_at=NOW,
+        shadow_label="qa",
+        shadow_status=IntentStatus.ACCEPTED,
+        shadow_adapter_id="shadow-adapter",
+        shadow_adapter_version="1",
+        shadow_confidence=1.0,
+        shadow_margin=0.0,
+        shadow_reason_codes=("shadow-accepted",),
+        shadow_agrees=False,
+        _generate_checksum=True,
+    )
+
+    assert type(integer_scores.confidence) is float
+    assert type(integer_scores.margin) is float
+    assert type(integer_scores.shadow_confidence) is float
+    assert type(integer_scores.shadow_margin) is float
+    assert integer_scores.canonical_payload() == float_scores.canonical_payload()
+    assert integer_scores.payload_checksum == float_scores.payload_checksum
+
+
 def test_persisted_decision_cannot_omit_payload_checksum() -> None:
     repository = InMemoryM4Repository()
     service = _make_intent_service(repository)

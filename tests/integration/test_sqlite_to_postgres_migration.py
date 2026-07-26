@@ -55,16 +55,16 @@ def test_real_postgres_import_is_verified_idempotent_and_source_preserving(
     sqlite_repository.save_task_plan(plan, key)
     intent = StoredIntentDecision(
         request_key=hashlib.sha256(f"intent:{key}".encode()).hexdigest(),
-        resolved_task_type="practice",
-        decision_status=IntentStatus.ACCEPTED,
-        decision_source="active_model",
+        resolved_task_type=None,
+        decision_status=IntentStatus.INVALID,
+        decision_source="refusal",
         adapter_id="import-adapter",
         adapter_version="v1",
         policy_version="intent-policy-v1",
-        confidence=0.91,
-        margin=0.31,
+        confidence=None,
+        margin=None,
         input_checksum=hashlib.sha256(b"private-live-input").hexdigest(),
-        reason_codes=("model_accepted",),
+        reason_codes=("unsupported_hint",),
         created_at=datetime(2026, 7, 25, 8, 0, tzinfo=timezone.utc),
         _generate_checksum=True,
     )
@@ -96,6 +96,21 @@ def test_real_postgres_import_is_verified_idempotent_and_source_preserving(
         assert PostgresM4Repository(pool).get_intent_decision(
             intent.request_key
         ) == intent
+        with pool.connection() as connection:
+            stored_intent = connection.execute(
+                """
+                SELECT
+                    shadow_json,
+                    shadow_json IS NULL AS shadow_is_sql_null
+                FROM m4_intent_decisions
+                WHERE request_key = %s
+                """,
+                (intent.request_key,),
+            ).fetchone()
+        assert stored_intent == {
+            "shadow_json": None,
+            "shadow_is_sql_null": True,
+        }
         intent_report = next(
             table
             for table in first.tables

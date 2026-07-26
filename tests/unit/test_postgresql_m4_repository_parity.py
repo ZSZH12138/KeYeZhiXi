@@ -53,8 +53,13 @@ def _decision(
     *,
     adapter_version: str = "adapter-v1",
     status: IntentStatus = IntentStatus.ACCEPTED,
+    integer_scores: bool = False,
 ) -> StoredIntentDecision:
     accepted = status is IntentStatus.ACCEPTED
+    confidence = 1 if integer_scores else 0.91
+    margin = 0 if integer_scores else 0.31
+    shadow_confidence = 1 if integer_scores else 0.82
+    shadow_margin = 0 if integer_scores else 0.22
     return StoredIntentDecision(
         request_key="b" * 64,
         resolved_task_type="practice" if accepted else None,
@@ -63,8 +68,8 @@ def _decision(
         adapter_id="test-adapter",
         adapter_version=adapter_version,
         policy_version="intent-policy-v1",
-        confidence=0.91 if accepted else None,
-        margin=0.31 if accepted else None,
+        confidence=confidence if accepted else None,
+        margin=margin if accepted else None,
         input_checksum="c" * 64,
         reason_codes=("model_accepted",) if accepted else ("unsupported_hint",),
         created_at=NOW,
@@ -72,8 +77,8 @@ def _decision(
         shadow_status=IntentStatus.ACCEPTED if accepted else None,
         shadow_adapter_id="shadow-adapter" if accepted else None,
         shadow_adapter_version="shadow-v1" if accepted else None,
-        shadow_confidence=0.82 if accepted else None,
-        shadow_margin=0.22 if accepted else None,
+        shadow_confidence=shadow_confidence if accepted else None,
+        shadow_margin=shadow_margin if accepted else None,
         shadow_reason_codes=("shadow_accepted",) if accepted else (),
         shadow_agrees=False if accepted else None,
         _generate_checksum=True,
@@ -171,8 +176,10 @@ class _FakeConnection:
                     "adapter_id": str(adapter_id),
                     "adapter_version": str(adapter_version),
                     "policy_version": str(policy_version),
-                    "confidence": confidence,
-                    "margin": margin,
+                    "confidence": (
+                        None if confidence is None else float(confidence)
+                    ),
+                    "margin": None if margin is None else float(margin),
                     "input_checksum": str(input_checksum),
                     "reason_codes_json": deepcopy(reason_codes_json.obj),
                     "shadow_json": (
@@ -434,6 +441,20 @@ def test_intent_refusal_round_trip_preserves_nulls_and_utc() -> None:
     assert stored.margin is None
     assert stored.created_at.tzinfo is timezone.utc
     assert database.intent_rows_by_key[refusal.request_key]["shadow_json"] is None
+
+
+def test_intent_integer_scores_survive_double_precision_readback() -> None:
+    module = _repository_module()
+    database = _FakeM4Database()
+    repository = module.PostgresM4Repository(_FakePool(database))
+    decision = _decision(integer_scores=True)
+
+    stored = repository.insert_or_get_intent_decision(decision)
+
+    assert stored == decision
+    assert stored.payload_checksum == decision.payload_checksum
+    assert type(database.intent_rows_by_key[decision.request_key]["confidence"]) is float
+    assert type(database.intent_rows_by_key[decision.request_key]["margin"]) is float
 
 
 @pytest.mark.parametrize(

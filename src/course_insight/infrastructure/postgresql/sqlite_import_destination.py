@@ -249,6 +249,11 @@ _JSON_COLUMNS = {
     "m9_teacher_reviews": frozenset({"payload"}),
     "m9_teacher_analytics": frozenset({"learner_ids", "payload"}),
 }
+_NULLABLE_JSON_NULL_MARKERS = {
+    "m4_intent_decisions": {
+        "shadow_json": "_shadow_json_is_sql_null",
+    },
+}
 _TIMESTAMP_COLUMNS = {
     "m0_learning_events": frozenset({"occurred_at"}),
     "m0_event_outbox": frozenset(
@@ -332,15 +337,26 @@ def _insert_statement(table: str) -> str:
 
 def _select_statement(table: str) -> str:
     columns = _COLUMNS[table]
+    null_markers = _NULLABLE_JSON_NULL_MARKERS.get(table, {})
+    selected_columns = (
+        *columns,
+        *(
+            f"{column} IS NULL AS {alias}"
+            for column, alias in null_markers.items()
+        ),
+    )
     where = " AND ".join(f"{column} = %s" for column in _IDENTITIES[table])
-    return f"SELECT {', '.join(columns)} FROM {table} WHERE {where}"
+    return f"SELECT {', '.join(selected_columns)} FROM {table} WHERE {where}"
 
 
 def _bound_values(table: str, row: Any) -> tuple[Any, ...]:
     json_columns = _JSON_COLUMNS.get(table, frozenset())
+    nullable_json_columns = _NULLABLE_JSON_NULL_MARKERS.get(table, {})
     timestamp_columns = _TIMESTAMP_COLUMNS.get(table, frozenset())
     return tuple(
-        Jsonb(_json_document(value))
+        None
+        if column in nullable_json_columns and value is None
+        else Jsonb(_json_document(value))
         if column in json_columns
         else _timestamp(value)
         if column in timestamp_columns and value is not None
@@ -367,6 +383,7 @@ def _verify_on_connection(
 
 def _same_row(table: str, expected: Any, selected: Mapping[str, Any]) -> bool:
     json_columns = _JSON_COLUMNS.get(table, frozenset())
+    nullable_json_markers = _NULLABLE_JSON_NULL_MARKERS.get(table, {})
     timestamp_columns = _TIMESTAMP_COLUMNS.get(table, frozenset())
     for column, expected_value in zip(
         expected.columns,
@@ -375,6 +392,17 @@ def _same_row(table: str, expected: Any, selected: Mapping[str, Any]) -> bool:
     ):
         actual_value = selected.get(column)
         if column in json_columns:
+            null_marker = nullable_json_markers.get(column)
+            if null_marker is not None:
+                is_sql_null = selected.get(null_marker)
+                if type(is_sql_null) is not bool:
+                    return False
+                if expected_value is None:
+                    if actual_value is not None or not is_sql_null:
+                        return False
+                    continue
+                if actual_value is None or is_sql_null:
+                    return False
             if _json_document(expected_value) != _json_document(actual_value):
                 return False
         elif column in timestamp_columns:
