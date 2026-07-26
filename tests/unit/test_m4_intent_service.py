@@ -237,6 +237,174 @@ def test_blank_and_absent_hint_share_one_unpoisoned_rule_decision() -> None:
     assert _only_decision(repository).decision_source == "high_precision_rule"
 
 
+def test_high_and_legacy_same_label_keeps_high_precision_source() -> None:
+    repository = InMemoryM4Repository()
+
+    resolved = _make_intent_service(repository).resolve(
+        **_request("explain why?")
+    )
+
+    assert resolved == "qa"
+    stored = _only_decision(repository)
+    assert stored.decision_source == "high_precision_rule"
+    assert stored.reason_codes == ()
+
+
+def test_rules_cross_rule_family_conflict_refuses() -> None:
+    repository = InMemoryM4Repository()
+
+    with pytest.raises(DomainError) as captured:
+        _make_intent_service(repository).resolve(
+            **_request("explain assessment")
+        )
+
+    assert captured.value.code == "UNSUPPORTED_TASK"
+    assert captured.value.recoverable is True
+    stored = _only_decision(repository)
+    assert stored.decision_status is IntentStatus.ABSTAINED
+    assert stored.resolved_task_type is None
+    assert "conflicting_high_precision_rules" in stored.reason_codes
+
+
+def test_active_model_can_resolve_cross_rule_family_conflict() -> None:
+    adapter = RecordingAdapter(
+        IntentPrediction.accepted(
+            "diagnostic",
+            0.91,
+            0.31,
+            "fixture",
+            "cross-conflict-v1",
+        )
+    )
+    repository = InMemoryM4Repository()
+
+    resolved = _make_intent_service(
+        repository,
+        adapter=adapter,
+        mode="active",
+    ).resolve(**_request("explain assessment"))
+
+    assert resolved == "diagnostic"
+    stored = _only_decision(repository)
+    assert stored.decision_source == "active_model"
+    assert stored.adapter_version == "cross-conflict-v1"
+    assert adapter.calls == ("explain assessment",)
+
+
+@pytest.mark.parametrize(
+    ("adapter", "expected_status"),
+    [
+        (
+            RecordingAdapter(
+                IntentPrediction.accepted(
+                    "qa",
+                    0.51,
+                    0.02,
+                    "fixture",
+                    "low-confidence",
+                )
+            ),
+            IntentStatus.ABSTAINED,
+        ),
+        (
+            RecordingAdapter(
+                IntentPrediction.out_of_scope(
+                    0.98,
+                    0.40,
+                    "fixture",
+                    "out-of-scope",
+                )
+            ),
+            IntentStatus.OUT_OF_SCOPE,
+        ),
+        (
+            RaisingAdapter(
+                IntentPrediction.accepted(
+                    "qa",
+                    0.99,
+                    0.50,
+                    "fixture",
+                    "raises",
+                )
+            ),
+            IntentStatus.ABSTAINED,
+        ),
+    ],
+)
+def test_active_failed_model_never_falls_back_after_cross_rule_conflict(
+    adapter: RecordingAdapter,
+    expected_status: IntentStatus,
+) -> None:
+    repository = InMemoryM4Repository()
+
+    with pytest.raises(DomainError) as captured:
+        _make_intent_service(
+            repository,
+            adapter=adapter,
+            mode="active",
+        ).resolve(**_request("explain assessment"))
+
+    assert captured.value.code == "UNSUPPORTED_TASK"
+    stored = _only_decision(repository)
+    assert stored.decision_status is expected_status
+    assert stored.resolved_task_type is None
+    assert stored.decision_source == "refusal"
+    assert adapter.calls == ("explain assessment",)
+
+
+def test_shadow_cross_rule_family_conflict_is_audited_but_refused() -> None:
+    adapter = RecordingAdapter(
+        IntentPrediction.accepted(
+            "stage_assessment",
+            0.93,
+            0.33,
+            "fixture",
+            "shadow-conflict-v1",
+        )
+    )
+    repository = InMemoryM4Repository()
+
+    with pytest.raises(DomainError) as captured:
+        _make_intent_service(
+            repository,
+            adapter=adapter,
+            mode="shadow",
+        ).resolve(**_request("explain assessment"))
+
+    assert captured.value.code == "UNSUPPORTED_TASK"
+    stored = _only_decision(repository)
+    assert stored.decision_status is IntentStatus.ABSTAINED
+    assert stored.resolved_task_type is None
+    assert stored.shadow_label == "stage_assessment"
+    assert stored.shadow_status is IntentStatus.ACCEPTED
+    assert stored.shadow_agrees is None
+    assert adapter.calls == ("explain assessment",)
+
+
+@pytest.mark.parametrize(
+    ("student_text", "expected_label"),
+    [
+        ("explain this concept", "qa"),
+        ("diagnostic check", "diagnostic"),
+        ("practice fractions", "practice"),
+        ("correction please", "correction"),
+        ("stage assessment", "stage_assessment"),
+    ],
+)
+def test_rules_mode_keeps_typical_task_family_compatibility(
+    student_text: str,
+    expected_label: str,
+) -> None:
+    repository = InMemoryM4Repository()
+
+    resolved = _make_intent_service(repository).resolve(
+        **_request(student_text)
+    )
+
+    assert resolved == expected_label
+    assert _only_decision(repository).decision_source == "high_precision_rule"
+
+
 def test_shadow_prediction_is_audited_but_cannot_override_rule() -> None:
     adapter = RecordingAdapter(
         IntentPrediction.accepted(

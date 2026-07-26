@@ -410,22 +410,32 @@ class M4IntentService:
             )
 
         high_precision = match_high_precision_rules(normalized_text)
-        if high_precision.resolved_label is not None:
+        legacy = match_legacy_rules(normalized_text)
+        combined_rule_labels = frozenset(high_precision.labels) | frozenset(
+            legacy.labels
+        )
+        high_precision_conflict = (
+            bool(high_precision.labels) and len(combined_rule_labels) > 1
+        )
+        if (
+            high_precision.resolved_label is not None
+            and not high_precision_conflict
+        ):
             return self._deterministic_accept(
                 high_precision.resolved_label,
                 "high_precision_rule",
                 normalized_text,
             )
-        high_precision_conflict = len(high_precision.labels) > 1
         if self._mode == "active":
             return self._decide_active(
                 normalized_text,
                 high_precision,
+                legacy,
                 high_precision_conflict,
             )
         shadow = self._shadow_observation(normalized_text, None)
         return self._legacy_or_refusal(
-            normalized_text,
+            legacy,
             high_precision_conflict=high_precision_conflict,
             shadow=shadow,
         )
@@ -449,6 +459,7 @@ class M4IntentService:
         self,
         normalized_text: str,
         high_precision: RuleMatch,
+        legacy: RuleMatch,
         high_precision_conflict: bool,
     ) -> _DecisionOutcome:
         attempt = self._run_adapter(normalized_text)
@@ -458,17 +469,20 @@ class M4IntentService:
             if policy_outcome.status is IntentStatus.ACCEPTED:
                 return self._model_accept(attempt, policy_outcome.reason_codes)
             attempt = _attempt_with_policy(attempt, policy_outcome)
-        if attempt.status is IntentStatus.OUT_OF_SCOPE:
+        if (
+            attempt.status is IntentStatus.OUT_OF_SCOPE
+            and not high_precision_conflict
+        ):
             return self._model_refusal(attempt)
         return self._legacy_or_refusal(
-            normalized_text,
+            legacy,
             high_precision_conflict=high_precision_conflict,
             model_attempt=attempt,
             prior_rule_labels=high_precision.labels,
         )
     def _legacy_or_refusal(
         self,
-        normalized_text: str,
+        legacy: RuleMatch,
         *,
         high_precision_conflict: bool,
         model_attempt: _AdapterAttempt | None = None,
@@ -494,7 +508,6 @@ class M4IntentService:
                 model_attempt=model_attempt,
                 shadow=shadow,
             )
-        legacy = match_legacy_rules(normalized_text)
         if legacy.resolved_label is not None:
             return self._legacy_accept(
                 legacy.resolved_label,

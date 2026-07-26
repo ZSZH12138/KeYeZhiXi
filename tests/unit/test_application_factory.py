@@ -74,6 +74,9 @@ from course_insight.modules.m4_task_orchestration.intent import IntentStatus
 from course_insight.modules.m4_task_orchestration.intent_service import (
     StoredIntentDecision,
 )
+from course_insight.modules.m4_task_orchestration.routing import (
+    resolve_task_type,
+)
 from course_insight.modules.m4_task_orchestration.sklearn_adapter import (
     IntentArtifactError,
 )
@@ -274,6 +277,33 @@ def test_rules_factory_never_loads_model(
         assert app.m4_service._intent_service._adapter is None  # noqa: SLF001
     finally:
         app.close()
+
+
+def test_default_rules_factory_matches_legacy_cross_conflict_refusal(
+    tmp_path: Path,
+) -> None:
+    app = build_application(_settings(tmp_path))
+    app.m0_service.initialize()
+    request = {
+        "student_text": "explain assessment",
+        "task_type_hint": None,
+        "course_id": "course_1",
+        "class_id": "class_1",
+        "learner_id": "learner_1",
+        "session_id": "session_1",
+        "knowledge_bundle": _knowledge_bundle(),
+        "learner_state_snapshot": None,
+    }
+    try:
+        with pytest.raises(DomainError) as legacy_error:
+            resolve_task_type("explain assessment", None)
+        with pytest.raises(DomainError) as factory_error:
+            app.m4_service.create_task_plan(**request)
+    finally:
+        app.close()
+
+    assert legacy_error.value.code == factory_error.value.code == "UNSUPPORTED_TASK"
+    assert legacy_error.value.recoverable is factory_error.value.recoverable is True
 
 
 @pytest.mark.parametrize("mode", ["shadow", "active"])
