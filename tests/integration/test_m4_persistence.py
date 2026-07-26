@@ -287,6 +287,145 @@ def test_sqlite_intent_decision_check_constraints(
         assert row["payload_checksum"] == stored.payload_checksum
 
 
+def test_sqlite_repository_rejects_semantically_equal_noncanonical_reason_json(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    repository.insert_or_get_intent_decision(_decision())
+    with connect_sqlite(database_path) as connection:
+        connection.execute("PRAGMA ignore_check_constraints = ON")
+        connection.execute(
+            """
+            UPDATE m4_intent_decisions
+            SET reason_codes_json = ?
+            WHERE request_key = ?
+            """,
+            ('[ "model_accepted" ]', "request-key"),
+        )
+
+    with pytest.raises(RuntimeError, match="corrupt"):
+        repository.get_intent_decision("request-key")
+
+
+def test_sqlite_repository_rejects_canonical_non_string_reason_codes(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    repository.insert_or_get_intent_decision(_decision())
+    with connect_sqlite(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE m4_intent_decisions
+            SET reason_codes_json = ?
+            WHERE request_key = ?
+            """,
+            ("[1]", "request-key"),
+        )
+
+    with pytest.raises(RuntimeError, match="corrupt"):
+        repository.get_intent_decision("request-key")
+
+
+def test_sqlite_repository_rejects_canonical_semantically_invalid_shadow_json(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    repository.insert_or_get_intent_decision(_decision())
+    invalid_shadow = (
+        '{"adapter_id":"shadow-adapter","adapter_version":"shadow-v1",'
+        '"agrees":false,"confidence":0.82,"label":"qa","margin":0.22,'
+        '"reason_codes":[1],"status":"accepted"}'
+    )
+    with connect_sqlite(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE m4_intent_decisions
+            SET shadow_json = ?
+            WHERE request_key = ?
+            """,
+            (invalid_shadow, "request-key"),
+        )
+
+    with pytest.raises(RuntimeError, match="corrupt"):
+        repository.get_intent_decision("request-key")
+
+
+def test_sqlite_driver_binds_nan_as_null_for_nullable_intent_scores(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    repository.insert_or_get_intent_decision(
+        _decision(decision_status=IntentStatus.INVALID)
+    )
+
+    with connect_sqlite(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE m4_intent_decisions
+            SET confidence = ?
+            WHERE request_key = ?
+            """,
+            (float("nan"), "request-key"),
+        )
+        row = connection.execute(
+            """
+            SELECT confidence, typeof(confidence) AS confidence_type
+            FROM m4_intent_decisions
+            WHERE request_key = ?
+            """,
+            ("request-key",),
+        ).fetchone()
+
+    assert row["confidence"] is None
+    assert row["confidence_type"] == "null"
+
+
+def test_stored_intent_decision_rejects_nan_before_repository_write() -> None:
+    with pytest.raises(ValueError, match="finite probability"):
+        replace(
+            _decision(),
+            confidence=float("nan"),
+            payload_checksum=None,
+            _generate_checksum=True,
+        )
+
+
+def test_sqlite_repository_rejects_a_corrupted_nan_before_connecting(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    module = importlib.import_module(
+        "course_insight.infrastructure.sqlite.m4_repository"
+    )
+    repository = module.SQLiteM4Repository(database_path)
+    repository.initialize()
+    corrupted = _decision()
+    object.__setattr__(corrupted, "confidence", float("nan"))
+    connection_attempts = 0
+
+    def fail_if_connected(path: Path) -> Any:
+        del path
+        nonlocal connection_attempts
+        connection_attempts += 1
+        raise AssertionError("non-finite candidate reached SQLite")
+
+    monkeypatch.setattr(module, "connect_sqlite", fail_if_connected)
+
+    with pytest.raises(ValueError, match="intent decision is invalid"):
+        repository.insert_or_get_intent_decision(corrupted)
+
+    assert connection_attempts == 0
+
+
 def test_sqlite_intent_decision_round_trip_preserves_private_metadata(
     tmp_path: Path,
 ) -> None:
