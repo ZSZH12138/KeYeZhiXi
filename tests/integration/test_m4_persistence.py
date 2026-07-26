@@ -5,6 +5,7 @@ import importlib
 import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -362,6 +363,60 @@ def test_sqlite_reads_raw_legacy_v1_integer_score_checksum(
     assert restored.payload_checksum == legacy_checksum
     assert restored.confidence == 1.0
     assert restored.margin == 0.0
+
+
+def test_sqlite_rejects_fresh_legacy_checksum_before_opening_connection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    module = importlib.import_module(
+        "course_insight.infrastructure.sqlite.m4_repository"
+    )
+    repository = module.SQLiteM4Repository(database_path)
+    repository.initialize()
+    baseline = _decision()
+    current = StoredIntentDecision(
+        request_key=baseline.request_key,
+        resolved_task_type=baseline.resolved_task_type,
+        decision_status=baseline.decision_status,
+        decision_source=baseline.decision_source,
+        adapter_id=baseline.adapter_id,
+        adapter_version=baseline.adapter_version,
+        policy_version=baseline.policy_version,
+        confidence=1,
+        margin=0,
+        input_checksum=baseline.input_checksum,
+        reason_codes=baseline.reason_codes,
+        created_at=baseline.created_at,
+        shadow_label=baseline.shadow_label,
+        shadow_status=baseline.shadow_status,
+        shadow_adapter_id=baseline.shadow_adapter_id,
+        shadow_adapter_version=baseline.shadow_adapter_version,
+        shadow_confidence=1,
+        shadow_margin=0,
+        shadow_reason_codes=baseline.shadow_reason_codes,
+        shadow_agrees=baseline.shadow_agrees,
+        _generate_checksum=True,
+    )
+    legacy = replace(
+        current,
+        payload_checksum=_legacy_v1_integer_score_checksum(current),
+    )
+    connection_attempts = 0
+
+    def fail_if_connected(path: Path) -> Any:
+        del path
+        nonlocal connection_attempts
+        connection_attempts += 1
+        raise AssertionError("fresh invalid candidate reached SQLite")
+
+    monkeypatch.setattr(module, "connect_sqlite", fail_if_connected)
+
+    with pytest.raises(ValueError, match="intent decision is invalid"):
+        repository.insert_or_get_intent_decision(legacy)
+
+    assert connection_attempts == 0
 
 
 def test_sqlite_intent_decision_first_writer_wins_across_adapter_versions(

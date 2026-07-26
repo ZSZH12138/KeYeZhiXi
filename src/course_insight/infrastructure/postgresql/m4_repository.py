@@ -375,7 +375,7 @@ def _intent_decision_from_row(row: Any) -> StoredIntentDecision:
             schema_version=row["schema_version"],
             payload_checksum=_required_sha256(row, "payload_checksum"),
         )
-        stored.assert_integrity()
+        stored.assert_persisted_integrity()
         return stored
     except PostgresOperationError:
         raise

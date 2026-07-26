@@ -322,7 +322,7 @@ class SQLiteM4Repository:
                 schema_version=int(row["schema_version"]),
                 payload_checksum=str(row["payload_checksum"]),
             )
-            stored.assert_integrity()
+            stored.assert_persisted_integrity()
             return stored
         except (KeyError, TypeError, ValueError) as error:
             raise RuntimeError(

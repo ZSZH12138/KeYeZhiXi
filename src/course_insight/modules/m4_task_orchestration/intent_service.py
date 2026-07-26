@@ -128,7 +128,7 @@ class StoredIntentDecision:
         calculated = self.recalculate_payload_checksum()
         if _generate_checksum and self.payload_checksum is None:
             object.__setattr__(self, "payload_checksum", calculated)
-        elif not self._has_valid_payload_checksum(calculated):
+        elif not self._has_valid_persisted_payload_checksum(calculated):
             raise ValueError("intent decision payload checksum is invalid")
     @classmethod
     def from_outcome(
@@ -207,13 +207,21 @@ class StoredIntentDecision:
             "agrees": self.shadow_agrees,
         }
     def assert_integrity(self) -> None:
-        """Revalidate an object returned by an untrusted persistence boundary."""
+        """Require the current float-canonical checksum for a fresh candidate."""
         self._validate_fields()
-        if not self._has_valid_payload_checksum(
+        if self.payload_checksum != self.recalculate_payload_checksum():
+            raise ValueError("intent decision payload checksum is invalid")
+    def assert_persisted_integrity(self) -> None:
+        """Allow exact schema-v1 compatibility for an already stored row."""
+        self._validate_fields()
+        if not self._has_valid_persisted_payload_checksum(
             self.recalculate_payload_checksum()
         ):
             raise ValueError("intent decision payload checksum is invalid")
-    def _has_valid_payload_checksum(self, current_checksum: str) -> bool:
+    def _has_valid_persisted_payload_checksum(
+        self,
+        current_checksum: str,
+    ) -> bool:
         if not isinstance(self.payload_checksum, str):
             return False
         if self.payload_checksum == current_checksum:
@@ -650,7 +658,7 @@ class M4IntentService:
         if not isinstance(persisted, StoredIntentDecision):
             raise RuntimeError("M4 persisted intent decision is corrupt")
         try:
-            persisted.assert_integrity()
+            persisted.assert_persisted_integrity()
         except (TypeError, ValueError) as error:
             raise RuntimeError("M4 persisted intent decision is corrupt") from error
         if (

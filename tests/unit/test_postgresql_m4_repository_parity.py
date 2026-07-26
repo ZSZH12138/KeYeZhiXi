@@ -7,6 +7,7 @@ import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from types import ModuleType
@@ -501,6 +502,24 @@ def test_intent_reads_legacy_v1_checksum_after_double_precision_coercion() -> No
     assert restored.payload_checksum == legacy_checksum
     assert restored.confidence == 1.0
     assert restored.margin == 0.0
+
+
+def test_intent_rejects_fresh_legacy_checksum_before_opening_connection() -> None:
+    module = _repository_module()
+    database = _FakeM4Database()
+    repository = module.PostgresM4Repository(_FakePool(database))
+    current = _decision(integer_scores=True)
+    legacy = replace(
+        current,
+        payload_checksum=_legacy_v1_integer_score_checksum(current),
+    )
+
+    with pytest.raises(ValueError, match="intent decision is invalid"):
+        repository.insert_or_get_intent_decision(legacy)
+
+    assert database.connection_count == 0
+    assert database.executed == []
+    assert database.intent_rows_by_key == {}
 
 
 @pytest.mark.parametrize(

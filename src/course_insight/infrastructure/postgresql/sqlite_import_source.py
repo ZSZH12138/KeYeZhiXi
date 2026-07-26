@@ -220,7 +220,7 @@ def _prepare_intent_decision(row: sqlite3.Row) -> PreparedImportRow:
         schema_version=row["schema_version"],
         payload_checksum=_required_sha256(row, "payload_checksum"),
     )
-    decision.assert_integrity()
+    decision.assert_persisted_integrity()
     columns = source_table_columns("m4_intent_decisions")
     values_by_column = {column: row[column] for column in columns}
     return _build_prepared(

@@ -187,6 +187,34 @@ def test_persisted_decision_wins_before_new_hint_or_adapter_execution() -> None:
     assert len(repository.intent_decisions) == 1
 
 
+def test_service_replays_legacy_v1_integer_score_checksum() -> None:
+    repository = InMemoryM4Repository()
+    adapter = RecordingAdapter(
+        IntentPrediction.accepted(
+            "practice",
+            1,
+            1,
+            "fixture",
+            "1",
+        )
+    )
+    service = _make_intent_service(repository, adapter=adapter, mode="active")
+    request = _request(student_text="unmapped legacy replay request")
+    assert service.resolve(**request) == "practice"
+    current = _only_decision(repository)
+    legacy_checksum = _legacy_v1_integer_score_checksum(current)
+    assert legacy_checksum != current.payload_checksum
+    repository.intent_decisions = {
+        current.request_key: replace(
+            current,
+            payload_checksum=legacy_checksum,
+        )
+    }
+
+    assert service.resolve(**request) == "practice"
+    assert adapter.calls == ("unmapped legacy replay request",)
+
+
 def test_same_context_different_hint_or_text_has_distinct_private_decision() -> None:
     repository = InMemoryM4Repository()
     service = _make_intent_service(repository, mode="rules")
@@ -714,7 +742,10 @@ def test_stored_decision_accepts_only_exact_legacy_v1_score_checksum() -> None:
     assert replayed.payload_checksum != current.payload_checksum
     assert type(replayed.confidence) is float
     assert type(replayed.shadow_confidence) is float
-    replayed.assert_integrity()
+    current.assert_integrity()
+    with pytest.raises(ValueError, match="payload checksum"):
+        replayed.assert_integrity()
+    replayed.assert_persisted_integrity()
     with pytest.raises(ValueError, match="payload checksum"):
         replace(
             replayed,
