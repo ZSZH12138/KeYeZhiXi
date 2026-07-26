@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
+import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -11,8 +13,17 @@ import pytest
 from course_insight.contracts.knowledge import AssessmentBlueprint, KnowledgeBundle
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.infrastructure.sqlite import connect_sqlite
+from course_insight.infrastructure.sqlite.migrations import (
+    SCHEMA_VERSION,
+    current_schema_version,
+    migrate,
+)
 from course_insight.modules.m4_task_orchestration.identity import (
     canonical_idempotency_key,
+)
+from course_insight.modules.m4_task_orchestration.intent import IntentStatus
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    StoredIntentDecision,
 )
 from course_insight.modules.m4_task_orchestration.service import (
     M4TaskOrchestrationService,
@@ -101,6 +112,271 @@ def _row_count(database_path: Path) -> int:
         return int(
             connection.execute("SELECT COUNT(*) FROM m4_task_plans").fetchone()[0]
         )
+
+
+def _decision(
+    *,
+    request_key: str = "request-key",
+    adapter_version: str = "adapter-v1",
+    student_text: str = "原始文本",
+    decision_status: IntentStatus = IntentStatus.ACCEPTED,
+) -> StoredIntentDecision:
+    accepted = decision_status is IntentStatus.ACCEPTED
+    return StoredIntentDecision(
+        request_key=request_key,
+        resolved_task_type="practice" if accepted else None,
+        decision_status=decision_status,
+        decision_source="active_model" if accepted else "refusal",
+        adapter_id="test-adapter",
+        adapter_version=adapter_version,
+        policy_version="intent-policy-v1",
+        confidence=0.91 if accepted else None,
+        margin=0.31 if accepted else None,
+        input_checksum=hashlib.sha256(student_text.encode("utf-8")).hexdigest(),
+        reason_codes=("model_accepted",) if accepted else ("unsupported_hint",),
+        created_at=NOW,
+        shadow_label="qa" if accepted else None,
+        shadow_status=IntentStatus.ACCEPTED if accepted else None,
+        shadow_adapter_id="shadow-adapter" if accepted else None,
+        shadow_adapter_version="shadow-v1" if accepted else None,
+        shadow_confidence=0.82 if accepted else None,
+        shadow_margin=0.22 if accepted else None,
+        shadow_reason_codes=("shadow_accepted",) if accepted else (),
+        shadow_agrees=False if accepted else None,
+        _generate_checksum=True,
+    )
+
+
+def _intent_row_count(database_path: Path) -> int:
+    with connect_sqlite(database_path) as connection:
+        return int(
+            connection.execute(
+                "SELECT COUNT(*) FROM m4_intent_decisions"
+            ).fetchone()[0]
+        )
+
+
+def test_sqlite_v9_to_v10_migration_is_forward_only_and_repeatable(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    _create(M4TaskOrchestrationService(repository, canonical_idempotency_key))
+
+    with connect_sqlite(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute("DROP TABLE m4_intent_decisions")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 10")
+        connection.execute("COMMIT")
+        assert current_schema_version(connection) == 9
+
+        migrate(connection)
+        migrate(connection)
+
+        assert current_schema_version(connection) == 10
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 10"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM m4_task_plans"
+        ).fetchone()[0] == 1
+        columns = {
+            str(row["name"])
+            for row in connection.execute(
+                "PRAGMA table_info('m4_intent_decisions')"
+            ).fetchall()
+        }
+        assert "student_text" not in columns
+        assert columns == {
+            "request_key",
+            "resolved_task_type",
+            "decision_status",
+            "decision_source",
+            "adapter_id",
+            "adapter_version",
+            "policy_version",
+            "confidence",
+            "margin",
+            "input_checksum",
+            "reason_codes_json",
+            "shadow_json",
+            "schema_version",
+            "payload_checksum",
+            "created_at",
+        }
+    assert SCHEMA_VERSION == 10
+
+
+@pytest.mark.parametrize(
+    ("update_sql", "parameters"),
+    [
+        ("request_key = ?", (" ",)),
+        ("decision_status = ?", ("unknown",)),
+        ("resolved_task_type = ?", ("essay",)),
+        ("decision_source = ?", (" ",)),
+        ("adapter_id = ?", (" ",)),
+        ("adapter_version = ?", (" ",)),
+        ("policy_version = ?", (" ",)),
+        ("confidence = ?", (1.1,)),
+        ("margin = ?", (-0.1,)),
+        ("input_checksum = ?", ("f" * 63,)),
+        ("input_checksum = ?", ("A" * 64,)),
+        ("reason_codes_json = ?", ("{}",)),
+        ("reason_codes_json = ?", ('[ "noncanonical" ]',)),
+        ("shadow_json = ?", ("[]",)),
+        ("schema_version = ?", (2,)),
+        ("payload_checksum = ?", ("f" * 63,)),
+        ("payload_checksum = ?", ("A" * 64,)),
+        ("created_at = ?", ("2026-07-21T00:00:00",)),
+        ("created_at = ?", ("not-a-date+00:00",)),
+        (
+            "decision_status = ?, resolved_task_type = ?",
+            ("invalid", None),
+        ),
+        ("resolved_task_type = ?", (None,)),
+        ("decision_source = ?", ("refusal",)),
+        ("confidence = ?", (None,)),
+    ],
+)
+def test_sqlite_intent_decision_check_constraints(
+    tmp_path: Path,
+    update_sql: str,
+    parameters: tuple[object, ...],
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    stored = repository.insert_or_get_intent_decision(_decision())
+
+    with connect_sqlite(database_path) as connection:
+        with pytest.raises(sqlite3.IntegrityError):
+            connection.execute(
+                f"UPDATE m4_intent_decisions SET {update_sql}",
+                parameters,
+            )
+        row = connection.execute(
+            "SELECT payload_checksum FROM m4_intent_decisions"
+        ).fetchone()
+        assert row["payload_checksum"] == stored.payload_checksum
+
+
+def test_sqlite_intent_decision_round_trip_preserves_private_metadata(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    candidate = _decision()
+
+    inserted = repository.insert_or_get_intent_decision(candidate)
+    restored = _repository_type()(database_path).get_intent_decision(
+        candidate.request_key
+    )
+
+    assert inserted == candidate
+    assert inserted is not candidate
+    assert restored == candidate
+    assert restored is not inserted
+    assert restored.created_at.isoformat().endswith("+00:00")
+    assert restored.shadow_payload() == candidate.shadow_payload()
+    assert _intent_row_count(database_path) == 1
+    with connect_sqlite(database_path) as connection:
+        database_dump = "\n".join(connection.iterdump())
+    assert "原始文本" not in database_dump
+
+
+def test_sqlite_intent_decision_first_writer_wins_across_adapter_versions(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    first = _decision(adapter_version="adapter-v1")
+    later = _decision(adapter_version="adapter-v2")
+
+    inserted = repository.insert_or_get_intent_decision(first)
+    replayed = repository.insert_or_get_intent_decision(later)
+
+    assert inserted == first
+    assert replayed == first
+    assert replayed.payload_checksum != later.payload_checksum
+    assert _intent_row_count(database_path) == 1
+
+
+def test_sqlite_refusal_intent_decision_is_replayed(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    refusal = _decision(decision_status=IntentStatus.INVALID)
+
+    inserted = repository.insert_or_get_intent_decision(refusal)
+    replayed = _repository_type()(database_path).insert_or_get_intent_decision(
+        _decision(
+            adapter_version="adapter-v2",
+            decision_status=IntentStatus.INVALID,
+        )
+    )
+
+    assert inserted == refusal
+    assert replayed == refusal
+    assert replayed.decision_status is IntentStatus.INVALID
+    assert replayed.resolved_task_type is None
+    assert _intent_row_count(database_path) == 1
+
+
+def test_sqlite_rejects_tampered_intent_payload_checksum(tmp_path: Path) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    repository.insert_or_get_intent_decision(_decision())
+
+    with connect_sqlite(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE m4_intent_decisions
+            SET resolved_task_type = 'qa'
+            """
+        )
+
+    with pytest.raises(RuntimeError, match="corrupt"):
+        repository.get_intent_decision("request-key")
+
+
+def test_sqlite_v10_intent_decision_replay_is_atomic(tmp_path: Path) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+
+    def insert_once(index: int) -> StoredIntentDecision:
+        return _repository_type()(database_path).insert_or_get_intent_decision(
+            _decision(
+                request_key="same-key",
+                adapter_version=f"adapter-v{index}",
+            )
+        )
+
+    with ThreadPoolExecutor(max_workers=12) as executor:
+        decisions = list(executor.map(insert_once, range(12)))
+
+    assert len({item.payload_checksum for item in decisions}) == 1
+    assert len({item.adapter_version for item in decisions}) == 1
+    assert _intent_row_count(database_path) == 1
+    with connect_sqlite(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT COUNT(*) AS row_count, MAX(input_checksum) AS input_checksum
+            FROM m4_intent_decisions
+            """
+        ).fetchone()
+        database_dump = "\n".join(connection.iterdump())
+    assert row["row_count"] == 1
+    assert row["input_checksum"] == _decision(
+        request_key="same-key"
+    ).input_checksum
+    assert "原始文本" not in database_dump
 
 
 def test_sqlite_repository_persists_and_restores_task_plan(tmp_path: Path) -> None:

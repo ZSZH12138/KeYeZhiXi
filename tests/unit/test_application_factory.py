@@ -68,6 +68,10 @@ from course_insight.modules.m0_platform.outbox_worker import OutboxWorker
 from course_insight.modules.m2_evidence_retrieval.stubs import (
     M2EvidenceRetrievalServiceStub,
 )
+from course_insight.modules.m4_task_orchestration.intent import IntentStatus
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    StoredIntentDecision,
+)
 
 
 NOW = datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc)
@@ -270,6 +274,41 @@ def test_sqlite_factory_uses_all_real_durable_repositories(
     assert container.outbox_worker._status_path.name == (  # noqa: SLF001
         f"{container.outbox_worker.snapshot().worker_id}.status.json"
     )
+
+
+def test_factory_backed_sqlite_repository_replays_intent_after_restart(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    first_container = build_application(settings)
+    first_container.m0_service.initialize()
+    candidate = StoredIntentDecision(
+        request_key="factory-restart-key",
+        resolved_task_type="practice",
+        decision_status=IntentStatus.ACCEPTED,
+        decision_source="active_model",
+        adapter_id="factory-test-adapter",
+        adapter_version="adapter-v1",
+        policy_version="intent-policy-v1",
+        confidence=0.91,
+        margin=0.31,
+        input_checksum=hashlib.sha256("原始文本".encode("utf-8")).hexdigest(),
+        reason_codes=("model_accepted",),
+        created_at=NOW,
+        _generate_checksum=True,
+    )
+    first_repository = first_container.m4_service._repository  # noqa: SLF001
+    first_repository.insert_or_get_intent_decision(candidate)
+    first_container.close()
+
+    restarted_container = build_application(settings)
+    restarted_container.m0_service.initialize()
+    restarted_repository = restarted_container.m4_service._repository  # noqa: SLF001
+    replayed = restarted_repository.get_intent_decision(candidate.request_key)
+    restarted_container.close()
+
+    assert replayed == candidate
+    assert replayed is not candidate
 
 
 def test_container_and_coordinator_share_exact_service_instances(

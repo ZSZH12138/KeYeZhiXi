@@ -662,7 +662,6 @@ def test_m5_forward_migration_preserves_all_legacy_v3_state_versions(
 
         migrate(connection)
         migrate(connection)
-        assert SCHEMA_VERSION == 9
         assert current_schema_version(connection) == SCHEMA_VERSION
         assert (
             connection.execute(

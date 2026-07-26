@@ -1152,7 +1152,11 @@ def test_non_contiguous_migration_ledger_fails_closed(tmp_path: Path) -> None:
                 "SELECT version FROM schema_migrations ORDER BY version"
             ).fetchall()
         ]
-    assert versions == [1, 2, 3, 4, 5, 7, 8, 9]
+    assert versions == [
+        version
+        for version in range(1, SCHEMA_VERSION + 1)
+        if version != 6
+    ]
 
 
 def test_v7_migration_rejects_orphaned_legacy_outbox_rows(

@@ -30,10 +30,11 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     migrate_workflow_v8_to_v9,
 )
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
+_M4_INTENT_DECISION_MIGRATION_NAME = "m4_intent_decisions"
 _MODULE_RECOVERY_MIGRATION_NAME = "module_owned_recovery"
 _ASSESSMENT_WORKFLOW_MIGRATION_NAME = "m0_assessment_workflow"
 _ASSESSMENT_WORKFLOW_REFS_MIGRATION_NAME = "m0_assessment_workflow_refs"
@@ -201,6 +202,94 @@ CREATE TABLE IF NOT EXISTS m6_tutoring_decisions (
     UNIQUE (session_id, turn_count),
     FOREIGN KEY (session_id, turn_count)
         REFERENCES m6_session_states(session_id, turn_count)
+)
+"""
+_M4_INTENT_DECISION_SQL = """
+CREATE TABLE IF NOT EXISTS m4_intent_decisions (
+    request_key TEXT PRIMARY KEY CHECK (length(trim(request_key)) > 0),
+    resolved_task_type TEXT NULL,
+    decision_status TEXT NOT NULL,
+    decision_source TEXT NOT NULL CHECK (length(trim(decision_source)) > 0),
+    adapter_id TEXT NOT NULL CHECK (length(trim(adapter_id)) > 0),
+    adapter_version TEXT NOT NULL CHECK (length(trim(adapter_version)) > 0),
+    policy_version TEXT NOT NULL CHECK (length(trim(policy_version)) > 0),
+    confidence REAL NULL CHECK (
+        confidence IS NULL
+        OR (
+            typeof(confidence) IN ('real', 'integer')
+            AND confidence >= 0.0
+            AND confidence <= 1.0
+        )
+    ),
+    margin REAL NULL CHECK (
+        margin IS NULL
+        OR (
+            typeof(margin) IN ('real', 'integer')
+            AND margin >= 0.0
+            AND margin <= 1.0
+        )
+    ),
+    input_checksum TEXT NOT NULL CHECK (
+        length(input_checksum) = 64
+        AND input_checksum NOT GLOB '*[^0-9a-f]*'
+    ),
+    reason_codes_json TEXT NOT NULL CHECK (
+        CASE WHEN json_valid(reason_codes_json)
+            THEN json_type(reason_codes_json) = 'array'
+                AND json(reason_codes_json) = reason_codes_json
+            ELSE 0
+        END
+    ),
+    shadow_json TEXT NULL CHECK (
+        shadow_json IS NULL
+        OR CASE WHEN json_valid(shadow_json)
+            THEN json_type(shadow_json) = 'object'
+                AND json(shadow_json) = shadow_json
+            ELSE 0
+        END
+    ),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    payload_checksum TEXT NOT NULL CHECK (
+        length(payload_checksum) = 64
+        AND payload_checksum NOT GLOB '*[^0-9a-f]*'
+    ),
+    created_at TEXT NOT NULL CHECK (
+        datetime(created_at) IS NOT NULL
+        AND substr(created_at, -6) = '+00:00'
+    ),
+    CHECK (
+        decision_status IN ('accepted', 'abstained', 'out_of_scope', 'invalid')
+    ),
+    CHECK (
+        resolved_task_type IS NULL
+        OR resolved_task_type IN (
+            'qa',
+            'diagnostic',
+            'practice',
+            'correction',
+            'stage_assessment'
+        )
+    ),
+    CHECK (
+        (decision_status = 'accepted' AND resolved_task_type IS NOT NULL)
+        OR (decision_status != 'accepted' AND resolved_task_type IS NULL)
+    ),
+    CHECK (
+        (
+            decision_status = 'accepted'
+            AND decision_source IN (
+                'legal_hint',
+                'high_precision_rule',
+                'legacy_rule',
+                'active_model'
+            )
+        )
+        OR (decision_status != 'accepted' AND decision_source = 'refusal')
+    ),
+    CHECK (
+        decision_source != 'active_model'
+        OR (confidence IS NOT NULL AND margin IS NOT NULL)
+    )
 )
 """
 _M6_DECISION_COLUMNS = (
@@ -470,6 +559,16 @@ def _validate_m6_decision_schema(connection: sqlite3.Connection) -> None:
         raise RuntimeError("M6 decision data violates foreign keys")
 
 
+def _validate_m4_intent_decision_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    if _normalized_table_schema_sql(
+        connection,
+        "m4_intent_decisions",
+    ) != _normalize_create_table_sql(_M4_INTENT_DECISION_SQL):
+        raise RuntimeError("M4 intent decision schema is incompatible")
+
+
 def _migrate_m5_learner_scope(connection: sqlite3.Connection) -> None:
     """Replace the legacy learner-only uniqueness key without losing rows."""
 
@@ -698,6 +797,15 @@ def migrate(connection: sqlite3.Connection) -> None:
                 connection,
                 schema_version=SCHEMA_VERSION,
             )
+        if 10 not in applied_versions:
+            connection.execute(_M4_INTENT_DECISION_SQL)
+            _validate_m4_intent_decision_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (10, _M4_INTENT_DECISION_MIGRATION_NAME),
+            )
+        else:
+            _validate_m4_intent_decision_schema(connection)
         validate_outbox_schema(connection, schema_version=SCHEMA_VERSION)
         connection.execute("COMMIT")
     except Exception:
