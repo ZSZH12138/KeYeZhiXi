@@ -442,10 +442,36 @@ def _build_m4_service(
     intent_settings = settings.intent
     adapter: IntentAdapter | None = None
     if intent_settings.mode in {"shadow", "active"}:
-        model_dir = intent_settings.model_dir
-        if model_dir is None:
-            raise RuntimeError("validated intent model directory is unavailable")
-        adapter = sklearn_adapter.load_sklearn_intent_adapter(model_dir)
+        model_ref = intent_settings.model_ref
+        model_id = intent_settings.model_id
+        model_version = intent_settings.model_version
+        model_sha256 = intent_settings.model_sha256
+        if (
+            model_ref is None
+            or model_id is None
+            or model_version is None
+            or model_sha256 is None
+        ):
+            raise RuntimeError("validated intent artifact is unavailable")
+        try:
+            runtime_dir = settings.runtime_dir.resolve()
+            model_dir = (runtime_dir / model_ref).resolve()
+        except (OSError, RuntimeError):
+            raise RuntimeError(
+                "validated intent artifact is unavailable"
+            ) from None
+        if (
+            model_dir == runtime_dir
+            or not model_dir.is_relative_to(runtime_dir)
+        ):
+            raise RuntimeError("validated intent artifact is unavailable")
+        adapter = sklearn_adapter.load_sklearn_intent_adapter(
+            model_dir,
+            runtime_dir=runtime_dir,
+            expected_model_id=model_id,
+            expected_model_version=model_version,
+            expected_model_sha256=model_sha256,
+        )
     intent_service = M4IntentService(
         repository,
         canonical_idempotency_key,
@@ -454,6 +480,8 @@ def _build_m4_service(
         policy=IntentPolicy(
             intent_settings.min_confidence,
             intent_settings.min_margin,
+            intent_settings.fallback_to_rules,
+            intent_settings.fail_closed,
         ),
         policy_version=intent_settings.policy_version,
     )

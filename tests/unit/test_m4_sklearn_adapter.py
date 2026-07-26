@@ -14,10 +14,14 @@ import pytest
 from course_insight.modules.m4_task_orchestration.intent import (
     IntentAdapter,
     IntentStatus,
+    SUPPORTED_INTENT_LABELS,
+)
+from course_insight.modules.m4_task_orchestration.normalization import (
+    NORMALIZATION_VERSION,
 )
 from course_insight.modules.m4_task_orchestration.sklearn_adapter import (
     IntentArtifactError,
-    load_sklearn_intent_adapter,
+    load_sklearn_intent_adapter as _load_sklearn_intent_adapter,
 )
 
 
@@ -29,8 +33,11 @@ EXPECTED_LABELS = (
     "qa",
     "stage_assessment",
 )
+PUBLIC_TASK_LABELS = SUPPORTED_INTENT_LABELS
 PRACTICE_PROBABILITIES = (0.04, 0.05, 0.03, 0.72, 0.10, 0.06)
 OOS_PROBABILITIES = (0.03, 0.04, 0.80, 0.03, 0.08, 0.02)
+OOS_SECOND_PROBABILITIES = (0.01, 0.01, 0.45, 0.50, 0.02, 0.01)
+_PINS: dict[Path, tuple[str, str, str]] = {}
 pytestmark = pytest.mark.filterwarnings(
     "ignore:Setting the shape on a NumPy array has been deprecated:"
     "DeprecationWarning:joblib.numpy_pickle"
@@ -89,13 +96,32 @@ class _RaisingArtifact(_FixtureArtifact):
         raise RuntimeError(texts[0])
 
 
+class _RecordingArtifact(_FixtureArtifact):
+    def __init__(self) -> None:
+        super().__init__()
+        self.last_text = ""
+
+    def predict_proba(self, texts: list[str]) -> np.ndarray:
+        self.last_text = texts[0]
+        return super().predict_proba(texts)
+
+
 def _manifest(model_bytes: bytes) -> dict[str, object]:
     return {
-        "schema_version": 1,
-        "adapter_id": "fixture-sklearn-intent",
-        "adapter_version": "1.0.0",
-        "model_sha256": sha256(model_bytes).hexdigest(),
-        "labels": list(EXPECTED_LABELS),
+        "schema_version": "1",
+        "model_id": "fixture-sklearn-intent",
+        "model_version": "1.0.0",
+        "adapter_type": "sklearn",
+        "supported_task_types": list(PUBLIC_TASK_LABELS),
+        "normalization_version": NORMALIZATION_VERSION,
+        "training_dataset_checksum": "0" * 64,
+        "model_artifact_checksum": sha256(model_bytes).hexdigest(),
+        "library_versions": {
+            "python": "3.12",
+            "scikit_learn": "1.9.0",
+            "joblib": "1.5.3",
+        },
+        "created_at": "2026-07-27T00:00:00+00:00",
         "vectorizer": {
             "type": "_FixtureVectorizer",
             "analyzer": "char",
@@ -124,11 +150,59 @@ def _write_artifact(
         **_manifest(model_path.read_bytes()),
         **({} if manifest_updates is None else manifest_updates),
     }
+    _PINS[directory.resolve()] = (
+        str(manifest["model_id"]),
+        str(manifest["model_version"]),
+        sha256(model_path.read_bytes()).hexdigest(),
+    )
     (directory / "manifest.json").write_text(
         json.dumps(manifest, ensure_ascii=False),
         encoding="utf-8",
     )
     return directory
+
+
+def load_sklearn_intent_adapter(
+    directory: object,
+    *,
+    expected_model_id: str | None = None,
+    expected_model_version: str | None = None,
+    expected_model_sha256: str | None = None,
+    runtime_dir: Path | None = None,
+) -> IntentAdapter:
+    if not isinstance(directory, Path):
+        return _load_sklearn_intent_adapter(
+            directory,  # type: ignore[arg-type]
+            runtime_dir=Path.cwd(),
+            expected_model_id="fixture-sklearn-intent",
+            expected_model_version="1.0.0",
+            expected_model_sha256="0" * 64,
+        )
+    pins = _PINS.get(
+        directory.resolve(strict=False),
+        ("fixture-sklearn-intent", "1.0.0", "0" * 64),
+    )
+    return _load_sklearn_intent_adapter(
+        directory,
+        runtime_dir=(
+            directory.parent.resolve(strict=False)
+            if runtime_dir is None
+            else runtime_dir
+        ),
+        expected_model_id=(
+            pins[0] if expected_model_id is None else expected_model_id
+        ),
+        expected_model_version=(
+            pins[1]
+            if expected_model_version is None
+            else expected_model_version
+        ),
+        expected_model_sha256=(
+            pins[2]
+            if expected_model_sha256 is None
+            else expected_model_sha256
+        ),
+    )
 
 
 def _rewrite_manifest(
@@ -157,13 +231,23 @@ def test_adapter_returns_immutable_prediction_with_top_two_scores(
 
     assert isinstance(adapter, IntentAdapter)
     assert adapter.adapter_id == "fixture-sklearn-intent"
-    assert adapter.adapter_version == "1.0.0"
+    assert adapter.adapter_version == (
+        "1.0.0+sha256."
+        + _PINS[artifact_dir.resolve()][2]
+    )
     assert prediction.label == "practice"
     assert prediction.status is IntentStatus.ACCEPTED
     assert prediction.confidence == pytest.approx(0.72)
     assert prediction.margin == pytest.approx(0.62)
+    assert dict(prediction.scores) == {
+        "correction": pytest.approx(0.04),
+        "diagnostic": pytest.approx(0.05),
+        "practice": pytest.approx(0.72),
+        "qa": pytest.approx(0.10),
+        "stage_assessment": pytest.approx(0.06),
+    }
     assert prediction.adapter_id == "fixture-sklearn-intent"
-    assert prediction.adapter_version == "1.0.0"
+    assert prediction.adapter_version == adapter.adapter_version
     with pytest.raises(AttributeError):
         prediction.label = "qa"  # type: ignore[misc]
 
@@ -183,6 +267,28 @@ def test_adapter_maps_top_out_of_scope_to_non_task_prediction(
     assert prediction.label is None
     assert prediction.confidence == pytest.approx(0.80)
     assert prediction.margin == pytest.approx(0.72)
+    assert set(prediction.scores) == set(PUBLIC_TASK_LABELS)
+    assert prediction.reason_codes == ("outside_supported_scope",)
+
+
+def test_adapter_abstains_when_out_of_scope_is_runner_up(
+    tmp_path: Path,
+) -> None:
+    directory = _write_artifact(
+        tmp_path / "artifact",
+        artifact=_FixtureArtifact(
+            probabilities=[OOS_SECOND_PROBABILITIES],
+        ),
+    )
+    adapter = load_sklearn_intent_adapter(directory)
+
+    prediction = adapter.predict("ambiguous request")
+
+    assert prediction.status is IntentStatus.OUT_OF_SCOPE
+    assert prediction.label is None
+    assert prediction.reason_codes == ("out_of_scope_competitor",)
+    assert prediction.confidence == pytest.approx(0.50)
+    assert prediction.margin == pytest.approx(0.05)
 
 
 def test_adapter_rejects_model_checksum_mismatch(artifact_dir: Path) -> None:
@@ -343,6 +449,20 @@ def test_adapter_rejects_model_directory_with_parent_traversal(
         load_sklearn_intent_adapter(traversing_path)
 
 
+def test_adapter_rejects_model_directory_outside_runtime_boundary(
+    artifact_dir: Path,
+    tmp_path: Path,
+) -> None:
+    other_runtime = tmp_path / "other-runtime"
+    other_runtime.mkdir()
+
+    with pytest.raises(IntentArtifactError, match="unsafe"):
+        load_sklearn_intent_adapter(
+            artifact_dir,
+            runtime_dir=other_runtime.resolve(),
+        )
+
+
 @pytest.mark.parametrize("artifact_name", ["manifest.json", "model.joblib"])
 def test_adapter_rejects_symlink_escape_before_deserialization(
     tmp_path: Path,
@@ -406,7 +526,7 @@ def test_adapter_rejects_oversized_manifest_before_deserialization(
         (b"{", "JSON"),
         (b'{"schema_version": NaN}', "JSON"),
         (
-            b'{"schema_version":1,"schema_version":1}',
+            b'{"schema_version":"1","schema_version":"1"}',
             "duplicate",
         ),
     ],
@@ -425,7 +545,7 @@ def test_adapter_rejects_noncanonical_manifest_encodings(
 def test_adapter_rejects_unsupported_manifest_schema(
     artifact_dir: Path,
 ) -> None:
-    _rewrite_manifest(artifact_dir, schema_version=2)
+    _rewrite_manifest(artifact_dir, schema_version="2")
 
     with pytest.raises(IntentArtifactError, match="schema"):
         load_sklearn_intent_adapter(artifact_dir)
@@ -451,7 +571,8 @@ def test_adapter_requires_exact_ordered_six_label_manifest(
     artifact_dir: Path,
     labels: list[str],
 ) -> None:
-    _rewrite_manifest(artifact_dir, labels=labels)
+    public_labels = [label for label in labels if label != "out_of_scope"]
+    _rewrite_manifest(artifact_dir, supported_task_types=public_labels)
 
     with pytest.raises(IntentArtifactError, match="labels"):
         load_sklearn_intent_adapter(artifact_dir)
@@ -460,9 +581,14 @@ def test_adapter_requires_exact_ordered_six_label_manifest(
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("adapter_id", ""),
-        ("adapter_version", " "),
-        ("model_sha256", "not-a-checksum"),
+        ("model_id", ""),
+        ("model_version", " "),
+        ("model_artifact_checksum", "not-a-checksum"),
+        ("training_dataset_checksum", "not-a-checksum"),
+        ("adapter_type", "unknown"),
+        ("normalization_version", "unknown"),
+        ("library_versions", {}),
+        ("created_at", "not-a-timestamp"),
         ("vectorizer", {}),
         ("classifier", {"type": ""}),
         ("training_provenance", {}),
@@ -568,6 +694,72 @@ def test_prediction_errors_do_not_expose_raw_text(tmp_path: Path) -> None:
 
     assert raw_text not in str(captured.value)
     assert captured.value.__cause__ is None
+
+
+def test_adapter_normalizes_compatibility_text_before_inference(
+    tmp_path: Path,
+) -> None:
+    directory = _write_artifact(
+        tmp_path / "artifact",
+        artifact=_RecordingArtifact(),
+    )
+    adapter = load_sklearn_intent_adapter(directory)
+
+    adapter.predict("  ＨＯＷ\tＴＯ  ")
+
+    assert adapter._artifact.last_text == "how to"  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("expected_model_id", "wrong-model"),
+        ("expected_model_version", "9.9.9"),
+        ("expected_model_sha256", "f" * 64),
+    ],
+)
+def test_adapter_rejects_external_pin_mismatch(
+    artifact_dir: Path,
+    field: str,
+    value: str,
+) -> None:
+    with pytest.raises(IntentArtifactError, match="identity|checksum"):
+        load_sklearn_intent_adapter(
+            artifact_dir,
+            **{field: value},
+        )
+
+
+def test_adapter_rejects_model_and_adjacent_manifest_substitution(
+    artifact_dir: Path,
+    tmp_path: Path,
+) -> None:
+    replacement = tmp_path / "replacement.joblib"
+    joblib.dump(_FixtureArtifact(probabilities=[OOS_PROBABILITIES]), replacement)
+    replacement_bytes = replacement.read_bytes()
+    (artifact_dir / "model.joblib").write_bytes(replacement_bytes)
+    _rewrite_manifest(
+        artifact_dir,
+        model_artifact_checksum=sha256(replacement_bytes).hexdigest(),
+    )
+
+    with pytest.raises(IntentArtifactError, match="checksum"):
+        load_sklearn_intent_adapter(artifact_dir)
+
+
+def test_adapter_rejects_model_version_that_cannot_fit_audit_identity(
+    artifact_dir: Path,
+) -> None:
+    _rewrite_manifest(artifact_dir, model_version="v" * 57)
+
+    with pytest.raises(IntentArtifactError, match="model version"):
+        load_sklearn_intent_adapter(artifact_dir)
+
+    with pytest.raises(IntentArtifactError, match="model identity"):
+        load_sklearn_intent_adapter(
+            artifact_dir,
+            expected_model_version="v" * 57,
+        )
 
 
 def test_adapter_rejects_path_values_that_are_not_path_objects() -> None:

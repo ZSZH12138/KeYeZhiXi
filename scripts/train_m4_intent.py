@@ -6,20 +6,27 @@ import argparse
 import ctypes
 import json
 import os
+import platform
+import re
 import shutil
 import sys
 import tempfile
 from collections.abc import Sequence
+from datetime import UTC, datetime
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 import joblib
+import sklearn
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import precision_recall_fscore_support
+from sklearn.metrics import confusion_matrix, precision_recall_fscore_support
 from sklearn.pipeline import Pipeline
 
+from course_insight.modules.m4_task_orchestration.intent import (
+    SUPPORTED_INTENT_LABELS,
+)
 from course_insight.modules.m4_task_orchestration.intent_dataset import (
     EXPECTED_LABELS,
     DatasetPartitions,
@@ -28,20 +35,35 @@ from course_insight.modules.m4_task_orchestration.intent_dataset import (
     load_dataset,
     split_by_group,
 )
-
-
-_SCHEMA_VERSION = 1
-_ADAPTER_ID = "m4-sklearn-intent"
-_MAX_MODEL_BYTES = 64 * 1024 * 1024
-_SAMPLE_DATASET = (
-    Path(__file__).resolve().parents[1]
-    / "data"
-    / "m4_intent"
-    / "example.jsonl"
+from course_insight.modules.m4_task_orchestration.normalization import (
+    NORMALIZATION_VERSION,
+    normalize_intent_text,
 )
-_SAMPLE_DATASET_SHA256 = (
-    "5f9651afc1e735831e4732bff0eae5b3"
-    "c52ca8a55ed87260a4ea7ae221bf497a"
+
+
+_SCHEMA_VERSION = "1"
+_MAX_MODEL_BYTES = 64 * 1024 * 1024
+_PUBLIC_TASK_LABELS = SUPPORTED_INTENT_LABELS
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
+_PRODUCTION_THRESHOLDS = {
+    "task_macro_f1": 0.90,
+    "minimum_task_recall": 0.85,
+    "stage_assessment_precision": 0.95,
+    "correction_precision": 0.95,
+    "out_of_scope_recall": 0.90,
+    "selective_accuracy": 0.97,
+}
+_SAMPLE_DATASET_SHA256S = frozenset(
+    {
+        (
+            "10100b47370610a9b6e7b59123369d37"
+            "864359ef3155ad4b940faf2a4d9400e0"
+        ),
+        (
+            "ac3258fbd08243d1770907bf747c18ad"
+            "4ea749d4a494c633c3655fe3311528f0"
+        ),
+    }
 )
 
 
@@ -53,6 +75,9 @@ def train_and_publish(
     *,
     input_path: Path,
     output_dir: Path,
+    runtime_dir: Path,
+    model_id: str,
+    model_version: str,
     seed: int,
     min_confidence: float,
     min_margin: float,
@@ -62,11 +87,17 @@ def train_and_publish(
     _validate_options(
         input_path=input_path,
         output_dir=output_dir,
+        runtime_dir=runtime_dir,
+        model_id=model_id,
+        model_version=model_version,
         seed=seed,
         min_confidence=min_confidence,
         min_margin=min_margin,
     )
+    runtime_root = runtime_dir.resolve(strict=True)
     output = output_dir.resolve(strict=False)
+    if output == runtime_root or not output.is_relative_to(runtime_root):
+        raise TrainingError("output directory must remain within runtime")
     if os.path.lexists(output):
         raise TrainingError("output directory already exists")
     parent = output.parent
@@ -97,6 +128,8 @@ def train_and_publish(
         thresholds=thresholds,
         partitions=partitions,
         sample_only=sample_only,
+        model_id=model_id,
+        model_version=model_version,
     )
     _publish(
         output=output,
@@ -119,7 +152,7 @@ def _fit_pipeline(
                 TfidfVectorizer(
                     analyzer="char",
                     ngram_range=(2, 5),
-                    lowercase=True,
+                    lowercase=False,
                     sublinear_tf=True,
                 ),
             ),
@@ -135,7 +168,7 @@ def _fit_pipeline(
     )
     try:
         pipeline.fit(
-            [example.text for example in examples],
+            [normalize_intent_text(example.text) for example in examples],
             [example.label for example in examples],
         )
     except Exception:
@@ -176,6 +209,10 @@ def _evaluate_all(
     train_groups = set(partitions.train_groups)
     validation_groups = set(partitions.validation_groups)
     test_groups = set(partitions.test_groups)
+    production_gate = _production_gate(
+        reports["test"],
+        sample_only=sample_only,
+    )
     return {
         "schema_version": _SCHEMA_VERSION,
         "evidence_scope": (
@@ -212,6 +249,7 @@ def _evaluate_all(
             ),
         },
         "partitions": reports,
+        "production_gate": production_gate,
     }
 
 
@@ -225,13 +263,13 @@ def _evaluate_partition(
     truth = [example.label for example in examples]
     try:
         probability_rows = pipeline.predict_proba(
-            [example.text for example in examples]
+            [normalize_intent_text(example.text) for example in examples]
         )
     except Exception:
         raise TrainingError("intent model evaluation failed") from None
 
     predicted: list[str] = []
-    covered: list[bool] = []
+    covered_in_scope: list[bool] = []
     for row in probability_rows:
         ranked = sorted(
             range(len(EXPECTED_LABELS)),
@@ -241,12 +279,13 @@ def _evaluate_partition(
         top_index, second_index = ranked[:2]
         confidence = float(row[top_index])
         margin = confidence - float(row[second_index])
-        predicted.append(EXPECTED_LABELS[top_index])
-        covered.append(
-            confidence >= thresholds["min_confidence"]
+        predicted_label = EXPECTED_LABELS[top_index]
+        predicted.append(predicted_label)
+        covered_in_scope.append(
+            predicted_label != "out_of_scope"
+            and confidence >= thresholds["min_confidence"]
             and margin >= thresholds["min_margin"]
         )
-
     precision, recall, f1, support = precision_recall_fscore_support(
         truth,
         predicted,
@@ -270,33 +309,124 @@ def _evaluate_partition(
             strict=True,
         )
     ]
-    covered_count = sum(covered)
+    task_truth = [
+        truth_label != "out_of_scope"
+        for truth_label in truth
+    ]
+    covered_task = [
+        is_task and is_covered
+        for is_task, is_covered in zip(
+            task_truth,
+            covered_in_scope,
+            strict=True,
+        )
+    ]
+    covered_count = sum(covered_task)
     selective_correct = sum(
         is_covered and is_correct
-        for is_covered, is_correct in zip(covered, correct, strict=True)
+        for is_covered, is_correct in zip(
+            covered_task,
+            correct,
+            strict=True,
+        )
     )
     label_counts = {
         label: truth.count(label)
         for label in EXPECTED_LABELS
     }
+    task_f1 = [
+        per_class[label]["f1"]
+        for label in _PUBLIC_TASK_LABELS
+    ]
+    matrix = confusion_matrix(
+        truth,
+        predicted,
+        labels=list(EXPECTED_LABELS),
+    )
+    task_example_count = sum(task_truth)
     return {
-        "macro_f1": float(sum(f1) / len(EXPECTED_LABELS)),
+        "task_macro_f1": float(sum(task_f1) / len(_PUBLIC_TASK_LABELS)),
         "per_class": per_class,
         "out_of_scope_recall": per_class["out_of_scope"]["recall"],
-        "coverage": covered_count / len(examples),
+        "task_coverage": (
+            covered_count / task_example_count
+            if task_example_count
+            else None
+        ),
         "selective_accuracy": (
             selective_correct / covered_count
             if covered_count
             else None
         ),
+        "confusion_matrix": {
+            "labels": list(EXPECTED_LABELS),
+            "matrix": [
+                [int(value) for value in row]
+                for row in matrix.tolist()
+            ],
+        },
         "counts": {
             "examples": len(examples),
+            "in_scope_examples": task_example_count,
             "groups": group_count,
-            "covered": covered_count,
+            "covered_in_scope": covered_count,
             "selective_correct": selective_correct,
             "correct": sum(correct),
             "labels": label_counts,
         },
+    }
+
+
+def _production_gate(
+    test_report: dict[str, Any],
+    *,
+    sample_only: bool,
+) -> dict[str, Any]:
+    per_class = test_report["per_class"]
+    selective_accuracy = test_report["selective_accuracy"]
+    checks = {
+        "task_macro_f1": (
+            test_report["task_macro_f1"]
+            >= _PRODUCTION_THRESHOLDS["task_macro_f1"]
+        ),
+        "minimum_task_recall": all(
+            per_class[label]["recall"]
+            >= _PRODUCTION_THRESHOLDS["minimum_task_recall"]
+            for label in _PUBLIC_TASK_LABELS
+        ),
+        "stage_assessment_precision": (
+            per_class["stage_assessment"]["precision"]
+            >= _PRODUCTION_THRESHOLDS["stage_assessment_precision"]
+        ),
+        "correction_precision": (
+            per_class["correction"]["precision"]
+            >= _PRODUCTION_THRESHOLDS["correction_precision"]
+        ),
+        "out_of_scope_recall": (
+            test_report["out_of_scope_recall"]
+            >= _PRODUCTION_THRESHOLDS["out_of_scope_recall"]
+        ),
+        "selective_accuracy": (
+            selective_accuracy is not None
+            and selective_accuracy
+            >= _PRODUCTION_THRESHOLDS["selective_accuracy"]
+        ),
+    }
+    eligible = not sample_only
+    return {
+        "eligible": eligible,
+        "passed": eligible and all(checks.values()),
+        "reason": (
+            "sample_only_evidence"
+            if sample_only
+            else (
+                "thresholds_met"
+                if all(checks.values())
+                else "thresholds_not_met"
+            )
+        ),
+        "thresholds": _PRODUCTION_THRESHOLDS,
+        "checks": checks,
     }
 
 
@@ -307,17 +437,27 @@ def _manifest_without_model_checksum(
     thresholds: dict[str, float],
     partitions: DatasetPartitions,
     sample_only: bool,
+    model_id: str,
+    model_version: str,
 ) -> dict[str, Any]:
     return {
         "schema_version": _SCHEMA_VERSION,
-        "adapter_id": _ADAPTER_ID,
-        "adapter_version": f"1.0.{dataset_sha256[:12]}",
-        "labels": list(EXPECTED_LABELS),
+        "model_id": model_id,
+        "model_version": model_version,
+        "adapter_type": "sklearn",
+        "supported_task_types": list(_PUBLIC_TASK_LABELS),
+        "normalization_version": NORMALIZATION_VERSION,
+        "training_dataset_checksum": dataset_sha256,
+        "library_versions": {
+            "python": platform.python_version(),
+            "scikit_learn": sklearn.__version__,
+            "joblib": joblib.__version__,
+        },
         "vectorizer": {
             "type": "TfidfVectorizer",
             "analyzer": "char",
             "ngram_range": [2, 5],
-            "lowercase": True,
+            "lowercase": False,
             "sublinear_tf": True,
         },
         "classifier": {
@@ -364,10 +504,26 @@ def _publish(
             raise TrainingError("trained model size exceeds limit")
         manifest = {
             **manifest_base,
-            "model_sha256": _sha256_file(model_path),
+            "model_artifact_checksum": _sha256_file(model_path),
+            "created_at": datetime.now(UTC).isoformat(),
         }
         _write_json(temporary / "manifest.json", manifest)
         _write_json(temporary / "metrics.json", metrics)
+        _write_json(
+            temporary / "label_map.json",
+            {
+                "model_labels": list(EXPECTED_LABELS),
+                "public_task_types": list(_PUBLIC_TASK_LABELS),
+                "out_of_scope_boundary": {
+                    "label": None,
+                    "status": "abstained",
+                },
+            },
+        )
+        _write_text(
+            temporary / "dataset_checksum.txt",
+            f"{manifest_base['training_dataset_checksum']}\n",
+        )
         _fsync_directory(temporary)
         if os.path.lexists(output):
             raise TrainingError("output directory already exists")
@@ -400,6 +556,13 @@ def _write_json(path: Path, payload: dict[str, Any]) -> None:
     ).encode("utf-8")
     with path.open("xb") as destination:
         destination.write(encoded)
+        destination.flush()
+        os.fsync(destination.fileno())
+
+
+def _write_text(path: Path, value: str) -> None:
+    with path.open("xb") as destination:
+        destination.write(value.encode("utf-8"))
         destination.flush()
         os.fsync(destination.fileno())
 
@@ -524,25 +687,43 @@ def _sha256_file(path: Path) -> str:
 
 
 def _is_sample_dataset(path: Path, *, dataset_sha256: str) -> bool:
-    try:
-        return (
-            path.resolve(strict=True) == _SAMPLE_DATASET.resolve(strict=True)
-            and dataset_sha256 == _SAMPLE_DATASET_SHA256
-        )
-    except (OSError, RuntimeError):
-        return False
+    del path
+    return dataset_sha256 in _SAMPLE_DATASET_SHA256S
 
 
 def _validate_options(
     *,
     input_path: Path,
     output_dir: Path,
+    runtime_dir: Path,
+    model_id: str,
+    model_version: str,
     seed: int,
     min_confidence: float,
     min_margin: float,
 ) -> None:
-    if not isinstance(input_path, Path) or not isinstance(output_dir, Path):
+    if (
+        not isinstance(input_path, Path)
+        or not isinstance(output_dir, Path)
+        or not isinstance(runtime_dir, Path)
+    ):
         raise TrainingError("training paths are invalid")
+    try:
+        runtime_root = runtime_dir.resolve(strict=True)
+        if not runtime_root.is_dir():
+            raise TrainingError("runtime directory is unavailable")
+    except TrainingError:
+        raise
+    except (OSError, RuntimeError):
+        raise TrainingError("runtime directory is unavailable") from None
+    if (
+        not isinstance(model_id, str)
+        or _SAFE_IDENTIFIER.fullmatch(model_id) is None
+        or not isinstance(model_version, str)
+        or len(model_version) > 56
+        or _SAFE_IDENTIFIER.fullmatch(model_version) is None
+    ):
+        raise TrainingError("model identity is invalid")
     if isinstance(seed, bool) or not isinstance(seed, int):
         raise TrainingError("training seed is invalid")
     for value in (min_confidence, min_margin):
@@ -560,6 +741,9 @@ def _parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output-dir", required=True, type=Path)
+    parser.add_argument("--runtime-dir", required=True, type=Path)
+    parser.add_argument("--model-id", required=True)
+    parser.add_argument("--model-version", required=True)
     parser.add_argument("--seed", required=True, type=int)
     parser.add_argument("--min-confidence", required=True, type=float)
     parser.add_argument("--min-margin", required=True, type=float)
@@ -572,6 +756,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         train_and_publish(
             input_path=args.input,
             output_dir=args.output_dir,
+            runtime_dir=args.runtime_dir,
+            model_id=args.model_id,
+            model_version=args.model_version,
             seed=args.seed,
             min_confidence=args.min_confidence,
             min_margin=args.min_margin,

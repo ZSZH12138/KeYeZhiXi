@@ -27,14 +27,61 @@ def _write_rows(path: Path, rows: list[dict[str, object]]) -> Path:
     return path
 
 
+def _row(
+    *,
+    example_id: str,
+    text: str,
+    label: str,
+    group_id: str,
+    split: str | None = None,
+    approved: bool = True,
+    **overrides: object,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "example_id": example_id,
+        "text": text,
+        "label": label,
+        "locale": "zh-CN",
+        "paraphrase_group_id": group_id,
+        "source": "manual",
+        "approved": approved,
+        "notes": "",
+    }
+    if split is not None:
+        row["split"] = split
+    return {**row, **overrides}
+
+
+def _example(
+    *,
+    example_id: str,
+    text: str,
+    label: str,
+    group_id: str,
+    split: str | None = None,
+) -> IntentExample:
+    return IntentExample(
+        example_id=example_id,
+        text=text,
+        label=label,
+        locale="zh-CN",
+        paraphrase_group_id=group_id,
+        source="manual",
+        approved=True,
+        notes="",
+        split=split,
+    )
+
+
 def _explicit_rows() -> list[dict[str, object]]:
     return [
-        {
-            "text": f"{split}-{label}-示例",
-            "label": label,
-            "group_id": f"{split}-{label}",
-            "split": split,
-        }
+        _row(
+            example_id=f"{split}-{label}",
+            text=f"{split}-{label}-示例",
+            label=label,
+            group_id=f"{split}-{label}",
+            split=split,
+        )
         for split in ("train", "validation", "test")
         for label in EXPECTED_LABELS
     ]
@@ -46,25 +93,38 @@ def test_load_examples_accepts_exact_fields_and_optional_split(
     path = _write_rows(
         tmp_path / "valid.jsonl",
         [
-            {
-                "text": "请解释这个概念",
-                "label": "qa",
-                "group_id": "qa-1",
-                "split": "train",
-            },
-            {
-                "text": "再给一道练习",
-                "label": "practice",
-                "group_id": "practice-1",
-            },
+            _row(
+                example_id="qa-001",
+                text="请解释这个概念",
+                label="qa",
+                group_id="qa-1",
+                split="train",
+            ),
+            _row(
+                example_id="practice-001",
+                text="再给一道练习",
+                label="practice",
+                group_id="practice-1",
+            ),
         ],
     )
 
     examples = load_examples(path)
 
     assert examples == (
-        IntentExample("请解释这个概念", "qa", "qa-1", "train"),
-        IntentExample("再给一道练习", "practice", "practice-1", None),
+        _example(
+            example_id="qa-001",
+            text="请解释这个概念",
+            label="qa",
+            group_id="qa-1",
+            split="train",
+        ),
+        _example(
+            example_id="practice-001",
+            text="再给一道练习",
+            label="practice",
+            group_id="practice-1",
+        ),
     )
 
 
@@ -72,11 +132,12 @@ def test_load_dataset_hashes_the_exact_bytes_consumed(tmp_path: Path) -> None:
     path = _write_rows(
         tmp_path / "valid.jsonl",
         [
-            {
-                "text": "请解释这个概念",
-                "label": "qa",
-                "group_id": "qa-1",
-            }
+            _row(
+                example_id="qa-001",
+                text="请解释这个概念",
+                label="qa",
+                group_id="qa-1",
+            )
         ],
     )
     expected = sha256(path.read_bytes()).hexdigest()
@@ -84,7 +145,12 @@ def test_load_dataset_hashes_the_exact_bytes_consumed(tmp_path: Path) -> None:
     loaded = load_dataset(path)
 
     assert loaded.examples == (
-        IntentExample("请解释这个概念", "qa", "qa-1", None),
+        _example(
+            example_id="qa-001",
+            text="请解释这个概念",
+            label="qa",
+            group_id="qa-1",
+        ),
     )
     assert loaded.sha256 == expected
 
@@ -144,9 +210,12 @@ def test_load_examples_rejects_duplicate_rows_without_echoing_text(
 ) -> None:
     private_text = "PRIVATE-LEARNER-TEXT"
     row = {
-        "text": private_text,
-        "label": "qa",
-        "group_id": "qa-1",
+        **_row(
+            example_id="qa-001",
+            text=private_text,
+            label="qa",
+            group_id="qa-1",
+        )
     }
     path = _write_rows(tmp_path / "duplicate.jsonl", [row, row])
 
@@ -163,18 +232,20 @@ def test_load_examples_rejects_same_content_across_groups_and_splits(
     path = _write_rows(
         tmp_path / "content-leak.jsonl",
         [
-            {
-                "text": private_text,
-                "label": "qa",
-                "group_id": "train-group",
-                "split": "train",
-            },
-            {
-                "text": private_text,
-                "label": "qa",
-                "group_id": "test-group",
-                "split": "test",
-            },
+            _row(
+                example_id="qa-train",
+                text=private_text,
+                label="qa",
+                group_id="train-group",
+                split="train",
+            ),
+            _row(
+                example_id="qa-test",
+                text=private_text,
+                label="qa",
+                group_id="test-group",
+                split="test",
+            ),
         ],
     )
 
@@ -190,16 +261,18 @@ def test_load_examples_rejects_normalized_content_with_conflicting_labels(
     path = _write_rows(
         tmp_path / "normalized-conflict.jsonl",
         [
-            {
-                "text": "Ａ  B",
-                "label": "qa",
-                "group_id": "qa-group",
-            },
-            {
-                "text": "a\tb",
-                "label": "diagnostic",
-                "group_id": "diagnostic-group",
-            },
+            _row(
+                example_id="normalized-1",
+                text="Ａ  B",
+                label="qa",
+                group_id="qa-group",
+            ),
+            _row(
+                example_id="normalized-2",
+                text="a\tb",
+                label="diagnostic",
+                group_id="diagnostic-group",
+            ),
         ],
     )
 
@@ -210,9 +283,14 @@ def test_load_examples_rejects_normalized_content_with_conflicting_labels(
 def test_explicit_split_is_used_and_group_disjoint() -> None:
     examples = tuple(
         IntentExample(
+            example_id=str(row["example_id"]),
             text=str(row["text"]),
             label=str(row["label"]),
-            group_id=str(row["group_id"]),
+            locale=str(row["locale"]),
+            paraphrase_group_id=str(row["paraphrase_group_id"]),
+            source=str(row["source"]),
+            approved=bool(row["approved"]),
+            notes=str(row["notes"]),
             split=str(row["split"]),
         )
         for row in _explicit_rows()
@@ -230,12 +308,20 @@ def test_explicit_split_is_used_and_group_disjoint() -> None:
 
 def test_explicit_split_rejects_group_leakage() -> None:
     rows = _explicit_rows()
-    rows[6] = {**rows[6], "group_id": str(rows[0]["group_id"])}
+    rows[6] = {
+        **rows[6],
+        "paraphrase_group_id": str(rows[0]["paraphrase_group_id"]),
+    }
     examples = tuple(
         IntentExample(
+            example_id=str(row["example_id"]),
             text=str(row["text"]),
             label=str(row["label"]),
-            group_id=str(row["group_id"]),
+            locale=str(row["locale"]),
+            paraphrase_group_id=str(row["paraphrase_group_id"]),
+            source=str(row["source"]),
+            approved=bool(row["approved"]),
+            notes=str(row["notes"]),
             split=str(row["split"]),
         )
         for row in rows
@@ -247,8 +333,19 @@ def test_explicit_split_rejects_group_leakage() -> None:
 
 def test_split_rejects_mixed_explicit_and_automatic_rows() -> None:
     examples = (
-        IntentExample("解释", "qa", "qa-1", "train"),
-        IntentExample("练习", "practice", "practice-1", None),
+        _example(
+            example_id="qa-1",
+            text="解释",
+            label="qa",
+            group_id="qa-1",
+            split="train",
+        ),
+        _example(
+            example_id="practice-1",
+            text="练习",
+            label="practice",
+            group_id="practice-1",
+        ),
     )
 
     with pytest.raises(IntentDatasetError, match="split"):
@@ -258,9 +355,14 @@ def test_split_rejects_mixed_explicit_and_automatic_rows() -> None:
 def test_automatic_split_is_deterministic_label_complete_and_disjoint() -> None:
     examples = tuple(
         IntentExample(
+            example_id=f"{label}-{index}",
             text=f"{label}-{index}",
             label=label,
-            group_id=f"{label}-group-{index}",
+            locale="zh-CN",
+            paraphrase_group_id=f"{label}-group-{index}",
+            source="manual",
+            approved=True,
+            notes="",
             split=None,
         )
         for label in EXPECTED_LABELS
@@ -290,9 +392,14 @@ def test_automatic_split_finds_feasible_multilabel_group_assignment() -> None:
     }
     examples = tuple(
         IntentExample(
+            example_id=f"{group_id}-{label}",
             text=f"{group_id}-{label}",
             label=label,
-            group_id=group_id,
+            locale="zh-CN",
+            paraphrase_group_id=group_id,
+            source="manual",
+            approved=True,
+            notes="",
             split=None,
         )
         for group_id, labels in labels_by_group.items()
@@ -316,9 +423,14 @@ def test_automatic_split_finds_feasible_multilabel_group_assignment() -> None:
 def test_automatic_split_includes_groups_beyond_signature_representatives() -> None:
     examples = tuple(
         IntentExample(
+            example_id=f"{label}-{index}",
             text=f"{label}-{index}",
             label=label,
-            group_id=f"{label}-group-{index}",
+            locale="zh-CN",
+            paraphrase_group_id=f"{label}-group-{index}",
+            source="manual",
+            approved=True,
+            notes="",
             split=None,
         )
         for label in EXPECTED_LABELS
@@ -345,14 +457,24 @@ def test_automatic_split_includes_groups_beyond_signature_representatives() -> N
 
 def test_split_rejects_one_group_and_missing_required_labels() -> None:
     one_group = tuple(
-        IntentExample(label, label, "only-group", None)
+        _example(
+            example_id=f"only-{label}",
+            text=label,
+            label=label,
+            group_id="only-group",
+        )
         for label in EXPECTED_LABELS
     )
     missing_label = tuple(
         IntentExample(
+            example_id=f"{label}-{index}",
             text=f"{label}-{index}",
             label=label,
-            group_id=f"{label}-{index}",
+            locale="zh-CN",
+            paraphrase_group_id=f"{label}-{index}",
+            source="manual",
+            approved=True,
+            notes="",
             split=None,
         )
         for label in EXPECTED_LABELS[:-1]
@@ -376,9 +498,14 @@ def test_explicit_split_requires_every_label_in_every_partition() -> None:
     ]
     examples = tuple(
         IntentExample(
+            example_id=str(row["example_id"]),
             text=str(row["text"]),
             label=str(row["label"]),
-            group_id=str(row["group_id"]),
+            locale=str(row["locale"]),
+            paraphrase_group_id=str(row["paraphrase_group_id"]),
+            source=str(row["source"]),
+            approved=bool(row["approved"]),
+            notes=str(row["notes"]),
             split=str(row["split"]),
         )
         for row in rows
@@ -386,3 +513,76 @@ def test_explicit_split_requires_every_label_in_every_partition() -> None:
 
     with pytest.raises(IntentDatasetError, match="labels"):
         split_by_group(examples, seed=1)
+
+
+def test_load_examples_rejects_duplicate_ids_and_unapproved_rows(
+    tmp_path: Path,
+) -> None:
+    duplicate_id = _write_rows(
+        tmp_path / "duplicate-id.jsonl",
+        [
+            _row(
+                example_id="duplicate",
+                text="解释概念",
+                label="qa",
+                group_id="qa-1",
+            ),
+            _row(
+                example_id="duplicate",
+                text="再来一道题",
+                label="practice",
+                group_id="practice-1",
+            ),
+        ],
+    )
+    unapproved = _write_rows(
+        tmp_path / "unapproved.jsonl",
+        [
+            _row(
+                example_id="unapproved",
+                text="未批准样本",
+                label="qa",
+                group_id="qa-2",
+                approved=False,
+            )
+        ],
+    )
+
+    with pytest.raises(IntentDatasetError, match="duplicate"):
+        load_examples(duplicate_id)
+    with pytest.raises(IntentDatasetError, match="approved"):
+        load_examples(unapproved)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"example_id": "bad id"},
+        {"locale": "../private"},
+        {"paraphrase_group_id": " "},
+        {"source": "http://private"},
+        {"approved": "true"},
+        {"notes": 1},
+    ],
+)
+def test_load_examples_rejects_invalid_governance_metadata(
+    tmp_path: Path,
+    overrides: dict[str, object],
+) -> None:
+    path = _write_rows(
+        tmp_path / "invalid-governance.jsonl",
+        [
+            {
+                **_row(
+                    example_id="qa-001",
+                    text="解释概念",
+                    label="qa",
+                    group_id="qa-1",
+                ),
+                **overrides,
+            }
+        ],
+    )
+
+    with pytest.raises(IntentDatasetError):
+        load_examples(path)

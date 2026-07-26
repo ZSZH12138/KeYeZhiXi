@@ -29,8 +29,10 @@ course_package_id, blueprint_id`。所以不同 hint/文本可产生不同的私
   confidence、margin、原因码和是否一致，绝不改变 TaskPlan。
 - `active`：合法 hint 和无冲突单一高精度规则仍优先。其余情况可调用模型；只有
   模型为 accepted 且 `confidence >= min_confidence`、`margin >= min_margin` 时
-  才能形成 `active_model` 接受。低于任一阈值会 abstain；模型 OOS 是拒绝，不会
-  被 legacy 规则覆盖。模型 abstain 可回退到唯一 legacy 规则。
+  才能形成 `active_model` 接受。低于任一阈值会 abstain。模型未配置、不可用、
+  failed、OOS、低阈值或 abstain 是否回退到唯一 legacy 规则由
+  `fallback_to_rules` 控制；非法或不安全输出在 `fail_closed=true` 时立即拒绝，
+  不得被 legacy 规则覆盖。
 
 规则没有“先命中即胜”的跨类优先级。高精度与 legacy 命中合并后若出现多个类别，
 且存在高精度命中时，`rules`/`shadow` 拒绝并记录
@@ -41,10 +43,11 @@ course_package_id, blueprint_id`。所以不同 hint/文本可产生不同的私
 
 ## 配置与可信 artifact 边界
 
-默认配置是 `mode=rules`、`backend=none`、无 `model_dir`、
+默认配置是 `mode=rules`、`backend=none`、无 `model_ref` 和模型 pin、
 `min_confidence=0.70`、`min_margin=0.10`、
-`policy_version=m4-intent-policy-v1`。`rules` 模式必须保持 `backend=none` 且
-`model_dir` 为空；`shadow`/`active` 必须使用 `backend=sklearn` 并提供目录。
+`policy_version=m4-intent-policy-v1`、`fallback_to_rules=true`、
+`fail_closed=true`。`rules` 模式必须保持 `backend=none` 且模型引用/身份/checksum
+均为空；`shadow`/`active` 必须使用 `backend=sklearn` 并提供完整外部 pin。
 
 `config/app.json` 可放入：
 
@@ -53,48 +56,64 @@ course_package_id, blueprint_id`。所以不同 hint/文本可产生不同的私
   "intent": {
     "mode": "shadow",
     "backend": "sklearn",
-    "model_dir": "models/m4-intent-v1",
+    "model_ref": "models/m4_intent/m4-intent-tfidf-logreg/1.0.0",
+    "model_id": "m4-intent-tfidf-logreg",
+    "model_version": "1.0.0",
+    "model_sha256": "<64 lowercase hex>",
     "min_confidence": 0.70,
     "min_margin": 0.10,
-    "policy_version": "m4-intent-policy-v1"
+    "policy_version": "m4-intent-policy-v1",
+    "fallback_to_rules": true,
+    "fail_closed": true
   }
 }
 ```
 
-相对 `model_dir` 从已解析的 `config_dir` 计算且不得越界；环境变量使用完全相同的
+`model_ref` 是相对 `runtime_dir` 的逻辑路径，禁止绝对路径、URL、`..` 和链接
+越界；环境变量使用完全相同的
 嵌套键：`COURSE_INSIGHT_INTENT__MODE`、
-`COURSE_INSIGHT_INTENT__BACKEND`、`COURSE_INSIGHT_INTENT__MODEL_DIR`、
+`COURSE_INSIGHT_INTENT__BACKEND`、`COURSE_INSIGHT_INTENT__MODEL_REF`、
+`COURSE_INSIGHT_INTENT__MODEL_ID`、`COURSE_INSIGHT_INTENT__MODEL_VERSION`、
+`COURSE_INSIGHT_INTENT__MODEL_SHA256`、
 `COURSE_INSIGHT_INTENT__MIN_CONFIDENCE`、
 `COURSE_INSIGHT_INTENT__MIN_MARGIN`、
-`COURSE_INSIGHT_INTENT__POLICY_VERSION`。配置覆盖优先级为运行时 overrides、
+`COURSE_INSIGHT_INTENT__POLICY_VERSION`、
+`COURSE_INSIGHT_INTENT__FALLBACK_TO_RULES`、
+`COURSE_INSIGHT_INTENT__FAIL_CLOSED`。配置覆盖优先级为运行时 overrides、
 环境、显式 dotenv、`config/app.json`、安全默认值（按字段合并）。
 
 `model.joblib` 是可信管理员边界：joblib 反序列化可执行代码。只允许受信管理员
 发布只读、已验证的 artifact 目录；加载器校验目录/文件类型、大小、manifest 与
-模型 SHA-256。绝不接受学生上传、HTTP 参数或其他非管理员来源的模型路径。
+模型 SHA-256，并将 manifest 的 model ID/version/checksum 与独立运行配置逐项核对。
+相邻 manifest 自报 checksum 不是信任根。绝不接受学生上传、HTTP 参数或其他
+非管理员来源的模型路径。
 
 ## 离线训练、发布和推进
 
 训练仅离线执行；输出目录必须事先不存在，发布会原子生成 `model.joblib`、
-`manifest.json` 与 `metrics.json`。示例数据是中性 sample-only 数据，生成的指标
+`manifest.json`、`metrics.json`、`label_map.json` 与
+`dataset_checksum.txt`。示例数据是中性 sample-only 数据，生成的指标
 只说明示例管线可运行，不能作为真实学生数据的效果、上线或门禁证据。
 
 ```powershell
-& 'D:\software\MyAnaconda\envs\course_insight_m4_intent_20260726\python.exe' scripts/train_m4_intent.py --input data/m4_intent/example.jsonl --output-dir runtime/m4-intent-sample --seed 17 --min-confidence 0.70 --min-margin 0.10
+& 'D:\software\MyAnaconda\envs\course_insight_m4_intent_20260726\python.exe' -m pip install --constraint requirements/ci-constraints.txt -e '.[intent]'
+& 'D:\software\MyAnaconda\envs\course_insight_m4_intent_20260726\python.exe' scripts/train_m4_intent.py --input data/m4_intent/example.jsonl --runtime-dir runtime --output-dir runtime/models/m4_intent/m4-intent-sample/1.0.0 --model-id m4-intent-sample --model-version 1.0.0 --seed 17 --min-confidence 0.70 --min-margin 0.10
 ```
 
-检查 `metrics.json` 的 train/validation/test macro-F1、逐类指标、OOS recall、
-coverage、selective accuracy、组间重叠与 `evidence_scope`。生产门禁必须使用受控
-离线数据与预先批准的阈值；sample-only artifact 不能越过门禁。
+检查 `metrics.json` 的 train/validation/test 五任务 `task_macro_f1`、逐类指标、
+OOS recall、`task_coverage`、selective accuracy、固定 6×6 confusion matrix、
+组间重叠、`production_gate` 与 `evidence_scope`。生产门禁必须使用受控离线数据与
+预先批准的阈值；sample-only artifact 的 `eligible/passed` 始终为 false。
 
 推荐部署序列：
 
 1. `rules → shadow`：安装并校验可信 artifact，配置 `mode=shadow`、
-   `backend=sklearn`、`model_dir` 和批准阈值，重启；检查 shadow 一致率、拒绝/OOS、
+   `backend=sklearn`、`model_ref`、三项外部 pin 和批准阈值，重启；检查 shadow 一致率、拒绝/OOS、
    confidence/margin 覆盖与错误率。
 2. `shadow → active`：保留同一已验证 artifact；仅在离线和 shadow 门禁通过后，
    将 `mode=active` 并重启。active 模型接受仍受双阈值限制。
-3. `active → rules`：设置 `mode=rules`、`backend=none`、清空 `model_dir` 并重启。
+3. `active → rules`：设置 `mode=rules`、`backend=none`，清空 `model_ref`、
+   `model_id`、`model_version`、`model_sha256` 并重启。
    已持久化 exact-request 决策仍按原记录重放，这是设计要求，不是回滚失败。
 
 ## 持久化、导入与监控

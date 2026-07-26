@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
-import sqlite3
 import json
+import shutil
+import sqlite3
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -86,10 +87,21 @@ class _Adapter:
 
     def predict(self, text: str) -> IntentPrediction:
         del text
+        scores = {
+            "qa": 0.0,
+            "diagnostic": 0.0,
+            "practice": 0.0,
+            "correction": 0.0,
+            "stage_assessment": 0.0,
+        }
+        runner_up = "diagnostic" if self._label != "diagnostic" else "qa"
         return IntentPrediction.accepted(
             self._label,
-            self._confidence,
-            self._margin,
+            {
+                **scores,
+                self._label: self._confidence,
+                runner_up: self._confidence - self._margin,
+            },
             self.adapter_id,
             self.adapter_version,
         )
@@ -152,9 +164,14 @@ def _trained_artifact(tmp_path: Path, *, name: str = "artifact") -> Path:
         "".join(
             json.dumps(
                 {
+                    "example_id": f"{split}-{label}",
                     "text": f"{token} {split}",
                     "label": label,
-                    "group_id": f"{split}-{label}",
+                    "locale": "en",
+                    "paraphrase_group_id": f"{split}-{label}",
+                    "source": "test_fixture",
+                    "approved": True,
+                    "notes": "",
                     "split": split,
                 },
                 ensure_ascii=False,
@@ -169,6 +186,9 @@ def _trained_artifact(tmp_path: Path, *, name: str = "artifact") -> Path:
     train_and_publish(
         input_path=dataset,
         output_dir=artifact,
+        runtime_dir=tmp_path,
+        model_id="m4-intent-acceptance",
+        model_version="1.0.0",
         seed=17,
         min_confidence=0.0,
         min_margin=0.0,
@@ -184,12 +204,25 @@ def _factory_with_intent(
     min_confidence: float = 0.70,
     min_margin: float = 0.10,
 ):
+    runtime_dir = tmp_path / "runtime"
+    runtime_dir.mkdir(parents=True, exist_ok=True)
+    if model_dir.resolve().is_relative_to(runtime_dir.resolve()):
+        deployed_model_dir = model_dir.resolve()
+    else:
+        deployed_model_dir = runtime_dir / "models" / model_dir.name
+        shutil.copytree(model_dir, deployed_model_dir)
+    manifest = json.loads(
+        (deployed_model_dir / "manifest.json").read_text(encoding="utf-8")
+    )
     settings = _settings(tmp_path).model_copy(
         update={
             "intent": IntentSettings(
                 mode=mode,  # type: ignore[arg-type]
                 backend="sklearn",
-                model_dir=model_dir,
+                model_ref=deployed_model_dir.relative_to(runtime_dir),
+                model_id=manifest["model_id"],
+                model_version=manifest["model_version"],
+                model_sha256=manifest["model_artifact_checksum"],
                 min_confidence=min_confidence,
                 min_margin=min_margin,
             )
@@ -203,7 +236,7 @@ def _factory_with_intent(
 def _set_artifact_version(artifact: Path, version: str) -> None:
     manifest_path = artifact / "manifest.json"
     manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["adapter_version"] = version
+    manifest["model_version"] = version
     manifest_path.write_text(
         json.dumps(manifest, sort_keys=True),
         encoding="utf-8",
@@ -584,5 +617,11 @@ def test_stage1_public_factory_restart_replays_first_real_artifact_version(
         source, version = connection.execute(
             "SELECT decision_source, adapter_version FROM m4_intent_decisions"
         ).fetchone()
+    first_manifest = json.loads(
+        (first_artifact / "manifest.json").read_text(encoding="utf-8")
+    )
     assert source == "active_model"
-    assert version == "stage1-v1"
+    assert version == (
+        "stage1-v1+sha256."
+        + first_manifest["model_artifact_checksum"]
+    )

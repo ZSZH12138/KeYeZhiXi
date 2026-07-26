@@ -91,18 +91,26 @@ def test_missing_optional_packages_only_fail_when_loading_artifact() -> None:
             (root / "manifest.json").write_text(
                 json.dumps(
                     {
-                        "schema_version": 1,
-                        "adapter_id": "fixture",
-                        "adapter_version": "1",
-                        "model_sha256": hashlib.sha256(model).hexdigest(),
-                        "labels": [
-                            "correction",
-                            "diagnostic",
-                            "out_of_scope",
-                            "practice",
+                        "schema_version": "1",
+                        "model_id": "fixture",
+                        "model_version": "1",
+                        "adapter_type": "sklearn",
+                        "supported_task_types": [
                             "qa",
+                            "diagnostic",
+                            "practice",
+                            "correction",
                             "stage_assessment",
                         ],
+                        "normalization_version": "m4-text-normalization-v1",
+                        "training_dataset_checksum": "0" * 64,
+                        "model_artifact_checksum": hashlib.sha256(model).hexdigest(),
+                        "library_versions": {
+                            "python": "3.12",
+                            "scikit_learn": "1.9",
+                            "joblib": "1.5",
+                        },
+                        "created_at": "2026-07-27T00:00:00+00:00",
                         "vectorizer": {"type": "TfidfVectorizer"},
                         "classifier": {"type": "LogisticRegression"},
                         "training_provenance": {"seed": 17},
@@ -111,7 +119,13 @@ def test_missing_optional_packages_only_fail_when_loading_artifact() -> None:
                 encoding="utf-8",
             )
             try:
-                load_sklearn_intent_adapter(root)
+                load_sklearn_intent_adapter(
+                    root,
+                    runtime_dir=root.parent,
+                    expected_model_id="fixture",
+                    expected_model_version="1",
+                    expected_model_sha256=hashlib.sha256(model).hexdigest(),
+                )
             except IntentArtifactError as error:
                 assert str(error) == "optional intent dependencies are unavailable"
             else:

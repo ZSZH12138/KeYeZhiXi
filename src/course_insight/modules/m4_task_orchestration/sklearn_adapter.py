@@ -11,9 +11,11 @@ import importlib
 import json
 import math
 import os
+import re
 import stat
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
+from datetime import datetime
 from hashlib import sha256
 from io import BytesIO
 from numbers import Real
@@ -22,12 +24,17 @@ from pathlib import Path
 from typing import Any
 
 from course_insight.modules.m4_task_orchestration.intent import (
+    SUPPORTED_INTENT_LABELS,
     IntentAdapter,
     IntentPrediction,
 )
+from course_insight.modules.m4_task_orchestration.normalization import (
+    NORMALIZATION_VERSION,
+    normalize_intent_text,
+)
 
 
-_MANIFEST_SCHEMA_VERSION = 1
+_MANIFEST_SCHEMA_VERSION = "1"
 _MAX_MANIFEST_BYTES = 64 * 1024
 _MAX_MODEL_BYTES = 64 * 1024 * 1024
 _EXPECTED_LABELS = (
@@ -38,19 +45,29 @@ _EXPECTED_LABELS = (
     "qa",
     "stage_assessment",
 )
+_EXPECTED_PUBLIC_LABELS = SUPPORTED_INTENT_LABELS
 _EXPECTED_MANIFEST_FIELDS = frozenset(
     {
         "schema_version",
-        "adapter_id",
-        "adapter_version",
-        "model_sha256",
-        "labels",
+        "model_id",
+        "model_version",
+        "adapter_type",
+        "supported_task_types",
+        "normalization_version",
+        "training_dataset_checksum",
+        "model_artifact_checksum",
+        "library_versions",
+        "created_at",
         "vectorizer",
         "classifier",
         "training_provenance",
     }
 )
 _PROBABILITY_TOLERANCE = 1e-9
+_SAFE_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]{0,127}$")
+_EXPECTED_LIBRARY_FIELDS = frozenset(
+    {"python", "scikit_learn", "joblib"}
+)
 
 
 class IntentArtifactError(RuntimeError):
@@ -59,10 +76,10 @@ class IntentArtifactError(RuntimeError):
 
 @dataclass(frozen=True, slots=True)
 class _IntentManifest:
-    adapter_id: str
-    adapter_version: str
-    model_sha256: str
-    labels: tuple[str, ...]
+    model_id: str
+    model_version: str
+    model_artifact_checksum: str
+    training_dataset_checksum: str
     vectorizer_type: str
     classifier_type: str
 
@@ -76,11 +93,14 @@ class SklearnIntentAdapter:
 
     @property
     def adapter_id(self) -> str:
-        return self._manifest.adapter_id
+        return self._manifest.model_id
 
     @property
     def adapter_version(self) -> str:
-        return self._manifest.adapter_version
+        return (
+            f"{self._manifest.model_version}+sha256."
+            f"{self._manifest.model_artifact_checksum}"
+        )
 
     def predict(self, text: str) -> IntentPrediction:
         """Return only immutable scores and labels, never the source text."""
@@ -88,12 +108,15 @@ class SklearnIntentAdapter:
         if not isinstance(text, str):
             raise IntentArtifactError("model prediction input is invalid")
         try:
-            raw_probabilities = self._artifact.predict_proba([text])
+            normalized_text = normalize_intent_text(text)
+            if not normalized_text:
+                raise IntentArtifactError("model prediction input is invalid")
+            raw_probabilities = self._artifact.predict_proba([normalized_text])
         except Exception:
             raise IntentArtifactError("model prediction failed") from None
         probabilities = _validated_probabilities(
             raw_probabilities,
-            class_count=len(self._manifest.labels),
+            class_count=len(_EXPECTED_LABELS),
         )
         ranked_indices = sorted(
             range(len(probabilities)),
@@ -103,27 +126,49 @@ class SklearnIntentAdapter:
         top_index, second_index = ranked_indices[:2]
         confidence = probabilities[top_index]
         margin = confidence - probabilities[second_index]
-        top_label = self._manifest.labels[top_index]
-        if top_label == "out_of_scope":
+        top_label = _EXPECTED_LABELS[top_index]
+        second_label = _EXPECTED_LABELS[second_index]
+        public_scores = {
+            label: probabilities[_EXPECTED_LABELS.index(label)]
+            for label in _EXPECTED_PUBLIC_LABELS
+        }
+        if "out_of_scope" in {top_label, second_label}:
             return IntentPrediction.out_of_scope(
+                scores=public_scores,
                 confidence=confidence,
                 margin=margin,
                 adapter_id=self.adapter_id,
                 adapter_version=self.adapter_version,
+                reason_codes=(
+                    ("outside_supported_scope",)
+                    if top_label == "out_of_scope"
+                    else ("out_of_scope_competitor",)
+                ),
             )
         return IntentPrediction.accepted(
             label=top_label,
-            confidence=confidence,
-            margin=margin,
+            scores=public_scores,
             adapter_id=self.adapter_id,
             adapter_version=self.adapter_version,
         )
 
 
-def load_sklearn_intent_adapter(model_dir: Path) -> IntentAdapter:
+def load_sklearn_intent_adapter(
+    model_dir: Path,
+    *,
+    runtime_dir: Path,
+    expected_model_id: str,
+    expected_model_version: str,
+    expected_model_sha256: str,
+) -> IntentAdapter:
     """Load a checksum-pinned trusted local artifact after strict validation."""
 
-    root = _validated_model_root(model_dir)
+    _validated_external_identity(
+        expected_model_id,
+        expected_model_version,
+        expected_model_sha256,
+    )
+    root = _validated_model_root(model_dir, runtime_dir=runtime_dir)
     manifest_bytes = _read_stable_artifact_file(
         root,
         "manifest.json",
@@ -137,7 +182,16 @@ def load_sklearn_intent_adapter(model_dir: Path) -> IntentAdapter:
         file_kind="model",
     )
     manifest = _parse_manifest(manifest_bytes)
-    if sha256(model_bytes).hexdigest() != manifest.model_sha256:
+    if (
+        manifest.model_id != expected_model_id
+        or manifest.model_version != expected_model_version
+    ):
+        raise IntentArtifactError("model identity mismatch")
+    model_checksum = sha256(model_bytes).hexdigest()
+    if (
+        model_checksum != manifest.model_artifact_checksum
+        or model_checksum != expected_model_sha256
+    ):
         raise IntentArtifactError("model checksum mismatch")
 
     try:
@@ -165,17 +219,41 @@ def load_sklearn_intent_adapter(model_dir: Path) -> IntentAdapter:
     return SklearnIntentAdapter(_artifact=artifact, _manifest=manifest)
 
 
-def _validated_model_root(model_dir: object) -> Path:
+def _validated_external_identity(
+    model_id: object,
+    model_version: object,
+    model_sha256: object,
+) -> None:
+    if (
+        not isinstance(model_id, str)
+        or _SAFE_IDENTIFIER.fullmatch(model_id) is None
+        or not isinstance(model_version, str)
+        or len(model_version) > 56
+        or _SAFE_IDENTIFIER.fullmatch(model_version) is None
+    ):
+        raise IntentArtifactError("model identity is invalid")
+    _validated_sha256(model_sha256, field_name="configured model sha256")
+
+
+def _validated_model_root(model_dir: object, *, runtime_dir: object) -> Path:
     if (
         not isinstance(model_dir, Path)
         or not model_dir.is_absolute()
         or ".." in model_dir.parts
+        or not isinstance(runtime_dir, Path)
+        or not runtime_dir.is_absolute()
+        or ".." in runtime_dir.parts
     ):
         raise IntentArtifactError("model directory is unsafe")
     try:
+        runtime_root = runtime_dir.resolve(strict=True)
+        if not stat.S_ISDIR(runtime_root.stat().st_mode):
+            raise IntentArtifactError("model directory is unavailable")
         if model_dir.is_symlink():
             raise IntentArtifactError("model directory is unsafe")
         root = model_dir.resolve(strict=True)
+        if root == runtime_root or not root.is_relative_to(runtime_root):
+            raise IntentArtifactError("model directory is unsafe")
         if not stat.S_ISDIR(root.stat().st_mode):
             raise IntentArtifactError("model directory is unavailable")
     except IntentArtifactError:
@@ -290,20 +368,35 @@ def _parse_manifest(payload: bytes) -> _IntentManifest:
 def _validated_manifest(raw: object) -> _IntentManifest:
     if not isinstance(raw, dict) or set(raw) != _EXPECTED_MANIFEST_FIELDS:
         raise IntentArtifactError("manifest fields are invalid")
-    if (
-        isinstance(raw["schema_version"], bool)
-        or raw["schema_version"] != _MANIFEST_SCHEMA_VERSION
-    ):
+    if raw["schema_version"] != _MANIFEST_SCHEMA_VERSION:
         raise IntentArtifactError("manifest schema is unsupported")
-    adapter_id = _nonblank_manifest_string(raw["adapter_id"], "adapter id")
-    adapter_version = _nonblank_manifest_string(
-        raw["adapter_version"],
-        "adapter version",
+    model_id = _safe_manifest_identifier(raw["model_id"], "model id")
+    model_version = _safe_manifest_identifier(
+        raw["model_version"],
+        "model version",
     )
-    model_sha256 = _validated_sha256(raw["model_sha256"])
-    labels = raw["labels"]
-    if not isinstance(labels, list) or tuple(labels) != _EXPECTED_LABELS:
+    if raw["adapter_type"] != "sklearn":
+        raise IntentArtifactError("manifest adapter type is invalid")
+    labels = raw["supported_task_types"]
+    if (
+        not isinstance(labels, list)
+        or tuple(labels) != _EXPECTED_PUBLIC_LABELS
+    ):
         raise IntentArtifactError("manifest labels are invalid")
+    if raw["normalization_version"] != NORMALIZATION_VERSION:
+        raise IntentArtifactError(
+            "manifest normalization version is invalid"
+        )
+    training_dataset_checksum = _validated_sha256(
+        raw["training_dataset_checksum"],
+        field_name="training dataset checksum",
+    )
+    model_artifact_checksum = _validated_sha256(
+        raw["model_artifact_checksum"],
+        field_name="model artifact checksum",
+    )
+    _validated_library_versions(raw["library_versions"])
+    _validated_created_at(raw["created_at"])
     vectorizer_type = _metadata_type(raw["vectorizer"], "vectorizer")
     classifier_type = _metadata_type(raw["classifier"], "classifier")
     provenance = raw["training_provenance"]
@@ -316,29 +409,59 @@ def _validated_manifest(raw: object) -> _IntentManifest:
             "manifest training provenance is invalid"
         )
     return _IntentManifest(
-        adapter_id=adapter_id,
-        adapter_version=adapter_version,
-        model_sha256=model_sha256,
-        labels=tuple(labels),
+        model_id=model_id,
+        model_version=model_version,
+        model_artifact_checksum=model_artifact_checksum,
+        training_dataset_checksum=training_dataset_checksum,
         vectorizer_type=vectorizer_type,
         classifier_type=classifier_type,
     )
 
 
-def _nonblank_manifest_string(value: object, field_name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+def _safe_manifest_identifier(value: object, field_name: str) -> str:
+    if (
+        not isinstance(value, str)
+        or _SAFE_IDENTIFIER.fullmatch(value) is None
+        or (field_name == "model version" and len(value) > 56)
+    ):
         raise IntentArtifactError(f"manifest {field_name} is invalid")
     return value
 
 
-def _validated_sha256(value: object) -> str:
+def _validated_sha256(value: object, *, field_name: str) -> str:
     if (
         not isinstance(value, str)
         or len(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
     ):
-        raise IntentArtifactError("manifest model sha256 is invalid")
+        raise IntentArtifactError(f"{field_name} is invalid")
     return value
+
+
+def _validated_library_versions(value: object) -> None:
+    if (
+        not isinstance(value, dict)
+        or set(value) != _EXPECTED_LIBRARY_FIELDS
+        or any(
+            not isinstance(version, str)
+            or not version
+            or len(version) > 128
+            or any(character.isspace() for character in version)
+            for version in value.values()
+        )
+    ):
+        raise IntentArtifactError("manifest library versions are invalid")
+
+
+def _validated_created_at(value: object) -> None:
+    if not isinstance(value, str) or len(value) > 64:
+        raise IntentArtifactError("manifest created at is invalid")
+    try:
+        created_at = datetime.fromisoformat(value)
+    except ValueError:
+        raise IntentArtifactError("manifest created at is invalid") from None
+    if created_at.tzinfo is None or created_at.utcoffset() is None:
+        raise IntentArtifactError("manifest created at is invalid")
 
 
 def _metadata_type(value: object, field_name: str) -> str:
@@ -373,12 +496,12 @@ def _validate_artifact(artifact: object, manifest: _IntentManifest) -> None:
         or type(classifier).__name__ != manifest.classifier_type
     ):
         raise IntentArtifactError("model component types are invalid")
-    _validate_model_classes(getattr(artifact, "classes_", None), manifest.labels)
+    _validate_model_classes(getattr(artifact, "classes_", None), _EXPECTED_LABELS)
     _validate_model_classes(
         getattr(classifier, "classes_", None),
-        manifest.labels,
+        _EXPECTED_LABELS,
     )
-    _validate_feature_shape(vectorizer, classifier, len(manifest.labels))
+    _validate_feature_shape(vectorizer, classifier, len(_EXPECTED_LABELS))
 
 
 def _validate_model_classes(

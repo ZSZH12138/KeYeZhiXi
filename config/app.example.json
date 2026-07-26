@@ -46,5 +46,18 @@
     "max_request_body_bytes": 1048576,
     "login_failure_limit": 5,
     "login_failure_window_seconds": 300
+  },
+  "intent": {
+    "mode": "rules",
+    "backend": "none",
+    "model_ref": null,
+    "model_id": null,
+    "model_version": null,
+    "model_sha256": null,
+    "policy_version": "m4-intent-policy-v1",
+    "min_confidence": 0.7,
+    "min_margin": 0.1,
+    "fallback_to_rules": true,
+    "fail_closed": true
   }
 }

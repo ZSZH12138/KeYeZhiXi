@@ -5,12 +5,16 @@ from __future__ import annotations
 import json
 import os
 import random
-import unicodedata
+import re
 from collections import defaultdict
 from collections.abc import Sequence
 from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
+
+from course_insight.modules.m4_task_orchestration.normalization import (
+    normalize_intent_text,
+)
 
 
 EXPECTED_LABELS = (
@@ -22,10 +26,23 @@ EXPECTED_LABELS = (
     "stage_assessment",
 )
 EXPECTED_SPLITS = ("train", "validation", "test")
-_BASE_FIELDS = frozenset({"text", "label", "group_id"})
+_BASE_FIELDS = frozenset(
+    {
+        "example_id",
+        "text",
+        "label",
+        "locale",
+        "paraphrase_group_id",
+        "source",
+        "approved",
+        "notes",
+    }
+)
 _ALL_FIELDS = frozenset({*_BASE_FIELDS, "split"})
 _MAX_ROW_BYTES = 64 * 1024
 _MAX_EXAMPLES = 1_000_000
+_MAX_NOTES_LENGTH = 1024
+_SAFE_METADATA = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$")
 _LABEL_BITS = {
     label: 1 << index for index, label in enumerate(EXPECTED_LABELS)
 }
@@ -41,10 +58,21 @@ class IntentDatasetError(ValueError):
 class IntentExample:
     """One immutable intent example; source text is never used in errors."""
 
+    example_id: str
     text: str
     label: str
-    group_id: str
+    locale: str
+    paraphrase_group_id: str
+    source: str
+    approved: bool
+    notes: str
     split: str | None
+
+    @property
+    def group_id(self) -> str:
+        """Compatibility alias for deterministic partition internals."""
+
+        return self.paraphrase_group_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -79,6 +107,7 @@ def load_dataset(path: Path) -> LoadedIntentDataset:
     if not isinstance(path, Path):
         raise IntentDatasetError("dataset path is invalid")
     examples: list[IntentExample] = []
+    seen_example_ids: set[str] = set()
     seen_content: set[str] = set()
     digest = sha256()
     byte_count = 0
@@ -96,6 +125,11 @@ def load_dataset(path: Path) -> LoadedIntentDataset:
                 if len(payload) > _MAX_ROW_BYTES:
                     raise IntentDatasetError("dataset row size exceeds limit")
                 example = _parse_line(payload, line_number=line_number)
+                if example.example_id in seen_example_ids:
+                    raise IntentDatasetError(
+                        "dataset contains duplicate example ids"
+                    )
+                seen_example_ids.add(example.example_id)
                 content_key = _content_identity(example.text)
                 if content_key in seen_content:
                     raise IntentDatasetError(
@@ -164,11 +198,20 @@ def _parse_line(payload: bytes, *, line_number: int) -> IntentExample:
         _ALL_FIELDS,
     }:
         raise IntentDatasetError("dataset row fields are invalid")
+    example_id = _safe_metadata(raw["example_id"])
     row_text = _nonblank_string(raw["text"])
     label = _nonblank_string(raw["label"])
-    group_id = _nonblank_string(raw["group_id"])
+    locale = _safe_metadata(raw["locale"])
+    group_id = _safe_metadata(raw["paraphrase_group_id"])
+    source = _safe_metadata(raw["source"])
+    approved = raw["approved"]
+    notes = raw["notes"]
     if label not in EXPECTED_LABELS:
         raise IntentDatasetError("dataset label is invalid")
+    if approved is not True:
+        raise IntentDatasetError("dataset row must be explicitly approved")
+    if not isinstance(notes, str) or len(notes) > _MAX_NOTES_LENGTH:
+        raise IntentDatasetError("dataset row values are invalid")
     if "split" in raw:
         split_raw = raw["split"]
         split = _nonblank_string(split_raw)
@@ -177,9 +220,14 @@ def _parse_line(payload: bytes, *, line_number: int) -> IntentExample:
     else:
         split = None
     return IntentExample(
+        example_id=example_id,
         text=row_text,
         label=label,
-        group_id=group_id,
+        locale=locale,
+        paraphrase_group_id=group_id,
+        source=source,
+        approved=True,
+        notes=notes,
         split=split,
     )
 
@@ -188,6 +236,20 @@ def _nonblank_string(value: object) -> str:
     if not isinstance(value, str) or not value.strip():
         raise IntentDatasetError("dataset row values are invalid")
     return value
+
+
+def _safe_metadata(value: object) -> str:
+    if not _is_safe_metadata(value):
+        raise IntentDatasetError("dataset governance metadata is invalid")
+    assert isinstance(value, str)
+    return value
+
+
+def _is_safe_metadata(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and _SAFE_METADATA.fullmatch(value) is not None
+    )
 
 
 def _validated_examples(
@@ -202,17 +264,26 @@ def _validated_examples(
     normalized = tuple(examples)
     if any(not isinstance(example, IntentExample) for example in normalized):
         raise IntentDatasetError("dataset examples are invalid")
+    seen_example_ids: set[str] = set()
     seen_content: set[str] = set()
     for example in normalized:
         if (
-            not isinstance(example.text, str)
+            not _is_safe_metadata(example.example_id)
+            or not isinstance(example.text, str)
             or not example.text.strip()
             or example.label not in EXPECTED_LABELS
-            or not isinstance(example.group_id, str)
-            or not example.group_id.strip()
+            or not _is_safe_metadata(example.locale)
+            or not _is_safe_metadata(example.paraphrase_group_id)
+            or not _is_safe_metadata(example.source)
+            or example.approved is not True
+            or not isinstance(example.notes, str)
+            or len(example.notes) > _MAX_NOTES_LENGTH
             or example.split not in {*EXPECTED_SPLITS, None}
         ):
             raise IntentDatasetError("dataset examples are invalid")
+        if example.example_id in seen_example_ids:
+            raise IntentDatasetError("dataset contains duplicate example ids")
+        seen_example_ids.add(example.example_id)
         content_key = _content_identity(example.text)
         if content_key in seen_content:
             raise IntentDatasetError("dataset contains duplicate content")
@@ -221,9 +292,10 @@ def _validated_examples(
         sorted(
             normalized,
             key=lambda item: (
-                item.group_id,
+                item.paraphrase_group_id,
                 item.label,
                 item.text,
+                item.example_id,
                 "" if item.split is None else item.split,
             ),
         )
@@ -444,8 +516,10 @@ def _snapshot_identity(file_stat: os.stat_result) -> tuple[int, int, int, int]:
 
 
 def _content_identity(text: str) -> str:
-    normalized = unicodedata.normalize("NFKC", text)
-    return " ".join(normalized.split()).casefold()
+    try:
+        return normalize_intent_text(text)
+    except ValueError:
+        raise IntentDatasetError("dataset row values are invalid") from None
 
 
 class _DuplicateKey(ValueError):

@@ -83,6 +83,7 @@ from course_insight.modules.m4_task_orchestration.sklearn_adapter import (
 
 
 NOW = datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc)
+MODEL_SHA256 = "a" * 64
 
 
 def _settings(
@@ -266,7 +267,9 @@ def test_rules_factory_never_loads_model(
     monkeypatch.setattr(
         sklearn_adapter,
         "load_sklearn_intent_adapter",
-        lambda path: pytest.fail(f"rules mode loaded model: {path.name}"),
+        lambda path, **kwargs: pytest.fail(
+            f"rules mode loaded model: {path.name}; {kwargs}"
+        ),
     )
 
     app = build_application(_settings(tmp_path))
@@ -312,36 +315,54 @@ def test_model_factory_loads_configured_adapter_and_policy(
     monkeypatch: pytest.MonkeyPatch,
     mode: str,
 ) -> None:
-    model_dir = (tmp_path / "config" / "intent-model").resolve()
+    model_ref = Path("models/intent-model")
+    model_dir = (tmp_path / "runtime" / model_ref).resolve()
     adapter = _IntentAdapterSentinel()
-    calls: list[Path] = []
+    calls: list[tuple[Path, dict[str, object]]] = []
     monkeypatch.setattr(
         sklearn_adapter,
         "load_sklearn_intent_adapter",
-        lambda path: calls.append(path) or adapter,
+        lambda path, **kwargs: calls.append((path, kwargs)) or adapter,
     )
     settings = _settings(
         tmp_path,
         intent=IntentSettings(
             mode=mode,
             backend="sklearn",
-            model_dir=model_dir,
+            model_ref=model_ref,
+            model_id="factory-intent",
+            model_version="2.0.0",
+            model_sha256=MODEL_SHA256,
             min_confidence=0.82,
             min_margin=0.23,
             policy_version="factory-policy-v2",
+            fallback_to_rules=False,
+            fail_closed=False,
         ),
     )
 
     app = build_application(settings)
     try:
         intent_service = app.m4_service._intent_service  # noqa: SLF001
-        assert calls == [model_dir]
+        assert calls == [
+            (
+                model_dir,
+                {
+                    "runtime_dir": (tmp_path / "runtime").resolve(),
+                    "expected_model_id": "factory-intent",
+                    "expected_model_version": "2.0.0",
+                    "expected_model_sha256": MODEL_SHA256,
+                },
+            )
+        ]
         assert intent_service is not None
         assert intent_service.repository is app.m4_service._repository  # noqa: SLF001
         assert intent_service._mode == mode  # noqa: SLF001
         assert intent_service._adapter is adapter  # noqa: SLF001
         assert intent_service._policy.min_confidence == 0.82  # noqa: SLF001
         assert intent_service._policy.min_margin == 0.23  # noqa: SLF001
+        assert intent_service._policy.fallback_to_rules is False  # noqa: SLF001
+        assert intent_service._policy.fail_closed is False  # noqa: SLF001
         assert intent_service._policy_version == "factory-policy-v2"  # noqa: SLF001
     finally:
         app.close()
@@ -356,14 +377,17 @@ def test_model_factory_uses_injected_m4_repository(
     monkeypatch.setattr(
         sklearn_adapter,
         "load_sklearn_intent_adapter",
-        lambda path: adapter,
+        lambda path, **kwargs: adapter,
     )
     settings = _settings(
         tmp_path,
         intent=IntentSettings(
             mode="active",
             backend="sklearn",
-            model_dir=(tmp_path / "config" / "intent-model").resolve(),
+            model_ref=Path("models/intent-model"),
+            model_id="factory-intent",
+            model_version="1.0.0",
+            model_sha256=MODEL_SHA256,
         ),
     )
 
@@ -386,14 +410,19 @@ def test_m4_service_override_avoids_model_load(
     monkeypatch.setattr(
         sklearn_adapter,
         "load_sklearn_intent_adapter",
-        lambda path: pytest.fail(f"discarded service loaded: {path.name}"),
+        lambda path, **kwargs: pytest.fail(
+            f"discarded service loaded: {path.name}; {kwargs}"
+        ),
     )
     settings = _settings(
         tmp_path,
         intent=IntentSettings(
             mode="active",
             backend="sklearn",
-            model_dir=(tmp_path / "config" / "intent-model").resolve(),
+            model_ref=Path("models/intent-model"),
+            model_id="factory-intent",
+            model_version="1.0.0",
+            model_sha256=MODEL_SHA256,
         ),
     )
 
@@ -413,14 +442,17 @@ def test_unreadable_model_artifact_fails_closed_without_path_leak(
     mode: str,
 ) -> None:
     private_model_dir = (
-        tmp_path / "private-deployment" / "missing-intent-model"
+        tmp_path / "runtime" / "private-deployment" / "missing-intent-model"
     ).resolve()
     settings = _settings(
         tmp_path,
         intent=IntentSettings(
             mode=mode,
             backend="sklearn",
-            model_dir=private_model_dir,
+            model_ref=Path("private-deployment/missing-intent-model"),
+            model_id="factory-intent",
+            model_version="1.0.0",
+            model_sha256=MODEL_SHA256,
         ),
     )
 
