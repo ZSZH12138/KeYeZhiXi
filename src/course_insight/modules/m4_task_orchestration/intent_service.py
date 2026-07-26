@@ -128,10 +128,7 @@ class StoredIntentDecision:
         calculated = self.recalculate_payload_checksum()
         if _generate_checksum and self.payload_checksum is None:
             object.__setattr__(self, "payload_checksum", calculated)
-        elif (
-            not isinstance(self.payload_checksum, str)
-            or self.payload_checksum != calculated
-        ):
+        elif not self._has_valid_payload_checksum(calculated):
             raise ValueError("intent decision payload checksum is invalid")
     @classmethod
     def from_outcome(
@@ -212,8 +209,22 @@ class StoredIntentDecision:
     def assert_integrity(self) -> None:
         """Revalidate an object returned by an untrusted persistence boundary."""
         self._validate_fields()
-        if self.payload_checksum != self.recalculate_payload_checksum():
+        if not self._has_valid_payload_checksum(
+            self.recalculate_payload_checksum()
+        ):
             raise ValueError("intent decision payload checksum is invalid")
+    def _has_valid_payload_checksum(self, current_checksum: str) -> bool:
+        if not isinstance(self.payload_checksum, str):
+            return False
+        if self.payload_checksum == current_checksum:
+            return True
+        return (
+            self.schema_version == 1
+            and self.payload_checksum
+            == _legacy_v1_integer_score_payload_checksum(
+                self.canonical_payload()
+            )
+        )
     def _validate_fields(self) -> None:
         _validate_nonblank("request_key", self.request_key)
         _validate_status_and_label(
@@ -781,6 +792,40 @@ def _normalized_probability(value: object) -> object:
         return float(value)
     except OverflowError:
         return math.inf
+def _legacy_v1_integer_score_payload_checksum(
+    canonical_payload: dict[str, object],
+) -> str:
+    payload = {
+        **canonical_payload,
+        "confidence": _legacy_v1_integer_score(
+            canonical_payload["confidence"]
+        ),
+        "margin": _legacy_v1_integer_score(canonical_payload["margin"]),
+    }
+    shadow = canonical_payload["shadow"]
+    if type(shadow) is dict:
+        payload["shadow"] = {
+            **shadow,
+            "confidence": _legacy_v1_integer_score(shadow["confidence"]),
+            "margin": _legacy_v1_integer_score(shadow["margin"]),
+        }
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+def _legacy_v1_integer_score(value: object) -> object:
+    if (
+        type(value) is float
+        and math.isfinite(value)
+        and 0.0 <= value <= 1.0
+        and value.is_integer()
+    ):
+        return int(value)
+    return value
 def _validate_nonblank(name: str, value: object) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must not be blank")

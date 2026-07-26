@@ -142,6 +142,30 @@ def _corrupt_prediction(**updates: object) -> IntentPrediction:
     return prediction
 
 
+def _legacy_v1_integer_score_checksum(
+    decision: StoredIntentDecision,
+) -> str:
+    payload = decision.canonical_payload()
+    for field_name in ("confidence", "margin"):
+        value = payload[field_name]
+        if type(value) is float and value.is_integer():
+            payload[field_name] = int(value)
+    shadow = payload["shadow"]
+    if type(shadow) is dict:
+        for field_name in ("confidence", "margin"):
+            value = shadow[field_name]
+            if type(value) is float and value.is_integer():
+                shadow[field_name] = int(value)
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def test_persisted_decision_wins_before_new_hint_or_adapter_execution() -> None:
     repository = InMemoryM4Repository()
     adapter = RecordingAdapter(
@@ -656,6 +680,47 @@ def test_stored_decision_normalizes_integer_scores_before_checksum() -> None:
     assert type(integer_scores.shadow_margin) is float
     assert integer_scores.canonical_payload() == float_scores.canonical_payload()
     assert integer_scores.payload_checksum == float_scores.payload_checksum
+
+
+def test_stored_decision_accepts_only_exact_legacy_v1_score_checksum() -> None:
+    current = StoredIntentDecision(
+        request_key="a" * 64,
+        resolved_task_type="practice",
+        decision_status=IntentStatus.ACCEPTED,
+        decision_source="active_model",
+        adapter_id="adapter",
+        adapter_version="1",
+        policy_version="policy-1",
+        confidence=1.0,
+        margin=0.0,
+        input_checksum="b" * 64,
+        reason_codes=("accepted",),
+        created_at=NOW,
+        shadow_label="qa",
+        shadow_status=IntentStatus.ACCEPTED,
+        shadow_adapter_id="shadow-adapter",
+        shadow_adapter_version="1",
+        shadow_confidence=1.0,
+        shadow_margin=0.0,
+        shadow_reason_codes=("shadow-accepted",),
+        shadow_agrees=False,
+        _generate_checksum=True,
+    )
+    legacy_checksum = _legacy_v1_integer_score_checksum(current)
+
+    replayed = replace(current, payload_checksum=legacy_checksum)
+
+    assert replayed.payload_checksum == legacy_checksum
+    assert replayed.payload_checksum != current.payload_checksum
+    assert type(replayed.confidence) is float
+    assert type(replayed.shadow_confidence) is float
+    replayed.assert_integrity()
+    with pytest.raises(ValueError, match="payload checksum"):
+        replace(
+            replayed,
+            adapter_version="tampered",
+            payload_checksum=legacy_checksum,
+        )
 
 
 def test_persisted_decision_cannot_omit_payload_checksum() -> None:

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
@@ -132,6 +133,30 @@ def _m4_intent(
         shadow_agrees=False,
         _generate_checksum=True,
     )
+
+
+def _legacy_v1_integer_score_checksum(
+    decision: StoredIntentDecision,
+) -> str:
+    payload = decision.canonical_payload()
+    for field_name in ("confidence", "margin"):
+        value = payload[field_name]
+        if type(value) is float and value.is_integer():
+            payload[field_name] = int(value)
+    shadow = payload["shadow"]
+    if type(shadow) is dict:
+        for field_name in ("confidence", "margin"):
+            value = shadow[field_name]
+            if type(value) is float and value.is_integer():
+                shadow[field_name] = int(value)
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _m6_record(
@@ -312,6 +337,24 @@ def test_real_postgres_m4_intent_round_trip_first_writer_and_checksums(
         assert row["confidence"] == 1.0
         assert row["margin"] == 0.0
         assert row["payload_checksum"] == first.payload_checksum
+        legacy_checksum = _legacy_v1_integer_score_checksum(first)
+        assert legacy_checksum != first.payload_checksum
+        with postgres_pool.connection() as connection:
+            with connection.transaction():
+                connection.execute(
+                    """
+                    UPDATE m4_intent_decisions
+                    SET payload_checksum = %s
+                    WHERE request_key = %s
+                    """,
+                    (legacy_checksum, first.request_key),
+                )
+        legacy = PostgresM4Repository(postgres_pool).get_intent_decision(
+            first.request_key
+        )
+        assert legacy is not None
+        assert legacy.payload_checksum == legacy_checksum
+        assert legacy.confidence == 1.0
     finally:
         with postgres_pool.connection() as connection:
             with connection.transaction():

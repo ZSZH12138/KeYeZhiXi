@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import importlib
+import json
 import sqlite3
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -147,6 +148,30 @@ def _decision(
     )
 
 
+def _legacy_v1_integer_score_checksum(
+    decision: StoredIntentDecision,
+) -> str:
+    payload = decision.canonical_payload()
+    for field_name in ("confidence", "margin"):
+        value = payload[field_name]
+        if type(value) is float and value.is_integer():
+            payload[field_name] = int(value)
+    shadow = payload["shadow"]
+    if type(shadow) is dict:
+        for field_name in ("confidence", "margin"):
+            value = shadow[field_name]
+            if type(value) is float and value.is_integer():
+                shadow[field_name] = int(value)
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 def _intent_row_count(database_path: Path) -> int:
     with connect_sqlite(database_path) as connection:
         return int(
@@ -284,6 +309,59 @@ def test_sqlite_intent_decision_round_trip_preserves_private_metadata(
     with connect_sqlite(database_path) as connection:
         database_dump = "\n".join(connection.iterdump())
     assert "原始文本" not in database_dump
+
+
+def test_sqlite_reads_raw_legacy_v1_integer_score_checksum(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    baseline = _decision()
+    candidate = StoredIntentDecision(
+        request_key=baseline.request_key,
+        resolved_task_type=baseline.resolved_task_type,
+        decision_status=baseline.decision_status,
+        decision_source=baseline.decision_source,
+        adapter_id=baseline.adapter_id,
+        adapter_version=baseline.adapter_version,
+        policy_version=baseline.policy_version,
+        confidence=1,
+        margin=0,
+        input_checksum=baseline.input_checksum,
+        reason_codes=baseline.reason_codes,
+        created_at=baseline.created_at,
+        shadow_label=baseline.shadow_label,
+        shadow_status=baseline.shadow_status,
+        shadow_adapter_id=baseline.shadow_adapter_id,
+        shadow_adapter_version=baseline.shadow_adapter_version,
+        shadow_confidence=1,
+        shadow_margin=0,
+        shadow_reason_codes=baseline.shadow_reason_codes,
+        shadow_agrees=baseline.shadow_agrees,
+        _generate_checksum=True,
+    )
+    repository.insert_or_get_intent_decision(candidate)
+    legacy_checksum = _legacy_v1_integer_score_checksum(candidate)
+    assert legacy_checksum != candidate.payload_checksum
+    with connect_sqlite(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE m4_intent_decisions
+            SET payload_checksum = ?
+            WHERE request_key = ?
+            """,
+            (legacy_checksum, candidate.request_key),
+        )
+
+    restored = _repository_type()(database_path).get_intent_decision(
+        candidate.request_key
+    )
+
+    assert restored is not None
+    assert restored.payload_checksum == legacy_checksum
+    assert restored.confidence == 1.0
+    assert restored.margin == 0.0
 
 
 def test_sqlite_intent_decision_first_writer_wins_across_adapter_versions(

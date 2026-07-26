@@ -73,8 +73,13 @@ def _decision(
     seed: str,
     *,
     status: IntentStatus = IntentStatus.ACCEPTED,
+    integer_scores: bool = False,
 ) -> StoredIntentDecision:
     accepted = status is IntentStatus.ACCEPTED
+    confidence = 1 if integer_scores else 0.91
+    margin = 0 if integer_scores else 0.31
+    shadow_confidence = 1 if integer_scores else 0.82
+    shadow_margin = 0 if integer_scores else 0.22
     return StoredIntentDecision(
         request_key=seed * 64,
         resolved_task_type="practice" if accepted else None,
@@ -83,8 +88,8 @@ def _decision(
         adapter_id="test-adapter",
         adapter_version=f"adapter-{seed}",
         policy_version="intent-policy-v1",
-        confidence=0.91 if accepted else None,
-        margin=0.31 if accepted else None,
+        confidence=confidence if accepted else None,
+        margin=margin if accepted else None,
         input_checksum=hashlib.sha256(
             f"private-{seed}".encode("utf-8")
         ).hexdigest(),
@@ -94,12 +99,36 @@ def _decision(
         shadow_status=IntentStatus.ACCEPTED if accepted else None,
         shadow_adapter_id="shadow-adapter" if accepted else None,
         shadow_adapter_version="shadow-v1" if accepted else None,
-        shadow_confidence=0.82 if accepted else None,
-        shadow_margin=0.22 if accepted else None,
+        shadow_confidence=shadow_confidence if accepted else None,
+        shadow_margin=shadow_margin if accepted else None,
         shadow_reason_codes=("shadow_accepted",) if accepted else (),
         shadow_agrees=False if accepted else None,
         _generate_checksum=True,
     )
+
+
+def _legacy_v1_integer_score_checksum(
+    decision: StoredIntentDecision,
+) -> str:
+    payload = decision.canonical_payload()
+    for field_name in ("confidence", "margin"):
+        value = payload[field_name]
+        if type(value) is float and value.is_integer():
+            payload[field_name] = int(value)
+    shadow = payload["shadow"]
+    if type(shadow) is dict:
+        for field_name in ("confidence", "margin"):
+            value = shadow[field_name]
+            if type(value) is float and value.is_integer():
+                shadow[field_name] = int(value)
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _source_with_intents(path: Path, seeds: str = "a") -> Path:
@@ -675,8 +704,13 @@ def _prepared_plan_row() -> PreparedImportRow:
 def _prepared_intent_row(
     *,
     status: IntentStatus = IntentStatus.ACCEPTED,
+    integer_scores: bool = False,
 ) -> PreparedImportRow:
-    decision = _decision("a", status=status)
+    decision = _decision(
+        "a",
+        status=status,
+        integer_scores=integer_scores,
+    )
     shadow = decision.shadow_payload()
     columns = (
         "request_key",
@@ -876,6 +910,73 @@ def test_refusal_import_rejects_json_null_for_nullable_shadow() -> None:
             "m4_intent_decisions",
             (expected,),
         )
+
+
+def test_legacy_v1_integer_score_row_imports_without_checksum_rewrite(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "source.sqlite3"
+    repository = SQLiteM4Repository(source)
+    repository.initialize()
+    candidate = _decision("a", integer_scores=True)
+    repository.insert_or_get_intent_decision(candidate)
+    legacy_checksum = _legacy_v1_integer_score_checksum(candidate)
+    assert legacy_checksum != candidate.payload_checksum
+    legacy_shadow = candidate.shadow_payload()
+    assert legacy_shadow is not None
+    legacy_shadow = {
+        **legacy_shadow,
+        "confidence": 1,
+        "margin": 0,
+    }
+    legacy_shadow_json = json.dumps(
+        legacy_shadow,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    connection = __import__("sqlite3").connect(source)
+    try:
+        connection.execute(
+            """
+            UPDATE m4_intent_decisions
+            SET payload_checksum = ?, shadow_json = ?
+            WHERE request_key = ?
+            """,
+            (legacy_checksum, legacy_shadow_json, candidate.request_key),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+    expected = _prepared_intent_row(integer_scores=True)
+    selected = dict(zip(expected.columns, expected.values, strict=True))
+    selected["payload_checksum"] = legacy_checksum
+    selected["reason_codes_json"] = json.loads(
+        selected["reason_codes_json"]
+    )
+    selected["shadow_json"] = json.loads(legacy_shadow_json)
+    selected["created_at"] = datetime.fromisoformat(selected["created_at"])
+    selected["_shadow_json_is_sql_null"] = False
+    postgres = _FakePostgresConnection(selected)
+
+    report = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=PostgresImportDestination(_FakePool(postgres)),
+    ).run(mode="apply", batch_size=1)
+
+    intent_report = next(
+        table for table in report.tables if table.table == "m4_intent_decisions"
+    )
+    assert intent_report.source_count == intent_report.verified_count == 1
+    insert_parameters = next(
+        parameters
+        for statement, parameters in postgres.executed
+        if statement.lstrip().startswith(
+            "INSERT INTO m4_intent_decisions"
+        )
+    )
+    assert insert_parameters[7:9] == (1.0, 0.0)
+    assert insert_parameters[13] == legacy_checksum
 
 
 def test_cli_defaults_to_dry_run_without_database_url(

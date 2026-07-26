@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -83,6 +85,30 @@ def _decision(
         shadow_agrees=False if accepted else None,
         _generate_checksum=True,
     )
+
+
+def _legacy_v1_integer_score_checksum(
+    decision: StoredIntentDecision,
+) -> str:
+    payload = decision.canonical_payload()
+    for field_name in ("confidence", "margin"):
+        value = payload[field_name]
+        if type(value) is float and value.is_integer():
+            payload[field_name] = int(value)
+    shadow = payload["shadow"]
+    if type(shadow) is dict:
+        for field_name in ("confidence", "margin"):
+            value = shadow[field_name]
+            if type(value) is float and value.is_integer():
+                shadow[field_name] = int(value)
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 class _Result:
@@ -455,6 +481,26 @@ def test_intent_integer_scores_survive_double_precision_readback() -> None:
     assert stored.payload_checksum == decision.payload_checksum
     assert type(database.intent_rows_by_key[decision.request_key]["confidence"]) is float
     assert type(database.intent_rows_by_key[decision.request_key]["margin"]) is float
+
+
+def test_intent_reads_legacy_v1_checksum_after_double_precision_coercion() -> None:
+    module = _repository_module()
+    database = _FakeM4Database()
+    repository = module.PostgresM4Repository(_FakePool(database))
+    decision = _decision(integer_scores=True)
+    repository.insert_or_get_intent_decision(decision)
+    legacy_checksum = _legacy_v1_integer_score_checksum(decision)
+    assert legacy_checksum != decision.payload_checksum
+    database.intent_rows_by_key[decision.request_key]["payload_checksum"] = (
+        legacy_checksum
+    )
+
+    restored = repository.get_intent_decision(decision.request_key)
+
+    assert restored is not None
+    assert restored.payload_checksum == legacy_checksum
+    assert restored.confidence == 1.0
+    assert restored.margin == 0.0
 
 
 @pytest.mark.parametrize(
