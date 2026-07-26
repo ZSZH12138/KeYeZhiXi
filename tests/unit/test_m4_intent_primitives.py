@@ -6,12 +6,14 @@ import pytest
 
 from course_insight.modules.m4_task_orchestration.intent import (
     IntentPrediction,
+    IntentStatus,
 )
 from course_insight.modules.m4_task_orchestration.intent_identity import (
     build_intent_request_identity,
     input_checksum,
 )
 from course_insight.modules.m4_task_orchestration.intent_policy import (
+    IntentDecisionOutcome,
     IntentPolicy,
 )
 from course_insight.modules.m4_task_orchestration.intent_rules import (
@@ -37,6 +39,37 @@ def test_intent_prediction_is_frozen_and_rejects_unsupported_labels() -> None:
             adapter_id="fixture",
             adapter_version="1",
         )
+
+
+def test_reason_codes_are_recursively_immutable_values() -> None:
+    prediction_codes = ["adapter_reason"]
+    outcome_codes = ["policy_reason"]
+    prediction = IntentPrediction(
+        label="qa",
+        confidence=0.89,
+        margin=0.21,
+        status=IntentStatus.ACCEPTED,
+        adapter_id="fixture",
+        adapter_version="1",
+        reason_codes=prediction_codes,  # type: ignore[arg-type]
+    )
+    outcome = IntentDecisionOutcome(
+        label="qa",
+        status=IntentStatus.ACCEPTED,
+        reason_codes=outcome_codes,  # type: ignore[arg-type]
+    )
+
+    prediction_codes.append("changed_after_construction")
+    outcome_codes.append("changed_after_construction")
+
+    assert prediction.reason_codes == ("adapter_reason",)
+    assert outcome.reason_codes == ("policy_reason",)
+    assert isinstance(prediction.reason_codes, tuple)
+    assert isinstance(outcome.reason_codes, tuple)
+    with pytest.raises(AttributeError):
+        prediction.reason_codes.append("mutate")  # type: ignore[attr-defined]
+    with pytest.raises(AttributeError):
+        outcome.reason_codes.append("mutate")  # type: ignore[attr-defined]
 
 
 def test_private_request_identity_separates_hint_and_normalized_text() -> None:

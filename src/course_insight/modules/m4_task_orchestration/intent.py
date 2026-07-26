@@ -34,6 +34,11 @@ class IntentPrediction:
     reason_codes: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "reason_codes",
+            _normalize_reason_codes(self.reason_codes),
+        )
         if not isinstance(self.status, IntentStatus):
             raise ValueError("status must be an IntentStatus")
         if self.label is not None and self.label not in _SUPPORTED_INTENT_LABELS:
@@ -46,11 +51,6 @@ class IntentPrediction:
         _validate_probability("margin", self.margin)
         _validate_nonblank("adapter_id", self.adapter_id)
         _validate_nonblank("adapter_version", self.adapter_version)
-        if any(
-            not isinstance(code, str) or not code.strip()
-            for code in self.reason_codes
-        ):
-            raise ValueError("reason codes must be nonblank strings")
 
     @classmethod
     def accepted(
@@ -119,3 +119,12 @@ def _validate_probability(name: str, value: float) -> None:
 def _validate_nonblank(name: str, value: str) -> None:
     if not isinstance(value, str) or not value.strip():
         raise ValueError(f"{name} must not be blank")
+
+
+def _normalize_reason_codes(reason_codes: object) -> tuple[str, ...]:
+    if not isinstance(reason_codes, (list, tuple)):
+        raise ValueError("reason codes must be a list or tuple of strings")
+    normalized = tuple(reason_codes)
+    if any(not isinstance(code, str) or not code.strip() for code in normalized):
+        raise ValueError("reason codes must be nonblank strings")
+    return normalized

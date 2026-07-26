@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from course_insight.modules.m4_task_orchestration.intent import (
     IntentPrediction,
     IntentStatus,
+    _normalize_reason_codes,
 )
 
 
@@ -17,6 +18,13 @@ class IntentDecisionOutcome:
     label: str | None
     status: IntentStatus
     reason_codes: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(
+            self,
+            "reason_codes",
+            _normalize_reason_codes(self.reason_codes),
+        )
 
 
 @dataclass(frozen=True, slots=True)
