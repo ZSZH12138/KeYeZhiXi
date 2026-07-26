@@ -32,6 +32,9 @@
   runtime snapshot 与独立 leased outbox Worker；
 - SQLite/PostgreSQL 可切换的 M0、M4—M9 持久化与显式
   SQLite→PostgreSQL 导入器；
+- M4 私有意图 adapter 的规则、shadow、active 三阶段运行方式；公开 `TaskPlan`
+  契约与八字段业务身份保持不变，运维边界见
+  [M4 意图运维说明](docs/m4_intent_operations.md)；
 - SQLite 迁移、幂等事件、原子 JSON 快照和 Schema 导出。
 
 ## 快速开始：独立 Anaconda 环境
@@ -106,7 +109,7 @@ python -m course_insight.cli export-schemas
 | [M1](src/course_insight/modules/m1_course_governance/README.md) | 谢 | 授权、来源版本、确定性分块 | 课程 MD、元数据 JSON、授权 CSV | `CoursePackage` | M2、M3 |
 | [M2](src/course_insight/modules/m2_evidence_retrieval/README.md) | 谢 | RAG；词法/pgvector 索引与审计 | M1 `CoursePackage`；M6/M8 `EvidenceQuery`；检索策略 | `EvidenceIndexRef`、`EvidenceBundle`、`RetrievalAudit` | M7、M9 |
 | [M3](src/course_insight/modules/m3_knowledge_bundle/README.md) | 谢 | 知识、题卡、量规、蓝图、Q 矩阵和标定依据 | M1 `CoursePackage`；教师确认 JSON | `KnowledgeBundle` | M4、M5、M8、M9 |
-| [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务识别、蓝图选择、引用冻结和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
+| [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务识别、私有可重放意图决策、蓝图选择、引用冻结和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
 | [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`CognitiveDiagnosisResult`、`KnowledgeTraceSnapshot`、`LearningModelRun` | M6、M9 |
 | [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 确定性状态机；证据门槛与会话幂等 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7 |
 | [M7](src/course_insight/modules/m7_local_model/README.md) | 冯 | 量规评分、学生反馈与 DeepSeek API 边界 | M8 scoring task；M6 feedback task；M2 evidence | `RubricScoringResult`、`StudentFeedbackPackage`、`LLMGenerationResult` | M8、M0 |
@@ -591,6 +594,7 @@ Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整�
 | `m2_evidence_indexes` | M2 | index_id + index_version |
 | `m3_knowledge_bundles` | M3 | knowledge_bundle_id + bundle_version |
 | `m4_task_plans` | M4 | task_id、idempotency_key |
+| `m4_intent_decisions` | M4 私有审计 | request_key、输入 checksum、决策/影子元数据；无原始学生文本 |
 | `m5_learner_states` | M5 | course_id + class_id + learner_id + state_version |
 | `m5_class_states` | M5 | course_id + class_id + state_version |
 | `m5_state_updates` | M5 | attempt_id + state_version |
@@ -654,7 +658,7 @@ M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、Deep
 | M1 | 仅固定本地文本解析与段落切分 | 在 parser registry 后增加可替换解析器 |
 | M2 | 词法匹配基线；pgvector 逻辑索引/审计为 `empty` | 实现 embedding 适配器、pgvector 迁移/重建与检索评估 |
 | M3 | 只接受教师确认 JSON，不自动抽取知识 | schema validator 后的教师审核工作流 |
-| M4 | 五类确定性规则识别、显式蓝图映射、SHA-256 幂等身份和 SQLite 原子复用，不含意图模型 | 可替换意图 adapter，但保持 `TaskPlan` 和八字段业务身份 |
+| M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 84 个公开契约、`TaskPlan` 和八字段业务身份 |
 | M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
 | M6 | 8 条合法迁移、确定性目标/动作、证据门槛、SHA-256 身份，以及 SQLite 决策重放、会话恢复和并发控制；不做策略学习 | 可在保持公共契约和审计身份不变的前提下，引入经验证的版本化策略适配器 |
 | M7 | `PlaceholderRubricAdapter` 未配置时抛出 `MODEL_ADAPTER_UNCONFIGURED`；DeepSeek 适配器返回 `empty` | 安全、超时、限流和输出校验完成后在 M7 启用 DeepSeek API |

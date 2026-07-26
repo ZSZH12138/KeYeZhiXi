@@ -2,7 +2,7 @@
 
 ## 结论先行
 
-截至 `2026-07-25`：
+截至 `2026-07-26`：
 
 - PostgreSQL 仓储、schema migration、SQLite→PostgreSQL 导入器已在代码中实现。
 - 本文档不声称这些能力已经在真实 PostgreSQL 环境中完成联调或验收。
@@ -15,7 +15,7 @@
   - `pg_advisory_xact_lock`
   - `schema_migrations` 校验
 - `src/course_insight/infrastructure/postgresql/migrations/*.sql`
-  - 当前 bundled schema version 为 `9`
+  - 当前 bundled schema version 为 `10`
   - v8 为 `m0_assessment_runs` 增加同一 `paper_id` 只允许一个
     `status <> completed` review 的部分唯一索引（包含 failed）；相同 operation
     可重放，只有完成当前 review 后才允许新的 review operation
@@ -26,6 +26,9 @@
     TaskPlan 锚点和完整的新依赖形状全部一致才会 CAS 接管。部分填充行、
     `state_inputs_frozen` 旧行，以及 state checkpoint 已越过但缺少
     `state_version` 的行不会被猜测修复
+  - v10 新增 `m4_intent_decisions`：以 `request_key` 唯一保存 M4 私有意图决定、
+    输入 SHA-256、adapter/policy 元数据、原因码、可选 shadow JSON、UTC 时间和
+    payload checksum。该表没有学生原文列；公开 `TaskPlan` 和既有 M4 表不扩字段。
 - `src/course_insight/infrastructure/postgresql/sqlite_import.py`
   - 显式、可恢复、批量提交的导入编排
 - `src/course_insight/infrastructure/postgresql/sqlite_import_cli.py`
@@ -76,6 +79,7 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 - `m0_assessment_runs`
 - `m0_learning_events`
 - `m4_task_plans`
+- `m4_intent_decisions`
 - `m5_state_updates`
 - `m5_class_states`
 - `m5_learner_states`
