@@ -6,6 +6,19 @@
 
 **Architecture:** `M4TaskOrchestrationService.create_task_plan(...)` keeps its public signature and resolves intent in this order: exact persisted decision, legal hint, unambiguous high-precision rule, accepted active-model prediction, conflict-aware legacy fallback, then recoverable `UNSUPPORTED_TASK`. The private intent request key is the approved conflict fix: the six context fields from the specification plus normalized `task_type_hint` plus SHA-256 of normalized text, while TaskPlan identity remains the existing eight fields. Optional model code is lazy-loaded behind an immutable adapter protocol; rules mode remains the default and imports without the optional dependencies.
 
+> **Final-review amendment (implemented 2026-07-27):** The original task
+> sketches below record the initial TDD checkpoints. The final implementation
+> additionally enforces the uploaded specification's shared
+> `m4-text-normalization-v1`, exact five-task immutable score vectors,
+> governed `fallback_to_rules`/`fail_closed` behavior, runtime-relative
+> `model_ref` plus external model ID/version/SHA-256 pins, the eight-field
+> governed JSONL row format, five-task macro-F1 with separate OOS/selective
+> metrics, and durable SQLite-to-PostgreSQL checkpoints. Current callable
+> arguments and operator commands are documented in
+> `docs/m4_intent_operations.md` and `docs/postgresql_migration.md`; earlier
+> `model_dir` and four-field dataset snippets in this historical plan are not
+> the final runtime interface.
+
 **Tech Stack:** Python 3.12, frozen dataclasses, Pydantic v2 settings, SQLite, PostgreSQL/psycopg 3, scikit-learn character TF-IDF and logistic regression, joblib, JSONL, pytest/pytest-cov.
 
 ## Global Constraints
