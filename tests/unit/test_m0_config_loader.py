@@ -4,9 +4,11 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings
 
 from course_insight.infrastructure.config import ConfigurationError
+from course_insight.infrastructure.config import IntentSettings
 from course_insight.infrastructure.config import PlatformSettings
 from course_insight.infrastructure.config import load_platform_settings
 
@@ -14,6 +16,131 @@ from course_insight.infrastructure.config import load_platform_settings
 def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def test_intent_defaults_are_rules_only(tmp_path: Path) -> None:
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=None,
+        dotenv_path=None,
+        environment={},
+    )
+
+    assert settings.intent.mode == "rules"
+    assert settings.intent.backend == "none"
+    assert settings.intent.model_dir is None
+    assert settings.intent.min_confidence == 0.70
+    assert settings.intent.min_margin == 0.10
+    assert settings.intent.policy_version == "m4-intent-policy-v1"
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"mode": "active", "backend": "none"},
+        {"mode": "shadow", "backend": "sklearn", "model_dir": None},
+        {"mode": "rules", "backend": "sklearn", "model_dir": "model"},
+        {"mode": "rules", "backend": "none", "model_dir": "model"},
+        {"min_confidence": float("nan")},
+        {"min_margin": 1.01},
+        {"policy_version": "   "},
+    ],
+)
+def test_invalid_intent_settings_fail_closed(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises((ValidationError, ConfigurationError)):
+        IntentSettings(**overrides)
+
+
+@pytest.mark.parametrize("threshold", [0.0, 1.0])
+def test_intent_threshold_boundaries_are_valid(threshold: float) -> None:
+    settings = IntentSettings(
+        min_confidence=threshold,
+        min_margin=threshold,
+        policy_version="  governed-policy-v2  ",
+    )
+
+    assert settings.min_confidence == threshold
+    assert settings.min_margin == threshold
+    assert settings.policy_version == "governed-policy-v2"
+
+
+def test_intent_nested_environment_overrides_and_relative_model_path(
+    tmp_path: Path,
+) -> None:
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=None,
+        dotenv_path=None,
+        environment={
+            "COURSE_INSIGHT_CONFIG_DIR": "governance",
+            "COURSE_INSIGHT_INTENT__MODE": "active",
+            "COURSE_INSIGHT_INTENT__BACKEND": "sklearn",
+            "COURSE_INSIGHT_INTENT__MODEL_DIR": "intent-model-v2",
+            "COURSE_INSIGHT_INTENT__MIN_CONFIDENCE": "0.83",
+            "COURSE_INSIGHT_INTENT__MIN_MARGIN": "0.24",
+            "COURSE_INSIGHT_INTENT__POLICY_VERSION": " policy-v2 ",
+        },
+    )
+
+    assert settings.intent.mode == "active"
+    assert settings.intent.backend == "sklearn"
+    assert settings.intent.model_dir == (
+        tmp_path / "governance" / "intent-model-v2"
+    ).resolve()
+    assert settings.intent.min_confidence == 0.83
+    assert settings.intent.min_margin == 0.24
+    assert settings.intent.policy_version == "policy-v2"
+
+
+def test_intent_file_settings_resolve_model_path_from_config_dir(
+    tmp_path: Path,
+) -> None:
+    app_json = tmp_path / "config" / "app.json"
+    _write_json(
+        app_json,
+        {
+            "config_dir": "deployment-config",
+            "intent": {
+                "mode": "shadow",
+                "backend": "sklearn",
+                "model_dir": "models/intent",
+            },
+        },
+    )
+
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=app_json,
+        dotenv_path=None,
+        environment={},
+    )
+
+    assert settings.intent.model_dir == (
+        tmp_path / "deployment-config" / "models" / "intent"
+    ).resolve()
+
+
+def test_relative_intent_model_path_cannot_escape_config_dir(
+    tmp_path: Path,
+) -> None:
+    private_model_dir = tmp_path / "private-model"
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_platform_settings(
+            project_root=tmp_path,
+            app_json_path=None,
+            dotenv_path=None,
+            environment={
+                "COURSE_INSIGHT_INTENT__MODE": "active",
+                "COURSE_INSIGHT_INTENT__BACKEND": "sklearn",
+                "COURSE_INSIGHT_INTENT__MODEL_DIR": "../private-model",
+            },
+        )
+
+    assert captured.value.fields == ("configuration",)
+    assert str(private_model_dir) not in str(captured.value)
 
 
 def test_configuration_sources_use_deterministic_field_level_precedence(

@@ -32,6 +32,7 @@ from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.platform import ActorContext
 from course_insight.infrastructure.config import (
     DatabaseSettings,
+    IntentSettings,
     LoggingSettings,
     PlatformSettings,
 )
@@ -68,16 +69,25 @@ from course_insight.modules.m0_platform.outbox_worker import OutboxWorker
 from course_insight.modules.m2_evidence_retrieval.stubs import (
     M2EvidenceRetrievalServiceStub,
 )
+from course_insight.modules.m4_task_orchestration import sklearn_adapter
 from course_insight.modules.m4_task_orchestration.intent import IntentStatus
 from course_insight.modules.m4_task_orchestration.intent_service import (
     StoredIntentDecision,
+)
+from course_insight.modules.m4_task_orchestration.sklearn_adapter import (
+    IntentArtifactError,
 )
 
 
 NOW = datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc)
 
 
-def _settings(tmp_path: Path, *, backend: str = "sqlite") -> PlatformSettings:
+def _settings(
+    tmp_path: Path,
+    *,
+    backend: str = "sqlite",
+    intent: IntentSettings | None = None,
+) -> PlatformSettings:
     database_url = (
         SecretStr("postgresql://user:password@db.invalid/course_insight")
         if backend == "postgresql"
@@ -94,6 +104,7 @@ def _settings(tmp_path: Path, *, backend: str = "sqlite") -> PlatformSettings:
             url=database_url,
         ),
         logging=LoggingSettings(directory=runtime_dir / "logs"),
+        intent=IntentSettings() if intent is None else intent,
     )
 
 
@@ -233,6 +244,160 @@ class _FailingM2Repository:
     ) -> EvidenceIndexRef | None:
         del index_id, index_version
         return None
+
+
+class _IntentAdapterSentinel:
+    adapter_id = "factory-adapter"
+    adapter_version = "factory-adapter-v1"
+
+    @staticmethod
+    def predict(text: str) -> object:
+        del text
+        raise AssertionError("factory test does not perform prediction")
+
+
+def test_rules_factory_never_loads_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sklearn_adapter,
+        "load_sklearn_intent_adapter",
+        lambda path: pytest.fail(f"rules mode loaded model: {path.name}"),
+    )
+
+    app = build_application(_settings(tmp_path))
+    try:
+        assert app.m4_service is not None
+        assert app.m4_service._intent_service is not None  # noqa: SLF001
+        assert app.m4_service._intent_service._mode == "rules"  # noqa: SLF001
+        assert app.m4_service._intent_service._adapter is None  # noqa: SLF001
+    finally:
+        app.close()
+
+
+@pytest.mark.parametrize("mode", ["shadow", "active"])
+def test_model_factory_loads_configured_adapter_and_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    model_dir = (tmp_path / "config" / "intent-model").resolve()
+    adapter = _IntentAdapterSentinel()
+    calls: list[Path] = []
+    monkeypatch.setattr(
+        sklearn_adapter,
+        "load_sklearn_intent_adapter",
+        lambda path: calls.append(path) or adapter,
+    )
+    settings = _settings(
+        tmp_path,
+        intent=IntentSettings(
+            mode=mode,
+            backend="sklearn",
+            model_dir=model_dir,
+            min_confidence=0.82,
+            min_margin=0.23,
+            policy_version="factory-policy-v2",
+        ),
+    )
+
+    app = build_application(settings)
+    try:
+        intent_service = app.m4_service._intent_service  # noqa: SLF001
+        assert calls == [model_dir]
+        assert intent_service is not None
+        assert intent_service.repository is app.m4_service._repository  # noqa: SLF001
+        assert intent_service._mode == mode  # noqa: SLF001
+        assert intent_service._adapter is adapter  # noqa: SLF001
+        assert intent_service._policy.min_confidence == 0.82  # noqa: SLF001
+        assert intent_service._policy.min_margin == 0.23  # noqa: SLF001
+        assert intent_service._policy_version == "factory-policy-v2"  # noqa: SLF001
+    finally:
+        app.close()
+
+
+def test_model_factory_uses_injected_m4_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _RepositorySentinel()
+    adapter = _IntentAdapterSentinel()
+    monkeypatch.setattr(
+        sklearn_adapter,
+        "load_sklearn_intent_adapter",
+        lambda path: adapter,
+    )
+    settings = _settings(
+        tmp_path,
+        intent=IntentSettings(
+            mode="active",
+            backend="sklearn",
+            model_dir=(tmp_path / "config" / "intent-model").resolve(),
+        ),
+    )
+
+    app = build_application(
+        settings,
+        repositories=RepositoryOverrides(m4=repository),
+    )
+    try:
+        assert app.m4_service._repository is repository  # noqa: SLF001
+        assert app.m4_service._intent_service.repository is repository  # noqa: SLF001
+    finally:
+        app.close()
+
+
+def test_m4_service_override_avoids_model_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacement = _RepositorySentinel()
+    monkeypatch.setattr(
+        sklearn_adapter,
+        "load_sklearn_intent_adapter",
+        lambda path: pytest.fail(f"discarded service loaded: {path.name}"),
+    )
+    settings = _settings(
+        tmp_path,
+        intent=IntentSettings(
+            mode="active",
+            backend="sklearn",
+            model_dir=(tmp_path / "config" / "intent-model").resolve(),
+        ),
+    )
+
+    app = build_application(
+        settings,
+        services=ServiceOverrides(m4=replacement),  # type: ignore[arg-type]
+    )
+    try:
+        assert app.m4_service is replacement
+    finally:
+        app.close()
+
+
+@pytest.mark.parametrize("mode", ["shadow", "active"])
+def test_unreadable_model_artifact_fails_closed_without_path_leak(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    private_model_dir = (
+        tmp_path / "private-deployment" / "missing-intent-model"
+    ).resolve()
+    settings = _settings(
+        tmp_path,
+        intent=IntentSettings(
+            mode=mode,
+            backend="sklearn",
+            model_dir=private_model_dir,
+        ),
+    )
+
+    with pytest.raises(IntentArtifactError) as captured:
+        build_application(settings)
+
+    assert str(private_model_dir) not in str(captured.value)
 
 
 def test_m0_legacy_constructor_and_keyword_repository_share_one_identity(

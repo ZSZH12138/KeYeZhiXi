@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from pathlib import Path
-from typing import Annotated, Literal, Self
+from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
     BaseModel,
@@ -191,6 +192,39 @@ class SecuritySettings(_FrozenModel):
         return self
 
 
+class IntentSettings(_FrozenModel):
+    """Administrator-controlled M4 intent runtime configuration."""
+
+    mode: Literal["rules", "shadow", "active"] = "rules"
+    backend: Literal["none", "sklearn"] = "none"
+    model_dir: Path | None = None
+    min_confidence: Annotated[FiniteFloat, Field(ge=0, le=1)] = 0.70
+    min_margin: Annotated[FiniteFloat, Field(ge=0, le=1)] = 0.10
+    policy_version: str = Field(
+        default="m4-intent-policy-v1",
+        min_length=1,
+    )
+
+    @field_validator("policy_version", mode="before")
+    @classmethod
+    def _normalize_policy_version(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @model_validator(mode="after")
+    def _validate_runtime_combination(self) -> Self:
+        if self.mode == "rules":
+            if self.backend != "none" or self.model_dir is not None:
+                raise ValueError(
+                    "rules mode requires no backend or model directory"
+                )
+            return self
+        if self.backend != "sklearn" or self.model_dir is None:
+            raise ValueError(
+                "model-backed intent modes require sklearn and model_dir"
+            )
+        return self
+
+
 class PlatformSettings(BaseSettings):
     """Complete immutable settings assembled by the explicit loader."""
 
@@ -210,6 +244,63 @@ class PlatformSettings(BaseSettings):
     outbox: OutboxSettings = Field(default_factory=OutboxSettings)
     web: WebSettings = Field(default_factory=WebSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    intent: IntentSettings = Field(default_factory=IntentSettings)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _resolve_intent_model_dir(cls, value: Any) -> Any:
+        if not isinstance(value, Mapping):
+            return value
+        config_dir = value.get("config_dir")
+        intent_value = value.get("intent")
+        if config_dir is None or intent_value is None:
+            return value
+        if isinstance(intent_value, IntentSettings):
+            model_dir = intent_value.model_dir
+            if model_dir is None or model_dir.is_absolute():
+                return value
+            normalized_intent: object = intent_value.model_copy(
+                update={
+                    "model_dir": cls._bounded_intent_model_dir(
+                        config_dir,
+                        model_dir,
+                    )
+                }
+            )
+        elif isinstance(intent_value, Mapping):
+            model_dir_value = intent_value.get("model_dir")
+            if model_dir_value is None:
+                return value
+            try:
+                model_dir = Path(model_dir_value)
+                config_path = Path(config_dir)
+            except (TypeError, ValueError):
+                return value
+            if model_dir.is_absolute():
+                return value
+            normalized_intent = {
+                **intent_value,
+                "model_dir": cls._bounded_intent_model_dir(
+                    config_path,
+                    model_dir,
+                ),
+            }
+        else:
+            return value
+        return {**value, "intent": normalized_intent}
+
+    @staticmethod
+    def _bounded_intent_model_dir(
+        config_dir: object,
+        model_dir: Path,
+    ) -> Path:
+        config_root = Path(config_dir).resolve()
+        resolved = (config_root / model_dir).resolve()
+        if not resolved.is_relative_to(config_root):
+            raise ValueError(
+                "relative intent model_dir must remain within config_dir"
+            )
+        return resolved
 
     @model_validator(mode="after")
     def _validate_production_security(self) -> Self:

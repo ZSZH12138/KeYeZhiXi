@@ -65,8 +65,16 @@ from course_insight.modules.m3_knowledge_bundle.repository import M3Repository
 from course_insight.modules.m3_knowledge_bundle.service import (
     M3KnowledgeBundleService,
 )
+from course_insight.modules.m4_task_orchestration import sklearn_adapter
 from course_insight.modules.m4_task_orchestration.identity import (
     canonical_idempotency_key,
+)
+from course_insight.modules.m4_task_orchestration.intent import IntentAdapter
+from course_insight.modules.m4_task_orchestration.intent_policy import (
+    IntentPolicy,
+)
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    M4IntentService,
 )
 from course_insight.modules.m4_task_orchestration.repository import M4Repository
 from course_insight.modules.m4_task_orchestration.service import (
@@ -336,10 +344,7 @@ def _assemble_application(
         else service_overrides.m3
     )
     m4 = (
-        M4TaskOrchestrationService(
-            durable["m4"],
-            canonical_idempotency_key,
-        )
+        _build_m4_service(settings, cast(M4Repository, durable["m4"]))
         if service_overrides.m4 is None
         else service_overrides.m4
     )
@@ -427,6 +432,35 @@ def _assemble_application(
         outbox_worker=resolved_outbox_worker,
         database_pool=durable_graph.database_pool,
         _owns_database_pool=durable_graph.owns_database_pool,
+    )
+
+
+def _build_m4_service(
+    settings: PlatformSettings,
+    repository: M4Repository,
+) -> M4TaskOrchestrationService:
+    intent_settings = settings.intent
+    adapter: IntentAdapter | None = None
+    if intent_settings.mode in {"shadow", "active"}:
+        model_dir = intent_settings.model_dir
+        if model_dir is None:
+            raise RuntimeError("validated intent model directory is unavailable")
+        adapter = sklearn_adapter.load_sklearn_intent_adapter(model_dir)
+    intent_service = M4IntentService(
+        repository,
+        canonical_idempotency_key,
+        mode=intent_settings.mode,
+        adapter=adapter,
+        policy=IntentPolicy(
+            intent_settings.min_confidence,
+            intent_settings.min_margin,
+        ),
+        policy_version=intent_settings.policy_version,
+    )
+    return M4TaskOrchestrationService(
+        repository,
+        canonical_idempotency_key,
+        intent_service=intent_service,
     )
 
 
