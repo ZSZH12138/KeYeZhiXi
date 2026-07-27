@@ -4,6 +4,7 @@ import importlib
 import sqlite3
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -1133,6 +1134,38 @@ def test_policy_observation_is_committed_with_decision_and_restored(
         assert connection.execute(
             "SELECT COUNT(*) FROM m6_policy_observations"
         ).fetchone()[0] == 1
+
+
+def test_policy_observation_rejects_embedded_decision_id_corruption(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+    _service(repository).decide_next_action(*_inputs(), None)
+    request_fingerprint = _only_request_fingerprint(database_path)
+    stored = repository.get_decision_by_request(request_fingerprint)
+    assert stored is not None
+    assert stored.policy_observation is not None
+    corrupt = replace(
+        stored.policy_observation,
+        decision_id="decision_corrupt",
+    )
+    with connect_sqlite(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE m6_policy_observations
+            SET payload = ?, payload_checksum = ?
+            WHERE decision_id = ?
+            """,
+            (
+                corrupt.canonical_json(),
+                corrupt.identity,
+                stored.decision_id,
+            ),
+        )
+
+    with pytest.raises(DomainError, match="TUTORING_POLICY_INTEGRITY_ERROR"):
+        repository.get_decision_by_request(request_fingerprint)
 
 
 def test_policy_observation_failure_rolls_back_decision_and_snapshots(

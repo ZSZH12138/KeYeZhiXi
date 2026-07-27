@@ -353,6 +353,31 @@ def _m0_side_effect_counts(database_path: Path) -> tuple[int, int]:
     return event_count, outbox_count
 
 
+def _frozen_m0_and_m6_policy_identity(
+    database_path: Path,
+) -> tuple[tuple[object, ...], dict[str, object]]:
+    with sqlite3.connect(database_path) as connection:
+        m0_row = connection.execute(
+            """
+            SELECT policy_id,
+                   adapter_id,
+                   adapter_version,
+                   artifact_sha256,
+                   feature_schema_version,
+                   action_space_version,
+                   gate_policy_version
+            FROM m0_assessment_runs
+            WHERE operation = 'submit'
+            """
+        ).fetchone()
+        m6_row = connection.execute(
+            "SELECT payload FROM m6_policy_executions"
+        ).fetchone()
+    assert m0_row is not None
+    assert m6_row is not None
+    return tuple(m0_row), json.loads(str(m6_row[0]))
+
+
 def _jsonl_events(path: Path) -> list[dict[str, object]]:
     return [
         json.loads(line)
@@ -419,6 +444,30 @@ def test_sqlite_web_golden_path_delivers_student_and_teacher_events(
         assert submitted.status_code == 302
 
         database_path = container.settings.database.sqlite_path
+        frozen_m0, private_m6 = _frozen_m0_and_m6_policy_identity(
+            database_path
+        )
+        assert frozen_m0 == (
+            private_m6["policy_id"],
+            private_m6["adapter_id"],
+            private_m6["adapter_version"],
+            private_m6["artifact_sha256"],
+            private_m6["feature_schema_version"],
+            private_m6["action_space_version"],
+            private_m6["gate_policy_version"],
+        )
+        assert set(private_m6) == {
+            "request_fingerprint",
+            "input_fingerprint",
+            "mode",
+            "policy_id",
+            "adapter_id",
+            "adapter_version",
+            "artifact_sha256",
+            "feature_schema_version",
+            "action_space_version",
+            "gate_policy_version",
+        }
         audit_path = (
             container.settings.runtime_dir
             / "audit"

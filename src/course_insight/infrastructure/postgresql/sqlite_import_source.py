@@ -480,10 +480,18 @@ def _validate_policy_identity(table: str, row: sqlite3.Row, record: Any) -> None
     elif table == "m6_policy_executions":
         checks = (
             ("request_fingerprint", record.request_fingerprint),
-            ("policy_execution_fingerprint", record.identity),
+            (
+                "policy_execution_fingerprint",
+                record.policy_execution_fingerprint,
+            ),
         )
     elif table == "m6_policy_observations":
         checks = (
+            *(
+                ()
+                if record.decision_id is None
+                else (("decision_id", record.decision_id),)
+            ),
             ("request_fingerprint", record.request_fingerprint),
             ("policy_execution_fingerprint", record.policy_execution_fingerprint),
         )

@@ -49,12 +49,32 @@ def reward_from_outcome(outcome: PolicyOutcome) -> PolicyRewardRecord:
             raise ValueError("computed reward must be finite") from error
         if not math.isfinite(value):
             raise ValueError("computed reward must be finite")
+    raw_outcome = (
+        {
+            "transfer_success": outcome.transfer_success,
+            "independent_correction_success": (
+                outcome.independent_correction_success
+            ),
+            "self_explanation_passed": outcome.self_explanation_passed,
+            "additional_hint_count": outcome.hint_count,
+            "additional_turn_count": outcome.additional_turn_count,
+            "loop_count": outcome.loop_count,
+            "teacher_review_escalated": outcome.teacher_review_escalated,
+            "safety_flag": outcome.safety_flag,
+            "outcome_event_ids": outcome.outcome_event_ids,
+            "outcome_watermark": outcome.outcome_watermark,
+            "observed_at": outcome.observed_at,
+        }
+        if outcome.has_audit_details
+        else {}
+    )
     return PolicyRewardRecord(
         policy_execution_fingerprint=outcome.policy_execution_fingerprint,
         outcome_identity=outcome.identity,
         status=outcome.status,
         reward=value,
         reward_version=REWARD_VERSION,
+        **raw_outcome,
     )
 
 

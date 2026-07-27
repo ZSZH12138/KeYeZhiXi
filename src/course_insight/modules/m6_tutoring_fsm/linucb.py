@@ -224,9 +224,19 @@ def select_with_epsilon(
         draw = _unit_draw(request_fingerprint)
         if draw < epsilon:
             selected_index = min(len(ordered) - 1, int((draw / epsilon) * len(ordered)))
-    propensity = 1.0
+    probabilities = {
+        candidate_id: (1.0 if index == winner else 0.0)
+        for index, candidate_id in enumerate(candidate_ids)
+    }
     if may_explore and epsilon > 0.0:
-        propensity = (1.0 - epsilon) + epsilon / len(ordered) if selected_index == winner else epsilon / len(ordered)
+        probabilities = {
+            candidate_id: (
+                (1.0 - epsilon) + epsilon / len(ordered)
+                if index == winner
+                else epsilon / len(ordered)
+            )
+            for index, candidate_id in enumerate(candidate_ids)
+        }
     selected_id = candidate_ids[selected_index]
     return PolicyDecision(
         request_fingerprint=request_fingerprint,
@@ -237,8 +247,10 @@ def select_with_epsilon(
             policy_id=policy_id,
             candidate_id=selected_id,
             score=normalized_scores[selected_id],
-            propensity=propensity,
+            propensity=probabilities[selected_id],
             uncertainty=normalized_uncertainties[selected_id],
+            action_probabilities=tuple(probabilities.items()),
+            model_scores=tuple(normalized_scores.items()),
         ),
     )
 

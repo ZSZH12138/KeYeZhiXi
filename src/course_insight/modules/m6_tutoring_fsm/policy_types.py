@@ -8,10 +8,12 @@ be reproduced without relying on process-local state.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
 from hashlib import sha256
 import json
 import math
 from pathlib import PurePosixPath, PureWindowsPath
+import re
 from typing import Any, ClassVar, Mapping
 
 from course_insight.modules.m6_tutoring_fsm.decision_policy import DecisionSignals
@@ -41,6 +43,13 @@ EVALUATION_SAFETY_REASONS: tuple[str, ...] = (
     "low_effective_sample_size",
     "poor_action_coverage",
     "reward_below_approval_threshold",
+)
+_SAFE_AUDIT_IDENTIFIER = re.compile(
+    r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
+)
+_SECRET_LIKE_AUDIT_IDENTIFIER = re.compile(
+    r"^(?:sk-(?:proj-)?|gh[opurs]_|xox[baprs]-|AKIA|AIza)",
+    re.IGNORECASE,
 )
 
 
@@ -149,6 +158,8 @@ class PolicyPrediction(_CanonicalIdentity):
     propensity: float
     uncertainty: float
     feature_schema_version: str = "m6-features-v1"
+    action_probabilities: object = None
+    model_scores: object = None
 
     def __post_init__(self) -> None:
         _require_nonblank(self.policy_id, "policy_id")
@@ -162,9 +173,50 @@ class PolicyPrediction(_CanonicalIdentity):
         object.__setattr__(self, "propensity", float(self.propensity))
         object.__setattr__(self, "uncertainty", float(self.uncertainty))
         _require_nonblank(self.feature_schema_version, "feature_schema_version")
+        if self.action_probabilities is None and self.model_scores is None:
+            return
+        if self.action_probabilities is None or self.model_scores is None:
+            raise ValueError(
+                "action_probabilities and model_scores must be supplied together"
+            )
+        probabilities = _normalize_action_measurements(
+            self.action_probabilities,
+            "action_probabilities",
+            probability=True,
+            allow_empty=False,
+        )
+        scores = _normalize_action_measurements(
+            self.model_scores,
+            "model_scores",
+            probability=False,
+            allow_empty=False,
+        )
+        if {key for key, _ in probabilities} != {key for key, _ in scores}:
+            raise ValueError(
+                "action_probabilities and model_scores must cover the same actions"
+            )
+        if self.candidate_id not in {key for key, _ in probabilities}:
+            raise ValueError("prediction candidate must have an action probability")
+        if not math.isclose(
+            sum(value for _, value in probabilities),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("action_probabilities must sum to one")
+        selected_probability = dict(probabilities)[self.candidate_id]
+        if not math.isclose(
+            selected_probability,
+            self.propensity,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("propensity must equal the selected action probability")
+        object.__setattr__(self, "action_probabilities", probabilities)
+        object.__setattr__(self, "model_scores", scores)
 
     def canonical_payload(self) -> Mapping[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "policy_id": self.policy_id,
             "candidate_id": self.candidate_id,
             "score": self.score,
@@ -172,6 +224,10 @@ class PolicyPrediction(_CanonicalIdentity):
             "uncertainty": self.uncertainty,
             "feature_schema_version": self.feature_schema_version,
         }
+        if self.action_probabilities is not None:
+            payload["action_probabilities"] = dict(self.action_probabilities)
+            payload["model_scores"] = dict(self.model_scores)
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -230,6 +286,7 @@ class PolicyExecutionRef(_CanonicalIdentity):
     feature_schema_version: str
     action_space_version: str
     gate_policy_version: str
+    input_fingerprint: str | None = None
 
     def __post_init__(self) -> None:
         _require_nonblank(self.request_fingerprint, "request_fingerprint")
@@ -245,13 +302,32 @@ class PolicyExecutionRef(_CanonicalIdentity):
             _require_nonblank(getattr(self, name), name)
         if self.artifact_sha256 is not None:
             _require_sha256(self.artifact_sha256, "artifact_sha256")
+        if self.input_fingerprint is not None:
+            _require_sha256(self.input_fingerprint, "input_fingerprint")
 
     @property
     def policy_execution_fingerprint(self) -> str:
-        return self.identity
+        if self.input_fingerprint is None:
+            return self.identity
+        ordered_identity = (
+            self.input_fingerprint,
+            self.adapter_id,
+            self.adapter_version,
+            self.artifact_sha256,
+            self.feature_schema_version,
+            self.action_space_version,
+            self.gate_policy_version,
+        )
+        payload = json.dumps(
+            ordered_identity,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+        return sha256(payload.encode("utf-8")).hexdigest()
 
     def canonical_payload(self) -> Mapping[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "request_fingerprint": self.request_fingerprint,
             "mode": self.mode,
             "policy_id": self.policy_id,
@@ -262,6 +338,9 @@ class PolicyExecutionRef(_CanonicalIdentity):
             "action_space_version": self.action_space_version,
             "gate_policy_version": self.gate_policy_version,
         }
+        if self.input_fingerprint is not None:
+            payload["input_fingerprint"] = self.input_fingerprint
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -366,6 +445,26 @@ class PolicyObservation(_CanonicalIdentity):
     candidate_ids: tuple[str, ...]
     selected_candidate_id: str
     propensity: float
+    decision_id: str | None = None
+    input_fingerprint: str | None = None
+    context_checksum: str | None = None
+    candidate_set_checksum: str | None = None
+    baseline_action_id: str | None = None
+    chosen_action_id: str | None = None
+    action_probabilities: object = None
+    model_scores: object = None
+    uncertainty: float | None = None
+    decision_source: str | None = None
+    shadow_action_id: str | None = None
+    reason_codes: object = None
+    policy_id: str | None = None
+    adapter_id: str | None = None
+    adapter_version: str | None = None
+    artifact_sha256: str | None = None
+    action_space_version: str | None = None
+    gate_policy_version: str | None = None
+    logging_policy_id: str | None = None
+    created_at: str | None = None
 
     def __post_init__(self) -> None:
         for name in (
@@ -380,9 +479,115 @@ class PolicyObservation(_CanonicalIdentity):
             raise ValueError("selected_candidate_id must be a candidate")
         _require_probability(self.propensity, "propensity")
         object.__setattr__(self, "propensity", float(self.propensity))
+        if self.decision_id is None:
+            rich_values = (
+                self.input_fingerprint,
+                self.context_checksum,
+                self.candidate_set_checksum,
+                self.baseline_action_id,
+                self.chosen_action_id,
+                self.action_probabilities,
+                self.model_scores,
+                self.uncertainty,
+                self.decision_source,
+                self.shadow_action_id,
+                self.reason_codes,
+                self.policy_id,
+                self.adapter_id,
+                self.adapter_version,
+                self.artifact_sha256,
+                self.action_space_version,
+                self.gate_policy_version,
+                self.logging_policy_id,
+                self.created_at,
+            )
+            if any(value is not None for value in rich_values):
+                raise ValueError("rich observation fields require decision_id")
+            return
+        for name in (
+            "decision_id",
+            "input_fingerprint",
+            "context_checksum",
+            "candidate_set_checksum",
+            "baseline_action_id",
+            "chosen_action_id",
+            "decision_source",
+            "policy_id",
+            "adapter_id",
+            "adapter_version",
+            "action_space_version",
+            "gate_policy_version",
+            "logging_policy_id",
+            "created_at",
+        ):
+            _require_nonblank(getattr(self, name), name)
+        _require_sha256(self.input_fingerprint, "input_fingerprint")
+        _require_sha256(self.context_checksum, "context_checksum")
+        _require_sha256(self.candidate_set_checksum, "candidate_set_checksum")
+        if self.artifact_sha256 is not None:
+            _require_sha256(self.artifact_sha256, "artifact_sha256")
+        _require_member(
+            self.decision_source,
+            ("rules", "shadow_baseline", "active_policy", "fallback"),
+            "decision_source",
+        )
+        if self.baseline_action_id not in self.candidate_ids:
+            raise ValueError("baseline_action_id must be a candidate")
+        if self.chosen_action_id not in self.candidate_ids:
+            raise ValueError("chosen_action_id must be a candidate")
+        if self.selected_candidate_id != self.chosen_action_id:
+            raise ValueError("selected_candidate_id must equal chosen_action_id")
+        if (
+            self.shadow_action_id is not None
+            and self.shadow_action_id not in self.candidate_ids
+        ):
+            raise ValueError("shadow_action_id must be a candidate")
+        probabilities = _normalize_action_measurements(
+            self.action_probabilities,
+            "action_probabilities",
+            probability=True,
+            allow_empty=False,
+        )
+        if {key for key, _ in probabilities} != set(self.candidate_ids):
+            raise ValueError("action_probabilities must cover every candidate")
+        if not math.isclose(
+            sum(value for _, value in probabilities),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("action_probabilities must sum to one")
+        if not math.isclose(
+            dict(probabilities)[self.chosen_action_id],
+            self.propensity,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("propensity must equal chosen action probability")
+        scores = _normalize_action_measurements(
+            self.model_scores,
+            "model_scores",
+            probability=False,
+            allow_empty=True,
+        )
+        if scores and {key for key, _ in scores} != set(self.candidate_ids):
+            raise ValueError("model_scores must cover every candidate or be empty")
+        if self.uncertainty is not None:
+            _require_finite(self.uncertainty, "uncertainty")
+            if self.uncertainty < 0.0:
+                raise ValueError("uncertainty must be non-negative")
+            object.__setattr__(self, "uncertainty", float(self.uncertainty))
+        reasons = _normalize_string_sequence(
+            () if self.reason_codes is None else self.reason_codes,
+            "reason_codes",
+        )
+        _require_timezone_string(self.created_at, "created_at")
+        object.__setattr__(self, "action_probabilities", probabilities)
+        object.__setattr__(self, "model_scores", scores)
+        object.__setattr__(self, "reason_codes", reasons)
 
     def canonical_payload(self) -> Mapping[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "policy_execution_fingerprint": self.policy_execution_fingerprint,
             "request_fingerprint": self.request_fingerprint,
             "feature_schema_version": self.feature_schema_version,
@@ -390,6 +595,32 @@ class PolicyObservation(_CanonicalIdentity):
             "selected_candidate_id": self.selected_candidate_id,
             "propensity": self.propensity,
         }
+        if self.decision_id is not None:
+            payload.update(
+                {
+                    "decision_id": self.decision_id,
+                    "input_fingerprint": self.input_fingerprint,
+                    "context_checksum": self.context_checksum,
+                    "candidate_set_checksum": self.candidate_set_checksum,
+                    "baseline_action_id": self.baseline_action_id,
+                    "chosen_action_id": self.chosen_action_id,
+                    "action_probabilities": dict(self.action_probabilities),
+                    "model_scores": dict(self.model_scores),
+                    "uncertainty": self.uncertainty,
+                    "decision_source": self.decision_source,
+                    "shadow_action_id": self.shadow_action_id,
+                    "reason_codes": list(self.reason_codes),
+                    "policy_id": self.policy_id,
+                    "adapter_id": self.adapter_id,
+                    "adapter_version": self.adapter_version,
+                    "artifact_sha256": self.artifact_sha256,
+                    "action_space_version": self.action_space_version,
+                    "gate_policy_version": self.gate_policy_version,
+                    "logging_policy_id": self.logging_policy_id,
+                    "created_at": self.created_at,
+                }
+            )
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -401,8 +632,21 @@ class PolicyOutcome(_CanonicalIdentity):
     transfer_success: float | None
     hint_count: int
     loop_count: int
+    independent_correction_success: bool | None = None
+    self_explanation_passed: bool | None = None
+    additional_turn_count: int | None = None
+    teacher_review_escalated: bool | None = None
+    safety_flag: bool | None = None
+    outcome_event_ids: object = None
+    outcome_watermark: str | None = None
+    observed_at: str | None = None
 
-    _STATUSES: ClassVar[tuple[str, ...]] = ("pending", "censored", "observed")
+    _STATUSES: ClassVar[tuple[str, ...]] = (
+        "pending",
+        "censored",
+        "observed",
+        "invalid",
+    )
 
     def __post_init__(self) -> None:
         _require_nonblank(
@@ -416,17 +660,95 @@ class PolicyOutcome(_CanonicalIdentity):
                 raise ValueError("observed outcome requires transfer_success")
             _require_probability(self.transfer_success, "transfer_success")
             object.__setattr__(self, "transfer_success", float(self.transfer_success))
-        elif self.transfer_success is not None:
+        elif self.status in {"pending", "censored"} and self.transfer_success is not None:
             raise ValueError("pending or censored outcome must not set transfer_success")
+        elif self.transfer_success is not None:
+            _require_probability(self.transfer_success, "transfer_success")
+            object.__setattr__(self, "transfer_success", float(self.transfer_success))
+        for name in (
+            "independent_correction_success",
+            "self_explanation_passed",
+            "teacher_review_escalated",
+            "safety_flag",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _require_bool(value, name)
+        if self.additional_turn_count is not None:
+            _require_nonnegative_int(
+                self.additional_turn_count,
+                "additional_turn_count",
+            )
+        if self.safety_flag is True and self.status != "invalid":
+            raise ValueError("safety_flag requires an invalid outcome")
+        if self.outcome_event_ids is not None:
+            object.__setattr__(
+                self,
+                "outcome_event_ids",
+                _normalize_audit_identifiers(
+                    self.outcome_event_ids,
+                    "outcome_event_ids",
+                ),
+            )
+        if self.outcome_watermark is not None:
+            _require_safe_audit_identifier(
+                self.outcome_watermark,
+                "outcome_watermark",
+            )
+        if self.observed_at is not None:
+            _require_timezone_string(self.observed_at, "observed_at")
+        if (
+            self.has_audit_details
+            and self.status in {"observed", "censored", "invalid"}
+            and self.observed_at is None
+        ):
+            raise ValueError("audited outcome requires timezone observed_at")
+
+    @property
+    def has_audit_details(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.independent_correction_success,
+                self.self_explanation_passed,
+                self.additional_turn_count,
+                self.teacher_review_escalated,
+                self.safety_flag,
+                self.outcome_event_ids,
+                self.outcome_watermark,
+                self.observed_at,
+            )
+        )
 
     def canonical_payload(self) -> Mapping[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "policy_execution_fingerprint": self.policy_execution_fingerprint,
             "status": self.status,
             "transfer_success": self.transfer_success,
             "hint_count": self.hint_count,
             "loop_count": self.loop_count,
         }
+        if self.has_audit_details:
+            payload.update(
+                {
+                    "independent_correction_success": (
+                        self.independent_correction_success
+                    ),
+                    "self_explanation_passed": self.self_explanation_passed,
+                    "additional_hint_count": self.hint_count,
+                    "additional_turn_count": self.additional_turn_count,
+                    "teacher_review_escalated": self.teacher_review_escalated,
+                    "safety_flag": self.safety_flag,
+                    "outcome_event_ids": (
+                        []
+                        if self.outcome_event_ids is None
+                        else list(self.outcome_event_ids)
+                    ),
+                    "outcome_watermark": self.outcome_watermark,
+                    "observed_at": self.observed_at,
+                }
+            )
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -438,13 +760,28 @@ class PolicyRewardRecord(_CanonicalIdentity):
     status: str
     reward: float | None
     reward_version: str = "m6-reward-v1"
+    transfer_success: float | None = None
+    independent_correction_success: bool | None = None
+    self_explanation_passed: bool | None = None
+    additional_hint_count: int | None = None
+    additional_turn_count: int | None = None
+    loop_count: int | None = None
+    teacher_review_escalated: bool | None = None
+    safety_flag: bool | None = None
+    outcome_event_ids: object = None
+    outcome_watermark: str | None = None
+    observed_at: str | None = None
 
     def __post_init__(self) -> None:
         _require_nonblank(
             self.policy_execution_fingerprint, "policy_execution_fingerprint"
         )
         _require_nonblank(self.outcome_identity, "outcome_identity")
-        _require_member(self.status, ("pending", "censored", "observed"), "status")
+        _require_member(
+            self.status,
+            ("pending", "censored", "observed", "invalid"),
+            "status",
+        )
         _require_nonblank(self.reward_version, "reward_version")
         if self.status == "observed":
             if self.reward is None:
@@ -452,16 +789,98 @@ class PolicyRewardRecord(_CanonicalIdentity):
             _require_finite(self.reward, "reward")
             object.__setattr__(self, "reward", float(self.reward))
         elif self.reward is not None:
-            raise ValueError("pending or censored reward record must not set reward")
+            raise ValueError(
+                "pending, censored, or invalid reward record must not set reward"
+            )
+        if self.transfer_success is not None:
+            _require_probability(self.transfer_success, "transfer_success")
+            object.__setattr__(self, "transfer_success", float(self.transfer_success))
+        for name in (
+            "independent_correction_success",
+            "self_explanation_passed",
+            "teacher_review_escalated",
+            "safety_flag",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _require_bool(value, name)
+        for name in (
+            "additional_hint_count",
+            "additional_turn_count",
+            "loop_count",
+        ):
+            value = getattr(self, name)
+            if value is not None:
+                _require_nonnegative_int(value, name)
+        if self.safety_flag is True and self.status != "invalid":
+            raise ValueError("safety_flag requires an invalid reward record")
+        if self.outcome_event_ids is not None:
+            object.__setattr__(
+                self,
+                "outcome_event_ids",
+                _normalize_audit_identifiers(
+                    self.outcome_event_ids,
+                    "outcome_event_ids",
+                ),
+            )
+        if self.outcome_watermark is not None:
+            _require_safe_audit_identifier(
+                self.outcome_watermark,
+                "outcome_watermark",
+            )
+        if self.observed_at is not None:
+            _require_timezone_string(self.observed_at, "observed_at")
 
     def canonical_payload(self) -> Mapping[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "policy_execution_fingerprint": self.policy_execution_fingerprint,
             "outcome_identity": self.outcome_identity,
             "status": self.status,
             "reward": self.reward,
             "reward_version": self.reward_version,
         }
+        if self.has_raw_outcome:
+            payload.update(
+                {
+                    "transfer_success": self.transfer_success,
+                    "independent_correction_success": (
+                        self.independent_correction_success
+                    ),
+                    "self_explanation_passed": self.self_explanation_passed,
+                    "additional_hint_count": self.additional_hint_count,
+                    "additional_turn_count": self.additional_turn_count,
+                    "loop_count": self.loop_count,
+                    "teacher_review_escalated": self.teacher_review_escalated,
+                    "safety_flag": self.safety_flag,
+                    "outcome_event_ids": (
+                        []
+                        if self.outcome_event_ids is None
+                        else list(self.outcome_event_ids)
+                    ),
+                    "outcome_watermark": self.outcome_watermark,
+                    "observed_at": self.observed_at,
+                }
+            )
+        return payload
+
+    @property
+    def has_raw_outcome(self) -> bool:
+        return any(
+            value is not None
+            for value in (
+                self.transfer_success,
+                self.independent_correction_success,
+                self.self_explanation_passed,
+                self.additional_hint_count,
+                self.additional_turn_count,
+                self.loop_count,
+                self.teacher_review_escalated,
+                self.safety_flag,
+                self.outcome_event_ids,
+                self.outcome_watermark,
+                self.observed_at,
+            )
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -780,6 +1199,69 @@ def _normalize_string_sequence(
     if len(normalized) != len(set(normalized)):
         raise ValueError(f"{field_name} must not contain duplicates")
     return tuple(sorted(normalized))
+
+
+def _normalize_audit_identifiers(
+    values: object,
+    field_name: str,
+) -> tuple[str, ...]:
+    normalized = _normalize_string_sequence(values, field_name)
+    for value in normalized:
+        _require_safe_audit_identifier(value, field_name)
+    return normalized
+
+
+def _require_safe_audit_identifier(
+    value: object,
+    field_name: str,
+) -> None:
+    if (
+        type(value) is not str
+        or _SAFE_AUDIT_IDENTIFIER.fullmatch(value) is None
+        or _SECRET_LIKE_AUDIT_IDENTIFIER.match(value) is not None
+    ):
+        raise ValueError(f"{field_name} must be a safe audit identifier")
+
+
+def _normalize_action_measurements(
+    values: object,
+    field_name: str,
+    *,
+    probability: bool,
+    allow_empty: bool,
+) -> tuple[tuple[str, float], ...]:
+    if isinstance(values, Mapping):
+        entries = tuple(values.items())
+    elif type(values) in {tuple, list}:
+        entries = tuple(values)
+    else:
+        raise ValueError(f"{field_name} must contain action values")
+    if not entries and not allow_empty:
+        raise ValueError(f"{field_name} must not be empty")
+    normalized: list[tuple[str, float]] = []
+    for entry in entries:
+        if type(entry) not in {tuple, list} or len(entry) != 2:
+            raise ValueError(f"{field_name} must contain action values")
+        action_id, value = entry
+        _require_nonblank(action_id, field_name)
+        if probability:
+            _require_probability(value, field_name)
+        else:
+            _require_finite(value, field_name)
+        normalized.append((str(action_id), float(value)))
+    if len({action_id for action_id, _ in normalized}) != len(normalized):
+        raise ValueError(f"{field_name} must not contain duplicate actions")
+    return tuple(normalized)
+
+
+def _require_timezone_string(value: object, field_name: str) -> None:
+    _require_nonblank(value, field_name)
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{field_name} must be an ISO-8601 timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must include a timezone")
 
 
 def _evaluation_slices_payload(

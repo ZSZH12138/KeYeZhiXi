@@ -109,26 +109,107 @@ def test_jsonl_export_has_an_exact_allowlist_and_no_raw_identity_or_text() -> No
     exported = canonical_jsonl((row,))
     payload = json.loads(exported)
 
+    required_fields = {
+        "decision_id",
+        "context",
+        "candidate_actions",
+        "chosen_action",
+        "propensity",
+        "reward",
+        "reward_status",
+        "policy_version",
+        "feature_schema_version",
+        "action_space_version",
+        "anonymous_group_key",
+        "occurred_at",
+    }
+    assert required_fields.issubset(EXPORT_FIELDS)
     assert set(payload) == set(EXPORT_FIELDS)
+    assert required_fields.issubset(payload)
     assert raw_group not in exported
     assert raw_session not in exported
     assert execution not in exported
     assert "request-" not in exported
-    assert len(payload["group_id"]) == 64
+    assert len(payload["anonymous_group_key"]) == 64
     assert len(payload["session_id"]) == 64
     assert exported == (
-        '{"candidate_actions":["action-a","action-b"],'
+        '{"action_space_version":"legacy-unknown",'
+        '"anonymous_group_key":"d7c98d760a51d0851a12322747314d43'
+        'e925a657f1fa39bd41d5bc5db5070725",'
+        '"candidate_actions":["action-a","action-b"],'
+        '"chosen_action":"action-a",'
+        '"context":{"context_checksum":"6bb81dcc2e35fa8bc1c4f9f2cd0905492'
+        'a659e219728dc05c39ccb148bac28c2","state":"S2"},'
+        '"decision_id":"d9da31be01c04e2c4373f5a77eec2874'
+        'f506bc41ec7b33e1b2d9dc97a41b152f",'
         '"direct_estimates":{"action-a":0.8,"action-b":0.2},'
-        '"event_time":10,"group_id":"d7c98d760a51d0851a12322747314d43'
-        'e925a657f1fa39bd41d5bc5db5070725","logging_propensity":0.5,'
-        '"reward":1.0,"selected_action":"action-a",'
+        '"event_time":10,"feature_schema_version":"m6-features-v1",'
+        '"occurred_at":"1970-01-01T00:00:10+00:00",'
+        '"policy_version":"legacy-unknown","propensity":0.5,"reward":1.0,'
+        '"reward_status":"observed",'
         '"session_id":"313c41bdbf50933fdf2cc287ce49296d4ef1d423bc6202c267'
         'aad1adfe6367f3","state":"S2",'
         '"target_propensities":{"action-a":0.75,"action-b":0.25}}'
     )
     assert dataset_identity((row,)) == (
-        "774a14186eba841449c7a4697375c234255546665fbd4fdabda3338b2b8174fb"
+        "44b6c6fc486f8f77ffe026e6d6a22644d8b77c65b804b37bdd79d4bc410c817d"
     )
+
+
+def test_shadow_export_uses_the_public_baseline_as_the_logging_action() -> None:
+    """Catch an unexecuted shadow action entering the offline logging column."""
+
+    observation = PolicyObservation(
+        policy_execution_fingerprint="e" * 64,
+        request_fingerprint="a" * 64,
+        feature_schema_version="m6-features-v1",
+        candidate_ids=("baseline", "shadow"),
+        selected_candidate_id="baseline",
+        propensity=1.0,
+        decision_id="m6_decision_1",
+        input_fingerprint="1" * 64,
+        context_checksum="2" * 64,
+        candidate_set_checksum="3" * 64,
+        baseline_action_id="baseline",
+        chosen_action_id="baseline",
+        action_probabilities=(("baseline", 1.0), ("shadow", 0.0)),
+        model_scores=(("baseline", 0.2), ("shadow", 0.9)),
+        uncertainty=0.1,
+        decision_source="shadow_baseline",
+        shadow_action_id="shadow",
+        reason_codes=(),
+        policy_id="shadow-policy-v1",
+        adapter_id="linucb",
+        adapter_version="v1",
+        artifact_sha256="4" * 64,
+        action_space_version="m6-action-space-v1",
+        gate_policy_version="m6-active-gate-v1",
+        logging_policy_id="m6-deterministic-v1",
+        created_at="2026-07-27T13:00:00+00:00",
+    )
+    reward = PolicyRewardRecord(
+        policy_execution_fingerprint="e" * 64,
+        outcome_identity="5" * 64,
+        status="observed",
+        reward=0.8,
+    )
+
+    row = build_offline_row(
+        observation,
+        reward,
+        deidentification_key=b"k" * 32,
+        raw_group_id="class-1",
+        raw_session_id="session-1",
+        event_time=1,
+        state="S1",
+        target_propensities={"baseline": 0.5, "shadow": 0.5},
+        direct_estimates={"baseline": 0.4, "shadow": 0.7},
+    )
+
+    assert row.selected_action == "baseline"
+    assert row.logging_propensity == 1.0
+    assert row.policy_version == "m6-deterministic-v1"
+    assert "shadow_action" not in row.canonical_payload()
 
 
 def test_dataset_rejects_free_text_or_host_paths_disguised_as_actions() -> None:

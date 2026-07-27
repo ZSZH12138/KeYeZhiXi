@@ -24,6 +24,7 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
     PolicyDecision,
     PolicyEvaluationRecord,
     PolicyExecutionRef,
+    PolicyObservation,
     PolicyPrediction,
     TutoringPolicyContext,
 )
@@ -33,6 +34,8 @@ from course_insight.modules.m6_tutoring_fsm.repository import InMemoryM6Reposito
 REQUEST_FINGERPRINT = "a" * 64
 OTHER_REQUEST_FINGERPRINT = "b" * 64
 ARTIFACT_SHA256 = "c" * 64
+INPUT_FINGERPRINT = "1" * 64
+CREATED_AT = "2026-07-27T12:00:00+00:00"
 
 
 def _context() -> TutoringPolicyContext:
@@ -144,6 +147,14 @@ class _SelectingAdapter:
                 score=0.75,
                 propensity=0.8,
                 uncertainty=0.1,
+                action_probabilities=(
+                    (candidate_ids[0], 0.2),
+                    (candidate_ids[1], 0.8),
+                ),
+                model_scores=(
+                    (candidate_ids[0], 0.25),
+                    (candidate_ids[1], 0.75),
+                ),
             ),
         )
 
@@ -236,8 +247,17 @@ def test_rules_mode_does_not_load_optional_policy_artifacts() -> None:
     context = _context()
     candidates = _candidates()
 
-    execution = runtime.prepare_execution(context, candidates)
-    selection = runtime.select(execution, context, candidates)
+    execution = runtime.prepare_execution(
+        context,
+        candidates,
+        input_fingerprint=INPUT_FINGERPRINT,
+    )
+    selection = runtime.select(
+        execution,
+        context,
+        candidates,
+        created_at=CREATED_AT,
+    )
 
     assert calls == 0
     assert execution.mode == "rules"
@@ -249,16 +269,26 @@ def test_rules_mode_does_not_load_optional_policy_artifacts() -> None:
 
 def test_active_gate_uses_prediction_uncertainty_and_both_scope_dimensions() -> None:
     allowed = _runtime(mode="active").select(
-        _runtime(mode="active").prepare_execution(_context(), _candidates()),
+        _runtime(mode="active").prepare_execution(
+            _context(),
+            _candidates(),
+            input_fingerprint=INPUT_FINGERPRINT,
+        ),
         _context(),
         _candidates(),
+        created_at=CREATED_AT,
     )
     blocked_context = replace(_context(), class_id="class-2")
     blocked_runtime = _runtime(mode="active")
     blocked = blocked_runtime.select(
-        blocked_runtime.prepare_execution(blocked_context, _candidates()),
+        blocked_runtime.prepare_execution(
+            blocked_context,
+            _candidates(),
+            input_fingerprint=INPUT_FINGERPRINT,
+        ),
         blocked_context,
         _candidates(),
+        created_at=CREATED_AT,
     )
 
     assert allowed.public_candidate.candidate_id == _candidates()[1].candidate_id
@@ -271,15 +301,106 @@ def test_shadow_records_prediction_without_changing_rules_candidate() -> None:
     context = _context()
     candidates = _candidates()
 
-    execution = runtime.prepare_execution(context, candidates)
-    selection = runtime.select(execution, context, candidates)
+    execution = runtime.prepare_execution(
+        context,
+        candidates,
+        input_fingerprint=INPUT_FINGERPRINT,
+    )
+    selection = runtime.select(
+        execution,
+        context,
+        candidates,
+        created_at=CREATED_AT,
+    )
 
     assert execution.mode == "shadow"
     assert selection.public_candidate.next_state == "S3"
     assert selection.policy_decision.mode == "shadow"
     assert selection.policy_decision.selected_candidate_id == candidates[1].candidate_id
-    assert selection.observation.selected_candidate_id == candidates[1].candidate_id
-    assert selection.observation.propensity == 0.8
+    assert selection.observation.selected_candidate_id == candidates[0].candidate_id
+    assert selection.observation.propensity == 1.0
+
+
+def test_shadow_observation_audits_public_baseline_as_the_logging_action() -> None:
+    """Catch a shadow-only action being exported later as if it was executed."""
+
+    runtime = _runtime(mode="shadow")
+    context = _context()
+    candidates = _candidates()
+    execution = runtime.prepare_execution(
+        context,
+        candidates,
+        input_fingerprint=INPUT_FINGERPRINT,
+    )
+
+    selection = runtime.select(
+        execution,
+        context,
+        candidates,
+        created_at=CREATED_AT,
+    )
+
+    observation = selection.observation
+    assert selection.public_candidate.candidate_id == candidates[0].candidate_id
+    assert observation.decision_id == (
+        "m6_decision_df777305e6754b89d458acfd737c207d465fa00574c8ab71120d0fa91fb83a2a"
+    )
+    assert observation.input_fingerprint == "1" * 64
+    assert observation.context_checksum == (
+        "8fa93f1848ac8f085938adf63eaf7f3477c8e569e2e68dad826c60135a50a846"
+    )
+    assert observation.candidate_set_checksum == (
+        "6c852e9fed205d911027c8c7723ea04d7fb07436348814a13df4980ee64830e4"
+    )
+    assert observation.baseline_action_id == candidates[0].candidate_id
+    assert observation.chosen_action_id == candidates[0].candidate_id
+    assert observation.selected_candidate_id == candidates[0].candidate_id
+    assert observation.shadow_action_id == candidates[1].candidate_id
+    assert observation.propensity == 1.0
+    assert dict(observation.action_probabilities) == {
+        candidates[0].candidate_id: 1.0,
+        candidates[1].candidate_id: 0.0,
+    }
+    assert dict(observation.model_scores) == {
+        candidates[0].candidate_id: 0.25,
+        candidates[1].candidate_id: 0.75,
+    }
+    assert observation.uncertainty == 0.1
+    assert observation.decision_source == "shadow_baseline"
+    assert observation.reason_codes == ()
+    assert observation.policy_id == "learned-policy-v1"
+    assert observation.adapter_id == "test-learned-adapter"
+    assert observation.adapter_version == "v1"
+    assert observation.artifact_sha256 == ARTIFACT_SHA256
+    assert observation.action_space_version == "m6-action-space-v1"
+    assert observation.gate_policy_version == "m6-active-gate-v1"
+    assert observation.logging_policy_id == "m6-deterministic-v1"
+    assert observation.created_at == "2026-07-27T12:00:00+00:00"
+
+
+def test_legacy_observation_payload_keeps_its_original_checksum() -> None:
+    """Catch richer audit fields silently rewriting stored v10 observations."""
+
+    observation = PolicyObservation(
+        policy_execution_fingerprint="e" * 64,
+        request_fingerprint="r" * 64,
+        feature_schema_version="m6-features-v1",
+        candidate_ids=("a", "b"),
+        selected_candidate_id="a",
+        propensity=1.0,
+    )
+
+    assert observation.canonical_json() == (
+        '{"candidate_ids":["a","b"],'
+        '"feature_schema_version":"m6-features-v1",'
+        '"policy_execution_fingerprint":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","propensity":1.0,'
+        '"request_fingerprint":"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr'
+        'rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr","selected_candidate_id":"a"}'
+    )
+    assert observation.identity == (
+        "b5107b85a8f630ac7e04fcbdbac55f96d94441c214bf1203c939359c7a3cff97"
+    )
 
 
 def test_active_adopts_only_a_gate_approved_safe_candidate() -> None:
@@ -287,8 +408,17 @@ def test_active_adopts_only_a_gate_approved_safe_candidate() -> None:
     context = _context()
     candidates = _candidates()
 
-    execution = runtime.prepare_execution(context, candidates)
-    selection = runtime.select(execution, context, candidates)
+    execution = runtime.prepare_execution(
+        context,
+        candidates,
+        input_fingerprint=INPUT_FINGERPRINT,
+    )
+    selection = runtime.select(
+        execution,
+        context,
+        candidates,
+        created_at=CREATED_AT,
+    )
 
     assert execution.mode == "active"
     assert selection.public_candidate is candidates[1]
@@ -321,8 +451,17 @@ def test_feature_schema_mismatch_rejects_learned_prediction_provenance(
     context = _context()
     candidates = _candidates()
 
-    execution = runtime.prepare_execution(context, candidates)
-    selection = runtime.select(execution, context, candidates)
+    execution = runtime.prepare_execution(
+        context,
+        candidates,
+        input_fingerprint=INPUT_FINGERPRINT,
+    )
+    selection = runtime.select(
+        execution,
+        context,
+        candidates,
+        created_at=CREATED_AT,
+    )
 
     assert execution.feature_schema_version == "m6-features-v2"
     assert selection.public_candidate is candidates[0]
@@ -354,8 +493,17 @@ def test_active_runtime_failures_fall_back_to_rules(runtime: PolicyRuntime) -> N
     context = _context()
     candidates = _candidates()
 
-    execution = runtime.prepare_execution(context, candidates)
-    selection = runtime.select(execution, context, candidates)
+    execution = runtime.prepare_execution(
+        context,
+        candidates,
+        input_fingerprint=INPUT_FINGERPRINT,
+    )
+    selection = runtime.select(
+        execution,
+        context,
+        candidates,
+        created_at=CREATED_AT,
+    )
 
     assert selection.public_candidate.next_state == "S3"
     assert selection.observation.propensity == 1.0
@@ -365,12 +513,56 @@ def test_active_runtime_failures_fall_back_to_rules(runtime: PolicyRuntime) -> N
     )
 
 
-def test_policy_execution_fingerprint_is_distinct_and_content_addressed() -> None:
-    execution = _runtime().prepare_execution(_context(), _candidates())
+def test_new_policy_execution_fingerprint_is_distinct_from_payload_identity() -> None:
+    """Catch execution identity accidentally including request/mode/policy fields."""
 
+    execution = PolicyExecutionRef(
+        request_fingerprint="r" * 64,
+        input_fingerprint="1" * 64,
+        mode="rules",
+        policy_id="m6-deterministic-v1",
+        adapter_id="m6-rules-adapter",
+        adapter_version="v1",
+        artifact_sha256=None,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-action-space-v1",
+        gate_policy_version="m6-active-gate-v1",
+    )
+
+    assert execution.policy_execution_fingerprint == (
+        "04835182fafb07856f9c0e6babd734c462cc72d29f72196bd21c63049547be31"
+    )
+    assert execution.policy_execution_fingerprint != execution.identity
+
+
+def test_legacy_execution_payload_keeps_its_original_checksum_and_fingerprint() -> None:
+    """Catch a new private field silently rewriting stored v10 execution payloads."""
+
+    execution = PolicyExecutionRef(
+        request_fingerprint="r" * 64,
+        mode="rules",
+        policy_id="m6-deterministic-v1",
+        adapter_id="m6-rules-adapter",
+        adapter_version="v1",
+        artifact_sha256=None,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-action-space-v1",
+        gate_policy_version="m6-active-gate-v1",
+    )
+
+    assert execution.canonical_json() == (
+        '{"action_space_version":"m6-action-space-v1",'
+        '"adapter_id":"m6-rules-adapter","adapter_version":"v1",'
+        '"artifact_sha256":null,"feature_schema_version":"m6-features-v1",'
+        '"gate_policy_version":"m6-active-gate-v1","mode":"rules",'
+        '"policy_id":"m6-deterministic-v1",'
+        '"request_fingerprint":"rrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrrr'
+        'rrrrrrrrrrrrrrrr"}'
+    )
+    assert execution.identity == (
+        "bc8ba1f455ac9a40c7733472c373db7c051453cc4334d9e08b6726374140c2a8"
+    )
     assert execution.policy_execution_fingerprint == execution.identity
-    assert len(execution.policy_execution_fingerprint) == 64
-    assert execution.policy_execution_fingerprint != REQUEST_FINGERPRINT
 
 
 def test_repository_keeps_the_immutable_first_policy_writer() -> None:

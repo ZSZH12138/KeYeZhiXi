@@ -815,6 +815,57 @@ def test_decision_and_policy_observation_share_one_transaction() -> None:
     ] == observation.identity
 
 
+def test_rich_policy_observation_rejects_embedded_decision_id_corruption() -> None:
+    module = _repository_module()
+    database = _FakeM6Database()
+    repository = module.PostgresM6Repository(_FakePool(database))
+    seed = _snapshot()
+    execution = _policy_execution()
+    candidate = _record(seed)
+    observation = PolicyObservation(
+        policy_execution_fingerprint=execution.policy_execution_fingerprint,
+        request_fingerprint=execution.request_fingerprint,
+        feature_schema_version=execution.feature_schema_version,
+        candidate_ids=("candidate_a",),
+        selected_candidate_id="candidate_a",
+        propensity=1.0,
+        decision_id=candidate.decision_id,
+        input_fingerprint=candidate.input_fingerprint,
+        context_checksum="c" * 64,
+        candidate_set_checksum="d" * 64,
+        baseline_action_id="candidate_a",
+        chosen_action_id="candidate_a",
+        action_probabilities={"candidate_a": 1.0},
+        model_scores={},
+        uncertainty=None,
+        decision_source="rules",
+        shadow_action_id=None,
+        reason_codes=(),
+        policy_id=execution.policy_id,
+        adapter_id=execution.adapter_id,
+        adapter_version=execution.adapter_version,
+        artifact_sha256=execution.artifact_sha256,
+        action_space_version=execution.action_space_version,
+        gate_policy_version=execution.gate_policy_version,
+        logging_policy_id=execution.policy_id,
+        created_at=NOW.isoformat(),
+    )
+    candidate = replace(
+        candidate,
+        policy_execution_ref=execution,
+        policy_observation=observation,
+    )
+    repository.commit_policy_execution(execution)
+    repository.commit_decision(candidate, seed)
+    corrupt = replace(observation, decision_id="decision_corrupt")
+    row = database.policy_observations[candidate.decision_id]
+    row["payload"] = dict(corrupt.canonical_payload())
+    row["payload_checksum"] = corrupt.identity
+
+    with pytest.raises(module.PostgresOperationError):
+        repository.get_decision_by_request(candidate.request_fingerprint)
+
+
 def test_artifact_reward_and_evaluation_round_trip_with_checksums() -> None:
     module = _repository_module()
     database = _FakeM6Database()

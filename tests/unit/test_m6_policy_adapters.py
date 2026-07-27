@@ -127,6 +127,11 @@ def test_epsilon_selection_records_exact_propensity_and_sums_to_one() -> None:
     expected = {"winner": 0.9, "other": 0.1}
     assert decision.prediction is not None
     assert decision.prediction.propensity == expected[decision.selected_candidate_id]
+    assert dict(decision.prediction.action_probabilities) == expected
+    assert dict(decision.prediction.model_scores) == {
+        "winner": 2.0,
+        "other": 1.0,
+    }
     assert decision.prediction.uncertainty == {
         "winner": 0.25,
         "other": 0.5,
@@ -157,7 +162,12 @@ def test_epsilon_exploration_is_banned_for_remediation_and_single_candidate() ->
 
     assert remediating.selected_candidate_id == "winner"
     assert remediating.prediction is not None and remediating.prediction.propensity == 1.0
+    assert dict(remediating.prediction.action_probabilities) == {
+        "winner": 1.0,
+        "other": 0.0,
+    }
     assert single.prediction is not None and single.prediction.propensity == 1.0
+    assert dict(single.prediction.action_probabilities) == {"winner": 1.0}
 
 
 def test_production_linucb_adapter_builds_features_and_scores_safe_subset() -> None:

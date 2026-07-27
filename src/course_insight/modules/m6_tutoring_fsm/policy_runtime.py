@@ -4,10 +4,13 @@ from __future__ import annotations
 
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
+from hashlib import sha256
+import json
 from typing import Any
 
 from course_insight.contracts.errors import DomainError
 from course_insight.modules.m6_tutoring_fsm.features import FeatureBuilder
+from course_insight.modules.m6_tutoring_fsm.identity import derive_identifier
 from course_insight.modules.m6_tutoring_fsm.policy_adapter import (
     PolicyAdapter,
     RulesPolicyAdapter,
@@ -88,6 +91,8 @@ class PolicyRuntime:
         self,
         context: TutoringPolicyContext,
         candidates: Sequence[CandidateAction],
+        *,
+        input_fingerprint: str,
     ) -> PolicyExecutionRef:
         """Build the desired immutable binding, failing safely to rules."""
 
@@ -96,6 +101,7 @@ class PolicyRuntime:
             return rules_policy_execution(
                 context.request_fingerprint,
                 gate_policy_version=self._gate_policy_version,
+                input_fingerprint=input_fingerprint,
             )
         try:
             self._feature_builder.build(context)
@@ -111,11 +117,13 @@ class PolicyRuntime:
                 feature_schema_version=manifest.feature_schema_version,
                 action_space_version=manifest.action_space_version,
                 gate_policy_version=manifest.gate_policy_version,
+                input_fingerprint=input_fingerprint,
             )
         except Exception:
             return rules_policy_execution(
                 context.request_fingerprint,
                 gate_policy_version=self._gate_policy_version,
+                input_fingerprint=input_fingerprint,
             )
 
     def select(
@@ -123,6 +131,8 @@ class PolicyRuntime:
         execution: PolicyExecutionRef,
         context: TutoringPolicyContext,
         candidates: Sequence[CandidateAction],
+        *,
+        created_at: str | None = None,
     ) -> PolicyRuntimeSelection:
         """Select one public candidate and produce a de-identified observation."""
 
@@ -133,9 +143,13 @@ class PolicyRuntime:
         if execution.mode == "rules":
             return _selection(
                 execution=execution,
+                context=context,
                 candidates=ordered,
+                baseline_decision=baseline,
                 public_decision=baseline,
                 observed_decision=baseline,
+                decision_source="rules",
+                created_at=created_at,
             )
 
         try:
@@ -151,9 +165,14 @@ class PolicyRuntime:
             if execution.mode == "shadow":
                 return _selection(
                     execution=execution,
+                    context=context,
                     candidates=ordered,
+                    baseline_decision=baseline,
                     public_decision=baseline,
                     observed_decision=learned,
+                    model_decision=learned,
+                    decision_source="shadow_baseline",
+                    created_at=created_at,
                 )
             gate = self._evaluate_active_gate(
                 loaded=loaded,
@@ -168,12 +187,20 @@ class PolicyRuntime:
                     ordered,
                     baseline,
                     "active_gate_rejected",
+                    created_at=created_at,
+                    model_decision=learned,
+                    reason_codes=tuple(gate.reasons),
                 )
             return _selection(
                 execution=execution,
+                context=context,
                 candidates=ordered,
+                baseline_decision=baseline,
                 public_decision=learned,
                 observed_decision=learned,
+                model_decision=learned,
+                decision_source="active_policy",
+                created_at=created_at,
             )
         except Exception:
             return self._fallback(
@@ -182,6 +209,7 @@ class PolicyRuntime:
                 ordered,
                 baseline,
                 "policy_runtime_failure",
+                created_at=created_at,
             )
 
     def _load_learned(
@@ -237,6 +265,10 @@ class PolicyRuntime:
         candidates: tuple[CandidateAction, ...],
         baseline: PolicyDecision,
         reason: str,
+        *,
+        created_at: str | None,
+        model_decision: PolicyDecision | None = None,
+        reason_codes: tuple[str, ...] = (),
     ) -> PolicyRuntimeSelection:
         fallback = PolicyDecision(
             request_fingerprint=context.request_fingerprint,
@@ -248,9 +280,15 @@ class PolicyRuntime:
         )
         return _selection(
             execution=execution,
+            context=context,
             candidates=candidates,
+            baseline_decision=baseline,
             public_decision=fallback,
             observed_decision=fallback,
+            model_decision=model_decision,
+            decision_source="fallback",
+            reason_codes=(reason, *reason_codes),
+            created_at=created_at,
         )
 
 
@@ -258,6 +296,7 @@ def rules_policy_execution(
     request_fingerprint: str,
     *,
     gate_policy_version: str = "m6-active-gate-v1",
+    input_fingerprint: str | None = None,
 ) -> PolicyExecutionRef:
     """Return the canonical deterministic binding for one existing request."""
 
@@ -272,6 +311,7 @@ def rules_policy_execution(
         feature_schema_version="m6-features-v1",
         action_space_version="m6-action-space-v1",
         gate_policy_version=gate_policy_version,
+        input_fingerprint=input_fingerprint,
     )
 
 
@@ -304,6 +344,18 @@ def _validated_learned_decision(
         or decision.prediction.policy_id != execution.policy_id
         or decision.prediction.feature_schema_version
         != execution.feature_schema_version
+        or decision.prediction.action_probabilities is None
+        or decision.prediction.model_scores is None
+        or {
+            action_id
+            for action_id, _ in decision.prediction.action_probabilities
+        }
+        != set(candidate_ids)
+        or {
+            action_id
+            for action_id, _ in decision.prediction.model_scores
+        }
+        != set(candidate_ids)
     ):
         raise ValueError("learned policy returned an invalid prediction")
     return PolicyDecision(
@@ -336,29 +388,119 @@ def _assert_execution_matches_loaded(
 def _selection(
     *,
     execution: PolicyExecutionRef,
+    context: TutoringPolicyContext,
     candidates: tuple[CandidateAction, ...],
+    baseline_decision: PolicyDecision,
     public_decision: PolicyDecision,
     observed_decision: PolicyDecision,
+    model_decision: PolicyDecision | None = None,
+    decision_source: str,
+    reason_codes: tuple[str, ...] = (),
+    created_at: str | None,
 ) -> PolicyRuntimeSelection:
     by_id = {candidate.candidate_id: candidate for candidate in candidates}
     public_candidate = by_id.get(public_decision.selected_candidate_id)
     if public_candidate is None:
         raise ValueError("policy selected a candidate outside the safety envelope")
-    prediction = observed_decision.prediction
-    propensity = 1.0 if prediction is None else prediction.propensity
-    observation = PolicyObservation(
-        policy_execution_fingerprint=execution.policy_execution_fingerprint,
-        request_fingerprint=execution.request_fingerprint,
-        feature_schema_version=execution.feature_schema_version,
-        candidate_ids=tuple(candidate.candidate_id for candidate in candidates),
-        selected_candidate_id=observed_decision.selected_candidate_id,
-        propensity=propensity,
+    candidate_ids = tuple(candidate.candidate_id for candidate in candidates)
+    logging_prediction = (
+        public_decision.prediction
+        if decision_source == "active_policy"
+        else None
     )
+    if logging_prediction is None:
+        logging_probabilities = tuple(
+            (
+                candidate_id,
+                1.0
+                if candidate_id == public_decision.selected_candidate_id
+                else 0.0,
+            )
+            for candidate_id in candidate_ids
+        )
+    else:
+        logging_probabilities = tuple(logging_prediction.action_probabilities)
+    propensity = dict(logging_probabilities)[public_decision.selected_candidate_id]
+    if execution.input_fingerprint is None:
+        observation = PolicyObservation(
+            policy_execution_fingerprint=execution.policy_execution_fingerprint,
+            request_fingerprint=execution.request_fingerprint,
+            feature_schema_version=execution.feature_schema_version,
+            candidate_ids=candidate_ids,
+            selected_candidate_id=public_decision.selected_candidate_id,
+            propensity=propensity,
+        )
+    else:
+        if created_at is None:
+            raise ValueError("new policy observations require created_at")
+        audit_prediction = (
+            None if model_decision is None else model_decision.prediction
+        )
+        model_scores = (
+            ()
+            if audit_prediction is None
+            else tuple(audit_prediction.model_scores)
+        )
+        observation = PolicyObservation(
+            policy_execution_fingerprint=execution.policy_execution_fingerprint,
+            request_fingerprint=execution.request_fingerprint,
+            feature_schema_version=execution.feature_schema_version,
+            candidate_ids=candidate_ids,
+            selected_candidate_id=public_decision.selected_candidate_id,
+            propensity=propensity,
+            decision_id=derive_identifier(
+                "decision",
+                execution.input_fingerprint,
+            ),
+            input_fingerprint=execution.input_fingerprint,
+            context_checksum=context.identity,
+            candidate_set_checksum=_candidate_set_checksum(candidates),
+            baseline_action_id=baseline_decision.selected_candidate_id,
+            chosen_action_id=public_decision.selected_candidate_id,
+            action_probabilities=logging_probabilities,
+            model_scores=model_scores,
+            uncertainty=(
+                None if audit_prediction is None else audit_prediction.uncertainty
+            ),
+            decision_source=decision_source,
+            shadow_action_id=(
+                model_decision.selected_candidate_id
+                if decision_source == "shadow_baseline"
+                and model_decision is not None
+                else None
+            ),
+            reason_codes=reason_codes,
+            policy_id=execution.policy_id,
+            adapter_id=execution.adapter_id,
+            adapter_version=execution.adapter_version,
+            artifact_sha256=execution.artifact_sha256,
+            action_space_version=execution.action_space_version,
+            gate_policy_version=execution.gate_policy_version,
+            logging_policy_id=(
+                execution.policy_id
+                if decision_source == "active_policy"
+                else RulesPolicyAdapter().policy_id
+            ),
+            created_at=created_at,
+        )
     return PolicyRuntimeSelection(
         public_candidate=public_candidate,
         policy_decision=observed_decision,
         observation=observation,
     )
+
+
+def _candidate_set_checksum(
+    candidates: tuple[CandidateAction, ...],
+) -> str:
+    payload = json.dumps(
+        [candidate.canonical_payload() for candidate in candidates],
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    )
+    return sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _raise_policy_integrity_error(reason: str) -> None:

@@ -770,7 +770,8 @@ def _decision_with_policy(
         _raise_policy_integrity_error("policy_observation_missing_execution")
     execution = _policy_record_from_row(execution_row, PolicyExecutionRef)
     if (
-        observation.request_fingerprint != record.request_fingerprint
+        observation.decision_id not in (None, record.decision_id)
+        or observation.request_fingerprint != record.request_fingerprint
         or observation.policy_execution_fingerprint
         != execution.policy_execution_fingerprint
     ):
@@ -829,6 +830,11 @@ def _validate_policy_row_identity(
         )
     elif isinstance(record, PolicyObservation):
         checks = (
+            *(
+                ()
+                if record.decision_id is None
+                else (("decision_id", record.decision_id),)
+            ),
             ("request_fingerprint", record.request_fingerprint),
             (
                 "policy_execution_fingerprint",

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from hashlib import sha256
 import hmac
 import json
@@ -18,15 +19,22 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
 
 
 EXPORT_FIELDS: tuple[str, ...] = (
-    "group_id",
+    "decision_id",
+    "context",
+    "candidate_actions",
+    "chosen_action",
+    "propensity",
+    "reward",
+    "reward_status",
+    "policy_version",
+    "feature_schema_version",
+    "action_space_version",
+    "anonymous_group_key",
+    "occurred_at",
     "session_id",
     "event_time",
     "state",
-    "selected_action",
-    "candidate_actions",
-    "logging_propensity",
     "target_propensities",
-    "reward",
     "direct_estimates",
 )
 
@@ -45,8 +53,15 @@ class OfflinePolicyRow:
     candidate_actions: tuple[str, ...]
     logging_propensity: float | None
     target_propensities: object
-    reward: float
+    reward: float | None
     direct_estimates: object
+    decision_id: str
+    context: object
+    reward_status: str
+    policy_version: str
+    feature_schema_version: str
+    action_space_version: str
+    occurred_at: str
 
     def __post_init__(self) -> None:
         _require_sha256(self.group_id, "group_id")
@@ -84,8 +99,20 @@ class OfflinePolicyRow:
         ):
             raise ValueError("target_propensities must sum to one")
         object.__setattr__(self, "target_propensities", target)
-        _require_finite(self.reward, "reward")
-        object.__setattr__(self, "reward", float(self.reward))
+        if self.reward_status not in {
+            "pending",
+            "observed",
+            "censored",
+            "invalid",
+        }:
+            raise ValueError("reward_status is not supported")
+        if self.reward_status == "observed":
+            if self.reward is None:
+                raise ValueError("observed offline row requires reward")
+            _require_finite(self.reward, "reward")
+            object.__setattr__(self, "reward", float(self.reward))
+        elif self.reward is not None:
+            raise ValueError("non-observed offline row must not set reward")
         object.__setattr__(
             self,
             "direct_estimates",
@@ -96,20 +123,36 @@ class OfflinePolicyRow:
                 probability=False,
             ),
         )
+        _require_sha256(self.decision_id, "decision_id")
+        object.__setattr__(self, "context", _normalize_context(self.context))
+        for name in (
+            "policy_version",
+            "feature_schema_version",
+            "action_space_version",
+        ):
+            _require_structured_id(getattr(self, name), name)
+        _require_timezone(self.occurred_at, "occurred_at")
 
     def canonical_payload(self) -> dict[str, Any]:
         """Return the explicit export allowlist in canonical field form."""
 
         return {
-            "group_id": self.group_id,
+            "decision_id": self.decision_id,
+            "context": dict(self.context),
+            "candidate_actions": list(self.candidate_actions),
+            "chosen_action": self.selected_action,
+            "propensity": self.logging_propensity,
+            "reward": self.reward,
+            "reward_status": self.reward_status,
+            "policy_version": self.policy_version,
+            "feature_schema_version": self.feature_schema_version,
+            "action_space_version": self.action_space_version,
+            "anonymous_group_key": self.group_id,
+            "occurred_at": self.occurred_at,
             "session_id": self.session_id,
             "event_time": self.event_time,
             "state": self.state,
-            "selected_action": self.selected_action,
-            "candidate_actions": list(self.candidate_actions),
-            "logging_propensity": self.logging_propensity,
             "target_propensities": dict(self.target_propensities),
-            "reward": self.reward,
             "direct_estimates": dict(self.direct_estimates),
         }
 
@@ -179,12 +222,13 @@ def build_offline_row(
     if reward.status != "observed" or reward.reward is None:
         raise ValueError("offline rows require an observed reward")
     _require_deidentification_key(deidentification_key)
+    group_id = _pseudonymize(
+        "group",
+        raw_group_id,
+        deidentification_key,
+    )
     return OfflinePolicyRow(
-        group_id=_pseudonymize(
-            "group",
-            raw_group_id,
-            deidentification_key,
-        ),
+        group_id=group_id,
         session_id=_pseudonymize(
             "session",
             raw_session_id,
@@ -198,6 +242,42 @@ def build_offline_row(
         target_propensities=target_propensities,
         reward=reward.reward,
         direct_estimates=direct_estimates,
+        decision_id=_pseudonymize(
+            "decision",
+            (
+                observation.decision_id
+                if observation.decision_id is not None
+                else observation.request_fingerprint
+            ),
+            deidentification_key,
+        ),
+        context={
+            "context_checksum": (
+                observation.context_checksum
+                if observation.context_checksum is not None
+                else sha256(
+                    observation.canonical_json().encode("utf-8")
+                ).hexdigest()
+            ),
+            "state": state,
+        },
+        reward_status=reward.status,
+        policy_version=(
+            observation.logging_policy_id
+            if observation.logging_policy_id is not None
+            else "legacy-unknown"
+        ),
+        feature_schema_version=observation.feature_schema_version,
+        action_space_version=(
+            observation.action_space_version
+            if observation.action_space_version is not None
+            else "legacy-unknown"
+        ),
+        occurred_at=(
+            observation.created_at
+            if observation.created_at is not None
+            else datetime.fromtimestamp(event_time, timezone.utc).isoformat()
+        ),
     )
 
 
@@ -364,6 +444,33 @@ def _normalize_action_values(
     return tuple(sorted(normalized))
 
 
+def _normalize_context(values: object) -> tuple[tuple[str, str], ...]:
+    if isinstance(values, Mapping):
+        normalized = dict(values)
+    elif type(values) in {tuple, list}:
+        try:
+            normalized = dict(values)
+        except (TypeError, ValueError) as error:
+            raise ValueError(
+                "context must contain context_checksum and state only"
+            ) from error
+    else:
+        normalized = {}
+    if set(normalized) != {
+        "context_checksum",
+        "state",
+    }:
+        raise ValueError(
+            "context must contain context_checksum and state only"
+        )
+    checksum = normalized["context_checksum"]
+    state = normalized["state"]
+    _require_sha256(checksum, "context_checksum")
+    if state not in TUTORING_STATES:
+        raise ValueError("context state must be a tutoring state")
+    return (("context_checksum", str(checksum)), ("state", str(state)))
+
+
 def _require_structured_id(value: object, field_name: str) -> None:
     if type(value) is not str or _STRUCTURED_ID.fullmatch(value) is None:
         raise ValueError(f"{field_name} must contain structured identifiers")
@@ -387,3 +494,14 @@ def _require_probability(value: object, field_name: str) -> None:
     _require_finite(value, field_name)
     if not 0.0 <= float(value) <= 1.0:
         raise ValueError(f"{field_name} must be a probability")
+
+
+def _require_timezone(value: object, field_name: str) -> None:
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"{field_name} must be a timezone timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ValueError(f"{field_name} must be a timezone timestamp") from error
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise ValueError(f"{field_name} must be a timezone timestamp")

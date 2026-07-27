@@ -74,6 +74,148 @@ def test_reward_v1_uses_the_hand_checked_transfer_hint_and_loop_formula() -> Non
     assert reward.reward == pytest.approx(0.45)
 
 
+def test_reward_record_preserves_every_evidenced_raw_outcome_component() -> None:
+    """Catch reward persistence keeping only a scalar and losing audit evidence."""
+
+    outcome = PolicyOutcome(
+        policy_execution_fingerprint="e" * 64,
+        status="observed",
+        transfer_success=0.8,
+        hint_count=3,
+        loop_count=2,
+        independent_correction_success=True,
+        self_explanation_passed=False,
+        additional_turn_count=4,
+        teacher_review_escalated=True,
+        safety_flag=False,
+        outcome_event_ids=("event-1", "event-2"),
+        outcome_watermark="watermark-7",
+        observed_at="2026-07-27T13:00:00+00:00",
+    )
+
+    reward = reward_from_outcome(outcome)
+
+    assert reward.reward == pytest.approx(0.45)
+    assert reward.transfer_success == 0.8
+    assert reward.independent_correction_success is True
+    assert reward.self_explanation_passed is False
+    assert reward.additional_hint_count == 3
+    assert reward.additional_turn_count == 4
+    assert reward.loop_count == 2
+    assert reward.teacher_review_escalated is True
+    assert reward.safety_flag is False
+    assert reward.outcome_event_ids == ("event-1", "event-2")
+    assert reward.outcome_watermark == "watermark-7"
+    assert reward.observed_at == "2026-07-27T13:00:00+00:00"
+
+
+@pytest.mark.parametrize(
+    ("field_name", "invalid_value"),
+    [
+        ("outcome_event_ids", (r"C:\Users\learner\events.json",)),
+        ("outcome_watermark", "learner 42 completed"),
+        ("outcome_event_ids", ("sk-proj-1234567890abcdefghijklmnop",)),
+        ("outcome_watermark", "student@example.edu"),
+    ],
+)
+@pytest.mark.parametrize("record_type", ("outcome", "reward"))
+def test_reward_audit_provenance_rejects_path_or_free_text_identifiers(
+    field_name: str,
+    invalid_value: object,
+    record_type: str,
+) -> None:
+    audit_fields = {field_name: invalid_value}
+    if record_type == "outcome":
+        with pytest.raises(ValueError, match="safe audit identifier"):
+            PolicyOutcome(
+                policy_execution_fingerprint="e" * 64,
+                status="observed",
+                transfer_success=0.8,
+                hint_count=0,
+                loop_count=0,
+                observed_at="2026-07-27T13:00:00+00:00",
+                **audit_fields,
+            )
+        return
+
+    with pytest.raises(ValueError, match="safe audit identifier"):
+        PolicyRewardRecord(
+            policy_execution_fingerprint="e" * 64,
+            outcome_identity="outcome_1",
+            status="observed",
+            reward=0.8,
+            observed_at="2026-07-27T13:00:00+00:00",
+            **audit_fields,
+        )
+
+
+def test_safety_flag_can_only_produce_an_invalid_non_reward_record() -> None:
+    """Catch a safety violation entering OPE as an ordinary approved reward."""
+
+    with pytest.raises(ValueError, match="safety_flag"):
+        PolicyOutcome(
+            policy_execution_fingerprint="e" * 64,
+            status="observed",
+            transfer_success=0.8,
+            hint_count=0,
+            loop_count=0,
+            safety_flag=True,
+            observed_at="2026-07-27T13:00:00+00:00",
+        )
+
+    invalid = reward_from_outcome(
+        PolicyOutcome(
+            policy_execution_fingerprint="e" * 64,
+            status="invalid",
+            transfer_success=0.8,
+            hint_count=0,
+            loop_count=0,
+            safety_flag=True,
+            observed_at="2026-07-27T13:00:00+00:00",
+        )
+    )
+
+    assert invalid.status == "invalid"
+    assert invalid.reward is None
+    assert invalid.safety_flag is True
+
+
+def test_rich_outcome_rejects_a_naive_observed_at_timestamp() -> None:
+    """Catch audit timestamps that cannot be placed on an absolute timeline."""
+
+    with pytest.raises(ValueError, match="timezone"):
+        PolicyOutcome(
+            policy_execution_fingerprint="e" * 64,
+            status="observed",
+            transfer_success=0.8,
+            hint_count=0,
+            loop_count=0,
+            observed_at="2026-07-27T13:00:00",
+        )
+
+
+def test_legacy_reward_payload_keeps_its_original_checksum() -> None:
+    """Catch raw outcome additions silently rewriting stored v10 rewards."""
+
+    reward = PolicyRewardRecord(
+        policy_execution_fingerprint="e" * 64,
+        outcome_identity="o" * 64,
+        status="observed",
+        reward=0.45,
+    )
+
+    assert reward.canonical_json() == (
+        '{"outcome_identity":"oooooooooooooooooooooooooooooooo'
+        'oooooooooooooooooooooooooooooooo",'
+        '"policy_execution_fingerprint":"eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee'
+        'eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee","reward":0.45,'
+        '"reward_version":"m6-reward-v1","status":"observed"}'
+    )
+    assert reward.identity == (
+        "2c6e7b3287029768540bbe7a719cf983b9d1a5b6f1933f5146b42a13ebf2c77b"
+    )
+
+
 @pytest.mark.parametrize("status", ("pending", "censored"))
 def test_missing_follow_up_remains_missing_instead_of_becoming_zero(
     status: str,

@@ -1213,19 +1213,34 @@ def _learned_runtime(
             selected = next(
                 candidate for candidate in candidates if candidate.next_state == "S2"
             )
+            candidate_ids = tuple(
+                candidate.candidate_id for candidate in candidates
+            )
             return PolicyDecision(
                 request_fingerprint=context.request_fingerprint,
                 mode="active",
                 selected_candidate_id=selected.candidate_id,
-                candidate_ids=tuple(
-                    candidate.candidate_id for candidate in candidates
-                ),
-                    prediction=PolicyPrediction(
+                candidate_ids=candidate_ids,
+                prediction=PolicyPrediction(
                     policy_id=self.policy_id,
                     candidate_id=selected.candidate_id,
                     score=1.0,
-                        propensity=1.0,
-                        uncertainty=0.0,
+                    propensity=1.0,
+                    uncertainty=0.0,
+                    action_probabilities=tuple(
+                        (
+                            candidate_id,
+                            1.0 if candidate_id == selected.candidate_id else 0.0,
+                        )
+                        for candidate_id in candidate_ids
+                    ),
+                    model_scores=tuple(
+                        (
+                            candidate_id,
+                            1.0 if candidate_id == selected.candidate_id else 0.0,
+                        )
+                        for candidate_id in candidate_ids
+                    ),
                 ),
             )
 
@@ -1327,7 +1342,10 @@ def test_service_shadow_prediction_cannot_change_the_public_result() -> None:
     assert stored.policy_execution_ref is not None
     assert stored.policy_execution_ref.mode == "shadow"
     assert stored.policy_observation is not None
-    assert stored.policy_observation.selected_candidate_id.endswith("s1_to_s2.v1")
+    assert stored.policy_observation.selected_candidate_id.endswith("s1_to_s3.v1")
+    assert stored.policy_observation.shadow_action_id is not None
+    assert stored.policy_observation.shadow_action_id.endswith("s1_to_s2.v1")
+    assert stored.policy_observation.propensity == 1.0
 
 
 def test_service_active_adopts_gate_approved_safe_candidate_and_replays_it() -> None:

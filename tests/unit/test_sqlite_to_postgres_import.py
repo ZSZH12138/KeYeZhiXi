@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
@@ -282,6 +283,49 @@ def test_policy_source_rejects_payload_text_normalized_by_dataclass(
         connection.commit()
     finally:
         connection.close()
+
+    with pytest.raises(MigrationError, match="SOURCE_VALIDATION_FAILED"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=_MemoryDestination(),
+        ).run(mode="dry-run")
+
+
+def test_policy_source_rejects_embedded_observation_decision_id_corruption(
+    tmp_path: Path,
+) -> None:
+    from course_insight.infrastructure.sqlite import connect_sqlite
+    from tests.integration.test_m6_persistence import (
+        _inputs,
+        _only_request_fingerprint,
+        _repository,
+        _service,
+    )
+
+    source = tmp_path / "observation-decision-source.sqlite3"
+    repository = _repository(source)
+    _service(repository).decide_next_action(*_inputs(), None)
+    request_fingerprint = _only_request_fingerprint(source)
+    stored = repository.get_decision_by_request(request_fingerprint)
+    assert stored is not None
+    assert stored.policy_observation is not None
+    corrupt = replace(
+        stored.policy_observation,
+        decision_id="decision_corrupt",
+    )
+    with connect_sqlite(source) as connection:
+        connection.execute(
+            """
+            UPDATE m6_policy_observations
+            SET payload = ?, payload_checksum = ?
+            WHERE decision_id = ?
+            """,
+            (
+                corrupt.canonical_json(),
+                corrupt.identity,
+                stored.decision_id,
+            ),
+        )
 
     with pytest.raises(MigrationError, match="SOURCE_VALIDATION_FAILED"):
         SQLiteToPostgresMigrator(

@@ -129,6 +129,12 @@ class M6TutoringControlService:
             if replay is None:
                 raise
             return self._prepare_replay_policy_execution(replay, request_key)
+        input_key = input_fingerprint(
+            task_plan=task_plan,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            authoritative_previous_session_state_snapshot=previous,
+        )
         _, _, _, context, candidates = self._build_policy_inputs(
             task_plan,
             scoring_result_bundle,
@@ -136,7 +142,11 @@ class M6TutoringControlService:
             previous,
             request_key,
         )
-        desired = self._policy_runtime.prepare_execution(context, candidates)
+        desired = self._policy_runtime.prepare_execution(
+            context,
+            candidates,
+            input_fingerprint=input_key,
+        )
         return self._commit_policy_execution(desired)
 
     def decide_next_action(
@@ -187,6 +197,12 @@ class M6TutoringControlService:
                 raise
             self._prepare_replay_policy_execution(replay, request_key)
             return _validated_replay(replay, task_plan, request_key)
+        input_key = input_fingerprint(
+            task_plan=task_plan,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            authoritative_previous_session_state_snapshot=previous,
+        )
         (
             targets,
             current_evidence,
@@ -202,23 +218,22 @@ class M6TutoringControlService:
         )
         execution = self._load_policy_execution(request_key)
         if execution is None:
-            desired = self._policy_runtime.prepare_execution(context, candidates)
+            desired = self._policy_runtime.prepare_execution(
+                context,
+                candidates,
+                input_fingerprint=input_key,
+            )
             execution = self._commit_policy_execution(desired)
         runtime_selection = self._policy_runtime.select(
             execution,
             context,
             candidates,
+            created_at=scoring_result_bundle.finalized_at.isoformat(),
         )
         next_state = runtime_selection.public_candidate.next_state
         self._state_machine_definition.validate_transition(
             previous.current_state,
             next_state,
-        )
-        input_key = input_fingerprint(
-            task_plan=task_plan,
-            scoring_result_bundle=scoring_result_bundle,
-            state_update_result=state_update_result,
-            authoritative_previous_session_state_snapshot=previous,
         )
         candidate_result = build_tutoring_result(
             task_plan=task_plan,
@@ -294,8 +309,12 @@ class M6TutoringControlService:
             task_type=task_plan.task_type,
             turn_count=previous.turn_count,
             score_ratio=(
-                scoring_result_bundle.total_score
-                / scoring_result_bundle.max_score
+                0.0
+                if scoring_result_bundle.max_score <= 0.0
+                else (
+                    scoring_result_bundle.total_score
+                    / scoring_result_bundle.max_score
+                )
             ),
             target_concept_count=len(targets),
             signals=signals,
@@ -346,7 +365,8 @@ class M6TutoringControlService:
                 desired
                 if desired.mode == "rules"
                 else self._rules_policy_execution(
-                    desired.request_fingerprint
+                    desired.request_fingerprint,
+                    desired.input_fingerprint,
                 )
             )
         try:
@@ -354,9 +374,15 @@ class M6TutoringControlService:
         except DomainError as error:
             if error.code == "TUTORING_POLICY_INTEGRITY_ERROR":
                 raise
-            return self._rules_policy_execution(desired.request_fingerprint)
+            return self._rules_policy_execution(
+                desired.request_fingerprint,
+                desired.input_fingerprint,
+            )
         except Exception:
-            return self._rules_policy_execution(desired.request_fingerprint)
+            return self._rules_policy_execution(
+                desired.request_fingerprint,
+                desired.input_fingerprint,
+            )
         if (
             not isinstance(execution, PolicyExecutionRef)
             or execution.request_fingerprint != desired.request_fingerprint
@@ -407,12 +433,14 @@ class M6TutoringControlService:
     def _rules_policy_execution(
         self,
         request_key: str,
+        input_key: str | None = None,
     ) -> PolicyExecutionRef:
         return rules_policy_execution(
             request_key,
             gate_policy_version=(
                 self._policy_runtime.configured_gate_policy_version
             ),
+            input_fingerprint=input_key,
         )
 
     def _resolve_previous_snapshot(
