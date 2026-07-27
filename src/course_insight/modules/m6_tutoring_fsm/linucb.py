@@ -14,6 +14,11 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
     PolicyPrediction,
     TutoringPolicyContext,
 )
+from course_insight.modules.m6_tutoring_fsm.features import FeatureBuilder
+from course_insight.modules.m6_tutoring_fsm.policy_artifacts import (
+    LoadedPolicyArtifact,
+)
+from course_insight.modules.m6_tutoring_fsm.safety_envelope import SafetyEnvelope
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,12 +69,7 @@ class LinUCBModel:
         if not ordered:
             raise ValueError("LinUCB requires at least one candidate")
         predictions = tuple(
-            PolicyPrediction(
-                policy_id=self.policy_id,
-                candidate_id=candidate.candidate_id,
-                score=self._score(vector, candidate.candidate_id),
-                propensity=1.0,
-            )
+            self._prediction(vector, candidate.candidate_id)
             for candidate in ordered
         )
         return tuple(sorted(predictions, key=lambda prediction: -prediction.score))
@@ -83,7 +83,11 @@ class LinUCBModel:
 
         return self.rank(features, candidates)[0]
 
-    def _score(self, features: tuple[float, ...], candidate_id: str) -> float:
+    def _prediction(
+        self,
+        features: tuple[float, ...],
+        candidate_id: str,
+    ) -> PolicyPrediction:
         parameters = self._actions.get(candidate_id)
         if parameters is None:
             raise ValueError("candidate has no LinUCB action parameters")
@@ -100,10 +104,82 @@ class LinUCBModel:
                 quadratic = 0.0
             else:
                 raise ValueError("inverse covariance produced a negative uncertainty")
-        score = exploitation + self.alpha * math.sqrt(quadratic)
+        uncertainty = math.sqrt(quadratic)
+        score = exploitation + self.alpha * uncertainty
         if not math.isfinite(score):
             raise ValueError("LinUCB score must be finite")
-        return score
+        return PolicyPrediction(
+            policy_id=self.policy_id,
+            candidate_id=candidate_id,
+            score=score,
+            propensity=1.0,
+            uncertainty=uncertainty,
+        )
+
+
+class LinUCBPolicyAdapter:
+    """Production adapter backed by one verified immutable LinUCB artifact."""
+
+    def __init__(
+        self,
+        loaded_artifact: LoadedPolicyArtifact,
+        *,
+        exploration_rate: float,
+    ) -> None:
+        if not isinstance(loaded_artifact, LoadedPolicyArtifact):
+            raise TypeError("loaded_artifact must be a LoadedPolicyArtifact")
+        _require_probability(exploration_rate, "exploration_rate")
+        manifest = loaded_artifact.manifest
+        payload = loaded_artifact.payload
+        if manifest.algorithm != "linucb":
+            raise ValueError("policy artifact algorithm is not supported")
+        if manifest.feature_schema_version != FeatureBuilder.schema_version:
+            raise ValueError("policy artifact feature schema is not supported")
+        if (
+            manifest.action_space_version
+            != SafetyEnvelope.action_space_version
+        ):
+            raise ValueError("policy artifact action space is not supported")
+        self.policy_id = manifest.policy_id
+        self.adapter_id = manifest.adapter_id
+        self.adapter_version = manifest.adapter_version
+        self._exploration_rate = float(exploration_rate)
+        self._feature_builder = FeatureBuilder()
+        self._model = LinUCBModel(
+            policy_id=manifest.policy_id,
+            alpha=payload["alpha"],
+            dimension=payload["dimension"],
+            actions=payload["actions"],
+        )
+        if self._model.dimension != len(
+            self._feature_builder.build(_dimension_probe_context())
+        ):
+            raise ValueError("artifact dimension does not match feature schema")
+
+    def select(
+        self,
+        context: TutoringPolicyContext,
+        candidates: Sequence[CandidateAction],
+    ) -> PolicyDecision:
+        features = self._feature_builder.build(context)
+        ranked = self._model.rank(features, candidates)
+        scores = {
+            prediction.candidate_id: prediction.score
+            for prediction in ranked
+        }
+        uncertainties = {
+            prediction.candidate_id: prediction.uncertainty
+            for prediction in ranked
+        }
+        return select_with_epsilon(
+            policy_id=self.policy_id,
+            request_fingerprint=context.request_fingerprint,
+            candidates=candidates,
+            scores=scores,
+            uncertainties=uncertainties,
+            epsilon=self._exploration_rate,
+            context=context,
+        )
 
 
 def select_with_epsilon(
@@ -112,6 +188,7 @@ def select_with_epsilon(
     request_fingerprint: str,
     candidates: Sequence[CandidateAction],
     scores: Mapping[str, float],
+    uncertainties: Mapping[str, float],
     epsilon: float,
     context: TutoringPolicyContext,
 ) -> PolicyDecision:
@@ -130,7 +207,16 @@ def select_with_epsilon(
         raise ValueError("candidate ids must be unique")
     if set(scores) != set(candidate_ids):
         raise ValueError("scores must match exactly the candidate ids")
+    if set(uncertainties) != set(candidate_ids):
+        raise ValueError("uncertainties must match exactly the candidate ids")
     normalized_scores = {candidate_id: _require_finite(scores[candidate_id], "score") for candidate_id in candidate_ids}
+    normalized_uncertainties = {
+        candidate_id: _require_nonnegative(
+            uncertainties[candidate_id],
+            "uncertainty",
+        )
+        for candidate_id in candidate_ids
+    }
     winner = max(range(len(ordered)), key=lambda index: normalized_scores[candidate_ids[index]])
     may_explore = len(ordered) > 1 and _exploration_allowed(context, ordered)
     selected_index = winner
@@ -152,6 +238,7 @@ def select_with_epsilon(
             candidate_id=selected_id,
             score=normalized_scores[selected_id],
             propensity=propensity,
+            uncertainty=normalized_uncertainties[selected_id],
         ),
     )
 
@@ -196,11 +283,44 @@ def _require_finite(value: Any, name: str) -> float:
 
 
 def _require_finite_nonnegative(value: Any, name: str) -> None:
-    if _require_finite(value, name) < 0.0:
+    if _require_nonnegative(value, name) < 0.0:
         raise ValueError(f"{name} must be non-negative")
+
+
+def _require_nonnegative(value: Any, name: str) -> float:
+    numeric = _require_finite(value, name)
+    if numeric < 0.0:
+        raise ValueError(f"{name} must be non-negative")
+    return numeric
 
 
 def _require_probability(value: Any, name: str) -> None:
     numeric = _require_finite(value, name)
     if not 0.0 <= numeric <= 1.0:
         raise ValueError(f"{name} must be a probability")
+
+
+def _dimension_probe_context() -> TutoringPolicyContext:
+    from course_insight.modules.m6_tutoring_fsm.decision_policy import (
+        DecisionSignals,
+    )
+
+    return TutoringPolicyContext(
+        request_fingerprint="dimension-probe",
+        current_state="S0",
+        task_type="qa",
+        turn_count=0,
+        score_ratio=0.0,
+        target_concept_count=0,
+        signals=DecisionSignals(
+            needs_teacher_review=False,
+            has_diagnosed_misconception=False,
+            has_active_misconception=False,
+            has_prerequisite_gap=False,
+            has_new_evidence=False,
+            minimum_recent_correction_rate=0.0,
+            minimum_mastery_confidence=0.0,
+            maximum_hint_dependency=0.0,
+        ),
+        learner_evidence_count=0,
+    )

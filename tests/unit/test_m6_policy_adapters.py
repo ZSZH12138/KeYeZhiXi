@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import math
 
 import pytest
@@ -12,7 +13,14 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
 )
 from course_insight.modules.m6_tutoring_fsm.linucb import (
     LinUCBModel,
+    LinUCBPolicyAdapter,
     select_with_epsilon,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_artifacts import (
+    LoadedPolicyArtifact,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyArtifactManifest,
 )
 
 
@@ -41,6 +49,8 @@ def _context(**signal_overrides: bool) -> TutoringPolicyContext:
         target_concept_count=1,
         signals=signals,
         learner_evidence_count=1,
+        course_id="course-1",
+        class_id="class-1",
     )
 
 
@@ -85,6 +95,7 @@ def test_linucb_scores_by_hand_and_breaks_ties_by_candidate_order() -> None:
 
     assert [prediction.candidate_id for prediction in ranked] == ["first", "second"]
     assert [prediction.score for prediction in ranked] == [13.5, 13.5]
+    assert [prediction.uncertainty for prediction in ranked] == [5.0, 5.0]
     assert model.choose((3.0, 4.0), (_candidate("first"), _candidate("second"))).candidate_id == "first"
 
 
@@ -108,6 +119,7 @@ def test_epsilon_selection_records_exact_propensity_and_sums_to_one() -> None:
         request_fingerprint="request-1",
         candidates=candidates,
         scores={"winner": 2.0, "other": 1.0},
+        uncertainties={"winner": 0.25, "other": 0.5},
         epsilon=0.2,
         context=_context(),
     )
@@ -115,6 +127,10 @@ def test_epsilon_selection_records_exact_propensity_and_sums_to_one() -> None:
     expected = {"winner": 0.9, "other": 0.1}
     assert decision.prediction is not None
     assert decision.prediction.propensity == expected[decision.selected_candidate_id]
+    assert decision.prediction.uncertainty == {
+        "winner": 0.25,
+        "other": 0.5,
+    }[decision.selected_candidate_id]
     assert sum(expected.values()) == 1.0
 
 
@@ -125,6 +141,7 @@ def test_epsilon_exploration_is_banned_for_remediation_and_single_candidate() ->
         request_fingerprint="request-1",
         candidates=candidates,
         scores={"winner": 2.0, "other": 1.0},
+        uncertainties={"winner": 0.1, "other": 0.2},
         epsilon=1.0,
         context=_context(has_prerequisite_gap=True),
     )
@@ -133,6 +150,7 @@ def test_epsilon_exploration_is_banned_for_remediation_and_single_candidate() ->
         request_fingerprint="request-1",
         candidates=(candidates[0],),
         scores={"winner": 2.0},
+        uncertainties={"winner": 0.1},
         epsilon=1.0,
         context=_context(),
     )
@@ -140,3 +158,82 @@ def test_epsilon_exploration_is_banned_for_remediation_and_single_candidate() ->
     assert remediating.selected_candidate_id == "winner"
     assert remediating.prediction is not None and remediating.prediction.propensity == 1.0
     assert single.prediction is not None and single.prediction.propensity == 1.0
+
+
+def test_production_linucb_adapter_builds_features_and_scores_safe_subset() -> None:
+    dimension = 23
+    identity = [
+        [1.0 if row == column else 0.0 for column in range(dimension)]
+        for row in range(dimension)
+    ]
+    actions = {
+        "guided": {
+            "theta": [0.0, 2.0, *([0.0] * (dimension - 2))],
+            "inverse_covariance": identity,
+        },
+        "hint": {
+            "theta": [0.0] * dimension,
+            "inverse_covariance": identity,
+        },
+        "unused-full-action": {
+            "theta": [0.0] * dimension,
+            "inverse_covariance": identity,
+        },
+    }
+    manifest = PolicyArtifactManifest(
+        policy_id="policy-1",
+        adapter_id="m6-linucb-adapter",
+        adapter_version="v1",
+        algorithm="linucb",
+        state_graph_version="m6-state-graph-v1",
+        baseline_policy_version="m6-policy-v1",
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-action-space-v1",
+        reward_version="m6-reward-v1",
+        gate_policy_version="m6-active-gate-v1",
+        training_data_watermark="2026-07-27T00:00:00Z",
+        training_data_checksum="b" * 64,
+        artifact_sha256="a" * 64,
+        status="approved",
+        created_at="2026-07-27T01:00:00Z",
+        artifact_reference="model.json",
+        allowed_scopes=("course:course-1", "class:class-1"),
+    )
+    loaded = LoadedPolicyArtifact(
+        manifest=manifest,
+        payload={
+            "policy_id": "policy-1",
+            "adapter_id": "m6-linucb-adapter",
+            "adapter_version": "v1",
+            "feature_schema_version": "m6-features-v1",
+            "action_space_version": "m6-action-space-v1",
+            "dimension": dimension,
+            "alpha": 0.1,
+            "actions": actions,
+        },
+    )
+    adapter = LinUCBPolicyAdapter(loaded, exploration_rate=0.0)
+
+    decision = adapter.select(
+        _context(),
+        (_candidate("guided", "S3"), _candidate("hint", "S2")),
+    )
+
+    assert decision.selected_candidate_id == "guided"
+    assert decision.prediction is not None
+    assert decision.prediction.score > 2.0
+    assert decision.prediction.uncertainty > 0.0
+    with pytest.raises(ValueError, match="action parameters"):
+        adapter.select(_context(), (_candidate("unknown", "S3"),))
+    incompatible = LoadedPolicyArtifact(
+        manifest=replace(
+            manifest,
+            feature_schema_version="m6-features-v2",
+        ),
+        payload={
+            **loaded.payload,
+            "feature_schema_version": "m6-features-v2",
+        },
+    )
+    with pytest.raises(ValueError, match="feature schema"):
+        LinUCBPolicyAdapter(incompatible, exploration_rate=0.0)

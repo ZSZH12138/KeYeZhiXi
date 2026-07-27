@@ -622,6 +622,7 @@ def test_legacy_summary_replay_is_append_only_and_requires_exact_old_fields(
         approved=rich.approved,
         effective_sample_size=rich.effective_sample_size,
         action_coverage=rich.action_coverage,
+        observation_count=rich.observation_count,
     )
     repository = SQLiteM6Repository(tmp_path / "legacy.sqlite3")
     repository.initialize()

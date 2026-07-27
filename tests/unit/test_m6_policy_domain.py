@@ -14,6 +14,7 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
     PolicyArtifactManifest,
     PolicyDecision,
     PolicyEvaluationRecord,
+    PolicyExecutionRef,
     PolicyPrediction,
     TutoringPolicyContext,
 )
@@ -45,7 +46,94 @@ def _context(current_state: str, **signal_overrides: object) -> TutoringPolicyCo
         target_concept_count=2,
         signals=_signals(**signal_overrides),
         learner_evidence_count=4,
+        course_id="course-001",
+        class_id="class-001",
     )
+
+
+def _complete_manifest_values() -> dict[str, object]:
+    return {
+        "policy_id": "policy-001",
+        "adapter_id": "m6-linucb-adapter",
+        "adapter_version": "v1",
+        "algorithm": "linucb",
+        "state_graph_version": "m6-state-graph-v1",
+        "baseline_policy_version": "m6-policy-v1",
+        "feature_schema_version": "m6-features-v1",
+        "action_space_version": "m6-action-space-v1",
+        "reward_version": "m6-reward-v1",
+        "gate_policy_version": "m6-gate-v1",
+        "training_data_watermark": "2026-07-27T00:00:00Z",
+        "training_data_checksum": "b" * 64,
+        "artifact_sha256": "a" * 64,
+        "status": "approved",
+        "created_at": "2026-07-27T01:00:00Z",
+        "artifact_reference": "policy.json",
+        "allowed_scopes": ("course:course-001", "class:class-001"),
+    }
+
+
+def test_private_policy_identity_models_freeze_runtime_gate_evidence() -> None:
+    context = _context("S1")
+    prediction = PolicyPrediction(
+        policy_id="policy-001",
+        candidate_id="candidate-001",
+        score=1.0,
+        propensity=1.0,
+        uncertainty=0.25,
+    )
+    execution = PolicyExecutionRef(
+        request_fingerprint="a" * 64,
+        mode="active",
+        policy_id="policy-001",
+        adapter_id="m6-linucb-adapter",
+        adapter_version="v1",
+        artifact_sha256="b" * 64,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-action-space-v1",
+        gate_policy_version="m6-gate-v1",
+    )
+
+    assert context.course_id == "course-001"
+    assert context.class_id == "class-001"
+    assert prediction.uncertainty == 0.25
+    assert execution.canonical_payload()["gate_policy_version"] == "m6-gate-v1"
+    with pytest.raises(ValueError, match="uncertainty"):
+        PolicyPrediction(
+            policy_id="policy-001",
+            candidate_id="candidate-001",
+            score=1.0,
+            propensity=1.0,
+            uncertainty=-0.1,
+        )
+
+
+def test_manifest_requires_the_complete_uploaded_spec() -> None:
+    manifest = PolicyArtifactManifest(**_complete_manifest_values())  # type: ignore[arg-type]
+
+    assert set(manifest.canonical_payload()) == {
+        "policy_id",
+        "adapter_id",
+        "adapter_version",
+        "algorithm",
+        "state_graph_version",
+        "baseline_policy_version",
+        "feature_schema_version",
+        "action_space_version",
+        "reward_version",
+        "gate_policy_version",
+        "training_data_watermark",
+        "training_data_checksum",
+        "artifact_sha256",
+        "status",
+        "created_at",
+        "artifact_reference",
+        "allowed_scopes",
+    }
+    incomplete = dict(_complete_manifest_values())
+    incomplete.pop("training_data_checksum")
+    with pytest.raises(TypeError):
+        PolicyArtifactManifest(**incomplete)  # type: ignore[arg-type]
 
 
 def test_candidate_identity_uses_canonical_json_and_is_immutable() -> None:
@@ -141,16 +229,9 @@ def test_artifact_manifest_rejects_non_relative_artifact_references(
 
     with pytest.raises(ValueError, match="artifact_reference"):
         PolicyArtifactManifest(
-            policy_id="policy-001",
-            adapter_id="linucb",
-            adapter_version="v1",
-            artifact_sha256="a" * 64,
-            feature_schema_version="m6-features-v1",
-            action_space_version="m6-action-space-v1",
-            gate_policy_version="m6-gate-v1",
-            status="approved",
-            artifact_reference=artifact_reference,
-            allowed_scopes=("course-001",),
+            **(_complete_manifest_values() | {
+                "artifact_reference": artifact_reference,
+            })
         )
 
 
@@ -162,16 +243,9 @@ def test_artifact_manifest_accepts_only_json_artifact_references(
 
     with pytest.raises(ValueError, match="artifact_reference"):
         PolicyArtifactManifest(
-            policy_id="policy-001",
-            adapter_id="linucb",
-            adapter_version="v1",
-            artifact_sha256="a" * 64,
-            feature_schema_version="m6-features-v1",
-            action_space_version="m6-action-space-v1",
-            gate_policy_version="m6-gate-v1",
-            status="approved",
-            artifact_reference=artifact_reference,
-            allowed_scopes=("course-001",),
+            **(_complete_manifest_values() | {
+                "artifact_reference": artifact_reference,
+            })
         )
 
 
@@ -183,12 +257,14 @@ def test_numeric_policy_values_have_one_canonical_representation() -> None:
         candidate_id="candidate-001",
         score=1,
         propensity=1,
+        uncertainty=0,
     )
     float_prediction = PolicyPrediction(
         policy_id="policy-001",
         candidate_id="candidate-001",
         score=1.0,
         propensity=1.0,
+        uncertainty=0.0,
     )
 
     assert integer_prediction.score == 1.0
@@ -205,6 +281,7 @@ def test_policy_decision_rejects_prediction_for_an_unselected_candidate() -> Non
         candidate_id="candidate-b",
         score=0.5,
         propensity=1.0,
+        uncertainty=0.0,
     )
 
     with pytest.raises(ValueError, match="prediction.candidate_id"):
@@ -261,6 +338,7 @@ def test_policy_evaluation_record_canonically_freezes_complete_ope_evidence() ->
         approved=True,
         effective_sample_size=12,
         action_coverage=0.75,
+        observation_count=20,
         metrics={"snips": 0.6, "ips": 0.5},
         confidence_intervals={"ips": (0.25, 0.75)},
         state_slices=(
@@ -294,7 +372,7 @@ def test_policy_evaluation_record_canonically_freezes_complete_ope_evidence() ->
         '"group_slices":[{"key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
         'aaaaaaaaaaaaaaaa","metrics":{"dr":0.65},'
         '"sample_size":3}],"metrics":{"ips":0.5,"snips":0.6},'
-        '"policy_id":"policy-001","safety_reasons":[],'
+        '"observation_count":20,"policy_id":"policy-001","safety_reasons":[],'
         '"state_slices":[{"key":"S2","metrics":{"dr":0.7,"ips":0.6},'
         '"sample_size":4}],"status":"sufficient_data",'
         '"support_coverage":0.875}'
@@ -304,23 +382,18 @@ def test_policy_evaluation_record_canonically_freezes_complete_ope_evidence() ->
         record.metrics = ()  # type: ignore[misc]
 
 
-def test_policy_evaluation_record_keeps_legacy_payload_identity_with_defaults() -> None:
-    """Catch optional OPE evidence changing identities of already persisted rows."""
+def test_policy_evaluation_record_requires_observation_count() -> None:
+    """Catch active evidence that omits its independently measured support."""
 
-    record = PolicyEvaluationRecord(
-        policy_id="policy-001",
-        dataset_identity="dataset-001",
-        status="insufficient_data",
-        approved=False,
-        effective_sample_size=0,
-        action_coverage=0,
-    )
-
-    assert record.canonical_json() == (
-        '{"action_coverage":0.0,"approved":false,'
-        '"dataset_identity":"dataset-001","effective_sample_size":0.0,'
-        '"policy_id":"policy-001","status":"insufficient_data"}'
-    )
+    with pytest.raises(TypeError):
+        PolicyEvaluationRecord(
+            policy_id="policy-001",
+            dataset_identity="dataset-001",
+            status="insufficient_data",
+            approved=False,
+            effective_sample_size=0,
+            action_coverage=0,
+        )
 
 
 @pytest.mark.parametrize(
@@ -389,6 +462,7 @@ def test_policy_evaluation_record_rejects_invalid_nested_evidence(
         "approved": False,
         "effective_sample_size": 0,
         "action_coverage": 0,
+        "observation_count": 0,
     }
     values.update(overrides)
 

@@ -54,7 +54,8 @@ class ActivePolicyGate:
         support: int | None,
         uncertainty: float | None,
         offline_evaluation_approved: bool | None,
-        scope: str | None,
+        allowed_course_ids: tuple[str, ...],
+        allowed_class_ids: tuple[str, ...],
         request_fingerprint: str | None,
         context: TutoringPolicyContext,
     ) -> PolicyGateResult:
@@ -81,7 +82,14 @@ class ActivePolicyGate:
             reasons.append("uncertainty_too_high")
         if offline_evaluation_approved is not True:
             reasons.append("offline_evaluation_not_approved")
-        if not isinstance(scope, str) or scope not in manifest.allowed_scopes:
+        if (
+            context.course_id is None
+            or context.class_id is None
+            or context.course_id not in allowed_course_ids
+            or context.class_id not in allowed_class_ids
+            or f"course:{context.course_id}" not in manifest.allowed_scopes
+            or f"class:{context.class_id}" not in manifest.allowed_scopes
+        ):
             reasons.append("scope_not_allowed")
         if not isinstance(context, TutoringPolicyContext):
             reasons.append("policy_context_invalid")

@@ -105,6 +105,8 @@ class TutoringPolicyContext(_CanonicalIdentity):
     target_concept_count: int
     signals: DecisionSignals
     learner_evidence_count: int
+    course_id: str | None = None
+    class_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_nonblank(self.request_fingerprint, "request_fingerprint")
@@ -117,6 +119,10 @@ class TutoringPolicyContext(_CanonicalIdentity):
         if not isinstance(self.signals, DecisionSignals):
             raise ValueError("signals must be a DecisionSignals instance")
         _require_nonnegative_int(self.learner_evidence_count, "learner_evidence_count")
+        for name in ("course_id", "class_id"):
+            value = getattr(self, name)
+            if value is not None:
+                _require_nonblank(value, name)
 
     def canonical_payload(self) -> Mapping[str, Any]:
         return {
@@ -128,6 +134,8 @@ class TutoringPolicyContext(_CanonicalIdentity):
             "target_concept_count": self.target_concept_count,
             "signals": _signals_payload(self.signals),
             "learner_evidence_count": self.learner_evidence_count,
+            "course_id": self.course_id,
+            "class_id": self.class_id,
         }
 
 
@@ -139,6 +147,7 @@ class PolicyPrediction(_CanonicalIdentity):
     candidate_id: str
     score: float
     propensity: float
+    uncertainty: float
     feature_schema_version: str = "m6-features-v1"
 
     def __post_init__(self) -> None:
@@ -146,8 +155,12 @@ class PolicyPrediction(_CanonicalIdentity):
         _require_nonblank(self.candidate_id, "candidate_id")
         _require_finite(self.score, "score")
         _require_probability(self.propensity, "propensity")
+        _require_finite(self.uncertainty, "uncertainty")
+        if self.uncertainty < 0.0:
+            raise ValueError("uncertainty must be non-negative")
         object.__setattr__(self, "score", float(self.score))
         object.__setattr__(self, "propensity", float(self.propensity))
+        object.__setattr__(self, "uncertainty", float(self.uncertainty))
         _require_nonblank(self.feature_schema_version, "feature_schema_version")
 
     def canonical_payload(self) -> Mapping[str, Any]:
@@ -156,6 +169,7 @@ class PolicyPrediction(_CanonicalIdentity):
             "candidate_id": self.candidate_id,
             "score": self.score,
             "propensity": self.propensity,
+            "uncertainty": self.uncertainty,
             "feature_schema_version": self.feature_schema_version,
         }
 
@@ -215,6 +229,7 @@ class PolicyExecutionRef(_CanonicalIdentity):
     artifact_sha256: str | None
     feature_schema_version: str
     action_space_version: str
+    gate_policy_version: str
 
     def __post_init__(self) -> None:
         _require_nonblank(self.request_fingerprint, "request_fingerprint")
@@ -225,6 +240,7 @@ class PolicyExecutionRef(_CanonicalIdentity):
             "adapter_version",
             "feature_schema_version",
             "action_space_version",
+            "gate_policy_version",
         ):
             _require_nonblank(getattr(self, name), name)
         if self.artifact_sha256 is not None:
@@ -244,6 +260,7 @@ class PolicyExecutionRef(_CanonicalIdentity):
             "artifact_sha256": self.artifact_sha256,
             "feature_schema_version": self.feature_schema_version,
             "action_space_version": self.action_space_version,
+            "gate_policy_version": self.gate_policy_version,
         }
 
 
@@ -254,11 +271,18 @@ class PolicyArtifactManifest(_CanonicalIdentity):
     policy_id: str
     adapter_id: str
     adapter_version: str
-    artifact_sha256: str
+    algorithm: str
+    state_graph_version: str
+    baseline_policy_version: str
     feature_schema_version: str
     action_space_version: str
+    reward_version: str
     gate_policy_version: str
+    training_data_watermark: str
+    training_data_checksum: str
+    artifact_sha256: str
     status: str
+    created_at: str
     artifact_reference: str
     allowed_scopes: tuple[str, ...]
 
@@ -267,13 +291,20 @@ class PolicyArtifactManifest(_CanonicalIdentity):
             "policy_id",
             "adapter_id",
             "adapter_version",
+            "algorithm",
+            "state_graph_version",
+            "baseline_policy_version",
             "feature_schema_version",
             "action_space_version",
+            "reward_version",
             "gate_policy_version",
+            "training_data_watermark",
+            "created_at",
             "artifact_reference",
         ):
             _require_nonblank(getattr(self, name), name)
         _require_sha256(self.artifact_sha256, "artifact_sha256")
+        _require_sha256(self.training_data_checksum, "training_data_checksum")
         _require_member(self.status, ARTIFACT_STATUSES, "status")
         _require_relative_artifact_reference(self.artifact_reference)
         _require_nonempty_unique_strings(self.allowed_scopes, "allowed_scopes")
@@ -283,11 +314,18 @@ class PolicyArtifactManifest(_CanonicalIdentity):
             "policy_id": self.policy_id,
             "adapter_id": self.adapter_id,
             "adapter_version": self.adapter_version,
-            "artifact_sha256": self.artifact_sha256,
+            "algorithm": self.algorithm,
+            "state_graph_version": self.state_graph_version,
+            "baseline_policy_version": self.baseline_policy_version,
             "feature_schema_version": self.feature_schema_version,
             "action_space_version": self.action_space_version,
+            "reward_version": self.reward_version,
             "gate_policy_version": self.gate_policy_version,
+            "training_data_watermark": self.training_data_watermark,
+            "training_data_checksum": self.training_data_checksum,
+            "artifact_sha256": self.artifact_sha256,
             "status": self.status,
+            "created_at": self.created_at,
             "artifact_reference": self.artifact_reference,
             "allowed_scopes": list(self.allowed_scopes),
         }
@@ -436,6 +474,7 @@ class PolicyEvaluationRecord(_CanonicalIdentity):
     approved: bool
     effective_sample_size: float
     action_coverage: float
+    observation_count: int
     metrics: object = ()
     confidence_intervals: object = ()
     state_slices: object = ()
@@ -458,6 +497,7 @@ class PolicyEvaluationRecord(_CanonicalIdentity):
             raise ValueError("effective_sample_size must be non-negative")
         _require_probability(self.action_coverage, "action_coverage")
         object.__setattr__(self, "action_coverage", float(self.action_coverage))
+        _require_nonnegative_int(self.observation_count, "observation_count")
         object.__setattr__(
             self,
             "metrics",
@@ -527,6 +567,7 @@ class PolicyEvaluationRecord(_CanonicalIdentity):
             "approved": self.approved,
             "effective_sample_size": self.effective_sample_size,
             "action_coverage": self.action_coverage,
+            "observation_count": self.observation_count,
         }
         if self.metrics:
             payload["metrics"] = dict(self.metrics)

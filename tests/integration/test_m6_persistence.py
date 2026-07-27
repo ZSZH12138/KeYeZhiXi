@@ -291,6 +291,7 @@ def _policy_execution(
         artifact_sha256=None,
         feature_schema_version="m6-features-v1",
         action_space_version="m6-actions-v1",
+        gate_policy_version="m6-gate-v1",
     )
 
 
@@ -299,13 +300,20 @@ def _policy_artifact() -> PolicyArtifactManifest:
         policy_id="policy_linucb_v1",
         adapter_id="linucb",
         adapter_version="1",
+        algorithm="linucb",
+        state_graph_version="m6-state-graph-v1",
+        baseline_policy_version="m6-rules-v1",
         artifact_sha256="c" * 64,
         feature_schema_version="m6-features-v1",
         action_space_version="m6-actions-v1",
+        reward_version="m6-reward-v1",
         gate_policy_version="m6-gate-v1",
+        training_data_watermark="2026-07-27T00:00:00Z",
+        training_data_checksum="d" * 64,
         status="approved",
+        created_at="2026-07-27T01:00:00Z",
         artifact_reference="policies/linucb-v1.json",
-        allowed_scopes=("school-a",),
+        allowed_scopes=("course:school-a", "class:class-a"),
     )
 
 
@@ -1050,6 +1058,7 @@ def test_policy_records_round_trip_across_repository_restart(
         approved=True,
         effective_sample_size=42.0,
         action_coverage=0.75,
+        observation_count=50,
     )
 
     assert repository.save_policy_artifact(artifact) == artifact

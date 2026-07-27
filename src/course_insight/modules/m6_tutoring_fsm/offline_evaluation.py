@@ -166,6 +166,7 @@ def evaluate_offline_policy(
         approved=approved,
         effective_sample_size=effective_sample_size,
         action_coverage=action_coverage,
+        observation_count=len(ordered),
         metrics=metrics,
         confidence_intervals=confidence_intervals,
         state_slices=state_slices,

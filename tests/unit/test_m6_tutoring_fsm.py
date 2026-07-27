@@ -1216,11 +1216,12 @@ def _learned_runtime(mode: str) -> PolicyRuntime:
                 candidate_ids=tuple(
                     candidate.candidate_id for candidate in candidates
                 ),
-                prediction=PolicyPrediction(
+                    prediction=PolicyPrediction(
                     policy_id=self.policy_id,
                     candidate_id=selected.candidate_id,
                     score=1.0,
-                    propensity=1.0,
+                        propensity=1.0,
+                        uncertainty=0.0,
                 ),
             )
 
@@ -1228,13 +1229,20 @@ def _learned_runtime(mode: str) -> PolicyRuntime:
         policy_id="test-learned-policy-v1",
         adapter_id="test-prefer-hint",
         adapter_version="v1",
+        algorithm="linucb",
+        state_graph_version="m6-state-graph-v1",
+        baseline_policy_version="m6-rules-v1",
         artifact_sha256="d" * 64,
         feature_schema_version="m6-features-v1",
         action_space_version="m6-action-space-v1",
+        reward_version="m6-reward-v1",
         gate_policy_version="m6-active-gate-v1",
+        training_data_watermark="2026-07-27T00:00:00Z",
+        training_data_checksum="e" * 64,
         status="approved",
+        created_at="2026-07-27T01:00:00Z",
         artifact_reference="policy.json",
-        allowed_scopes=(COURSE_ID,),
+        allowed_scopes=(f"course:{COURSE_ID}", f"class:{CLASS_ID}"),
     )
 
     def load_artifact(candidate_ids: tuple[str, ...]) -> LoadedPolicyArtifact:
@@ -1260,9 +1268,9 @@ def _learned_runtime(mode: str) -> PolicyRuntime:
         ),
         gate_inputs=PolicyRuntimeGateInputs(
             support=10,
-            uncertainty=0.0,
             offline_evaluation_approved=True,
-            scope=COURSE_ID,
+            allowed_course_ids=(COURSE_ID,),
+            allowed_class_ids=(CLASS_ID,),
         ),
     )
 

@@ -22,6 +22,7 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
     CandidateAction,
     PolicyArtifactManifest,
     PolicyDecision,
+    PolicyEvaluationRecord,
     PolicyExecutionRef,
     PolicyPrediction,
     TutoringPolicyContext,
@@ -53,6 +54,8 @@ def _context() -> TutoringPolicyContext:
             maximum_hint_dependency=0.0,
         ),
         learner_evidence_count=1,
+        course_id="course-1",
+        class_id="class-1",
     )
 
 
@@ -80,13 +83,20 @@ def _manifest() -> PolicyArtifactManifest:
         policy_id="learned-policy-v1",
         adapter_id="test-learned-adapter",
         adapter_version="v1",
+        algorithm="linucb",
+        state_graph_version="m6-state-graph-v1",
+        baseline_policy_version="m6-rules-v1",
         artifact_sha256=ARTIFACT_SHA256,
         feature_schema_version="m6-features-v1",
         action_space_version="m6-action-space-v1",
         gate_policy_version="m6-active-gate-v1",
+        reward_version="m6-reward-v1",
+        training_data_watermark="2026-07-27T00:00:00Z",
+        training_data_checksum="d" * 64,
         status="approved",
+        created_at="2026-07-27T01:00:00Z",
         artifact_reference="policy.json",
-        allowed_scopes=("course-pseudonymous",),
+        allowed_scopes=("course:course-1", "class:class-1"),
     )
 
 
@@ -133,6 +143,7 @@ class _SelectingAdapter:
                 candidate_id=selected,
                 score=0.75,
                 propensity=0.8,
+                uncertainty=0.1,
             ),
         )
 
@@ -187,9 +198,9 @@ def _gate() -> ActivePolicyGate:
 def _gate_inputs() -> PolicyRuntimeGateInputs:
     return PolicyRuntimeGateInputs(
         support=20,
-        uncertainty=0.1,
         offline_evaluation_approved=True,
-        scope="course-pseudonymous",
+        allowed_course_ids=("course-1",),
+        allowed_class_ids=("class-1",),
     )
 
 
@@ -217,7 +228,11 @@ def test_rules_mode_does_not_load_optional_policy_artifacts() -> None:
         calls += 1
         raise AssertionError("rules mode must not load learned artifacts")
 
-    runtime = PolicyRuntime(mode="rules", artifact_loader=exploding_loader)
+    runtime = PolicyRuntime(
+        mode="rules",
+        artifact_loader=exploding_loader,
+        gate_policy_version="configured-gate-v7",
+    )
     context = _context()
     candidates = _candidates()
 
@@ -226,9 +241,29 @@ def test_rules_mode_does_not_load_optional_policy_artifacts() -> None:
 
     assert calls == 0
     assert execution.mode == "rules"
+    assert execution.gate_policy_version == "configured-gate-v7"
     assert selection.public_candidate.next_state == "S3"
     assert selection.observation.selected_candidate_id == candidates[0].candidate_id
     assert selection.observation.propensity == 1.0
+
+
+def test_active_gate_uses_prediction_uncertainty_and_both_scope_dimensions() -> None:
+    allowed = _runtime(mode="active").select(
+        _runtime(mode="active").prepare_execution(_context(), _candidates()),
+        _context(),
+        _candidates(),
+    )
+    blocked_context = replace(_context(), class_id="class-2")
+    blocked_runtime = _runtime(mode="active")
+    blocked = blocked_runtime.select(
+        blocked_runtime.prepare_execution(blocked_context, _candidates()),
+        blocked_context,
+        _candidates(),
+    )
+
+    assert allowed.public_candidate.candidate_id == _candidates()[1].candidate_id
+    assert blocked.public_candidate.candidate_id == _candidates()[0].candidate_id
+    assert blocked.policy_decision.fallback_reason == "active_gate_rejected"
 
 
 def test_shadow_records_prediction_without_changing_rules_candidate() -> None:
@@ -349,6 +384,7 @@ def test_repository_keeps_the_immutable_first_policy_writer() -> None:
         artifact_sha256=None,
         feature_schema_version="m6-features-v1",
         action_space_version="m6-action-space-v1",
+        gate_policy_version="m6-active-gate-v1",
     )
     competitor = replace(
         first,
@@ -374,6 +410,7 @@ def test_repository_reports_stored_policy_binding_corruption() -> None:
         artifact_sha256=None,
         feature_schema_version="m6-features-v1",
         action_space_version="m6-action-space-v1",
+        gate_policy_version="m6-active-gate-v1",
     )
     repository._policy_executions = {REQUEST_FINGERPRINT: corrupt}  # noqa: SLF001
 
@@ -381,3 +418,28 @@ def test_repository_reports_stored_policy_binding_corruption() -> None:
         repository.get_policy_execution_by_request(REQUEST_FINGERPRINT)
 
     assert raised.value.code == "TUTORING_POLICY_INTEGRITY_ERROR"
+
+
+def test_in_memory_repository_selects_exact_manifest_and_evaluation() -> None:
+    repository = InMemoryM6Repository()
+    manifest = _manifest()
+    evaluation = PolicyEvaluationRecord(
+        policy_id=manifest.policy_id,
+        dataset_identity="dataset-1",
+        status="sufficient_data",
+        approved=True,
+        effective_sample_size=10,
+        action_coverage=1.0,
+        observation_count=10,
+        metrics={"ips": 0.5},
+        confidence_intervals={"ips": (0.4, 0.6)},
+    )
+
+    assert repository.save_policy_artifact(manifest) == manifest
+    assert repository.save_policy_evaluation(evaluation) == evaluation
+    assert repository.get_policy_artifact(manifest.policy_id) == manifest
+    assert (
+        repository.get_policy_evaluation(manifest.policy_id, "dataset-1")
+        == evaluation
+    )
+    assert repository.get_policy_evaluation(manifest.policy_id, "other") is None

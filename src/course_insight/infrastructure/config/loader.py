@@ -121,6 +121,15 @@ def _validate_group_structure(merged: Mapping[str, Any]) -> None:
                 fields=(group,),
                 reason="object_required",
             )
+    if "m6_policy" in merged and not isinstance(
+        merged["m6_policy"],
+        Mapping,
+    ):
+        raise ConfigurationError(
+            code="INVALID_CONFIGURATION",
+            fields=("m6_policy",),
+            reason="object_required",
+        )
 
 
 def _select_path(
@@ -297,6 +306,14 @@ def _resolve_paths(
         runtime=runtime,
         field="logging.directory",
     )
+    policy = result.get("m6_policy")
+    if isinstance(policy, dict):
+        policy["runtime_directory"] = _runtime_path(
+            policy.get("runtime_directory", "m6_policy"),
+            root=root,
+            runtime=runtime,
+            field="m6_policy.runtime_directory",
+        )
     return result
 
 

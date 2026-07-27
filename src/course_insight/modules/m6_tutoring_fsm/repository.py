@@ -16,6 +16,8 @@ from course_insight.modules.m6_tutoring_fsm.identity import (
     derive_identifier,
 )
 from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyArtifactManifest,
+    PolicyEvaluationRecord,
     PolicyExecutionRef,
     PolicyObservation,
 )
@@ -131,6 +133,19 @@ class M6Repository(Protocol):
     ) -> PolicyExecutionRef | None:
         """Load one immutable first-writer policy binding."""
 
+    def get_policy_artifact(
+        self,
+        policy_id: str,
+    ) -> PolicyArtifactManifest | None:
+        """Load one exact immutable policy manifest."""
+
+    def get_policy_evaluation(
+        self,
+        policy_id: str,
+        dataset_identity: str,
+    ) -> PolicyEvaluationRecord | None:
+        """Load one exact policy/dataset evaluation."""
+
     def commit_policy_execution(
         self,
         execution: PolicyExecutionRef,
@@ -155,6 +170,61 @@ class InMemoryM6Repository:
         self._decisions_by_input: dict[str, TutoringDecisionRecord] = {}
         self._decisions_by_turn: dict[tuple[str, int], TutoringDecisionRecord] = {}
         self._policy_executions: dict[str, PolicyExecutionRef] = {}
+        self._policy_artifacts: dict[str, PolicyArtifactManifest] = {}
+        self._policy_evaluations: dict[
+            tuple[str, str],
+            PolicyEvaluationRecord,
+        ] = {}
+
+    def save_policy_artifact(
+        self,
+        manifest: PolicyArtifactManifest,
+    ) -> PolicyArtifactManifest:
+        if not isinstance(manifest, PolicyArtifactManifest):
+            raise TypeError("manifest must be a PolicyArtifactManifest")
+        with self._lock:
+            stored = self._policy_artifacts.get(manifest.policy_id)
+            if stored is not None:
+                return stored
+            self._policy_artifacts = {
+                **self._policy_artifacts,
+                manifest.policy_id: manifest,
+            }
+            return manifest
+
+    def get_policy_artifact(
+        self,
+        policy_id: str,
+    ) -> PolicyArtifactManifest | None:
+        with self._lock:
+            return self._policy_artifacts.get(policy_id)
+
+    def save_policy_evaluation(
+        self,
+        evaluation: PolicyEvaluationRecord,
+    ) -> PolicyEvaluationRecord:
+        if not isinstance(evaluation, PolicyEvaluationRecord):
+            raise TypeError("evaluation must be a PolicyEvaluationRecord")
+        key = (evaluation.policy_id, evaluation.dataset_identity)
+        with self._lock:
+            stored = self._policy_evaluations.get(key)
+            if stored is not None:
+                return stored
+            self._policy_evaluations = {
+                **self._policy_evaluations,
+                key: evaluation,
+            }
+            return evaluation
+
+    def get_policy_evaluation(
+        self,
+        policy_id: str,
+        dataset_identity: str,
+    ) -> PolicyEvaluationRecord | None:
+        with self._lock:
+            return self._policy_evaluations.get(
+                (policy_id, dataset_identity)
+            )
 
     def save_session_state(self, snapshot: SessionStateSnapshot) -> None:
         candidate = isolated_session_snapshot(snapshot)

@@ -34,9 +34,9 @@ class PolicyRuntimeGateInputs:
     """Request-independent evidence supplied to the active-policy gate."""
 
     support: int | None
-    uncertainty: float | None
     offline_evaluation_approved: bool | None
-    scope: str | None
+    allowed_course_ids: tuple[str, ...]
+    allowed_class_ids: tuple[str, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -59,6 +59,7 @@ class PolicyRuntime:
         artifact_loader: ArtifactLoader | None = None,
         active_gate: ActivePolicyGate | None = None,
         gate_inputs: PolicyRuntimeGateInputs | None = None,
+        gate_policy_version: str = "m6-active-gate-v1",
     ) -> None:
         if mode not in POLICY_MODES:
             raise ValueError("policy runtime mode is not supported")
@@ -69,6 +70,9 @@ class PolicyRuntime:
         self._artifact_loader = artifact_loader
         self._active_gate = active_gate
         self._gate_inputs = gate_inputs
+        if not isinstance(gate_policy_version, str) or not gate_policy_version.strip():
+            raise ValueError("gate_policy_version must not be blank")
+        self._gate_policy_version = gate_policy_version
 
     @property
     def mode(self) -> str:
@@ -83,7 +87,10 @@ class PolicyRuntime:
 
         ordered = _validated_candidates(candidates)
         if self._mode == "rules":
-            return rules_policy_execution(context.request_fingerprint)
+            return rules_policy_execution(
+                context.request_fingerprint,
+                gate_policy_version=self._gate_policy_version,
+            )
         try:
             self._feature_builder.build(context)
             loaded, adapter = self._load_learned(ordered)
@@ -97,9 +104,13 @@ class PolicyRuntime:
                 artifact_sha256=manifest.artifact_sha256,
                 feature_schema_version=manifest.feature_schema_version,
                 action_space_version=manifest.action_space_version,
+                gate_policy_version=manifest.gate_policy_version,
             )
         except Exception:
-            return rules_policy_execution(context.request_fingerprint)
+            return rules_policy_execution(
+                context.request_fingerprint,
+                gate_policy_version=self._gate_policy_version,
+            )
 
     def select(
         self,
@@ -142,6 +153,7 @@ class PolicyRuntime:
                 loaded=loaded,
                 context=context,
                 candidate_count=len(ordered),
+                uncertainty=learned.prediction.uncertainty,
             )
             if not gate.allowed:
                 return self._fallback(
@@ -191,6 +203,7 @@ class PolicyRuntime:
         loaded: LoadedPolicyArtifact,
         context: TutoringPolicyContext,
         candidate_count: int,
+        uncertainty: float,
     ) -> Any:
         if self._active_gate is None or self._gate_inputs is None:
             raise ValueError("active gate configuration is unavailable")
@@ -203,9 +216,10 @@ class PolicyRuntime:
             action_space_version=manifest.action_space_version,
             candidate_count=candidate_count,
             support=inputs.support,
-            uncertainty=inputs.uncertainty,
+            uncertainty=uncertainty,
             offline_evaluation_approved=inputs.offline_evaluation_approved,
-            scope=inputs.scope,
+            allowed_course_ids=inputs.allowed_course_ids,
+            allowed_class_ids=inputs.allowed_class_ids,
             request_fingerprint=context.request_fingerprint,
             context=context,
         )
@@ -234,7 +248,11 @@ class PolicyRuntime:
         )
 
 
-def rules_policy_execution(request_fingerprint: str) -> PolicyExecutionRef:
+def rules_policy_execution(
+    request_fingerprint: str,
+    *,
+    gate_policy_version: str = "m6-active-gate-v1",
+) -> PolicyExecutionRef:
     """Return the canonical deterministic binding for one existing request."""
 
     adapter = RulesPolicyAdapter()
@@ -247,6 +265,7 @@ def rules_policy_execution(request_fingerprint: str) -> PolicyExecutionRef:
         artifact_sha256=None,
         feature_schema_version="m6-features-v1",
         action_space_version="m6-action-space-v1",
+        gate_policy_version=gate_policy_version,
     )
 
 
@@ -303,6 +322,7 @@ def _assert_execution_matches_loaded(
         or execution.artifact_sha256 != manifest.artifact_sha256
         or execution.feature_schema_version != manifest.feature_schema_version
         or execution.action_space_version != manifest.action_space_version
+        or execution.gate_policy_version != manifest.gate_policy_version
     ):
         raise ValueError("prepared policy execution no longer matches runtime")
 

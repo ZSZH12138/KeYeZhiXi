@@ -8,7 +8,7 @@ import uuid
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
-from typing import Mapping, Protocol, TypeVar, cast
+from typing import Callable, Mapping, Protocol, TypeVar, cast
 
 from course_insight.application.coordinator import AppCoordinator
 from course_insight.application.runtime_context import CourseRuntimeRegistry
@@ -81,6 +81,25 @@ from course_insight.modules.m5_learner_class_state.update_policy import (
     DeterministicStateUpdatePolicy,
 )
 from course_insight.modules.m6_tutoring_fsm.repository import M6Repository
+from course_insight.modules.m6_tutoring_fsm.linucb import LinUCBPolicyAdapter
+from course_insight.modules.m6_tutoring_fsm.policy_artifacts import (
+    LoadedPolicyArtifact,
+    load_policy_artifact_for_manifest,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_gate import (
+    ActivePolicyGate,
+    PolicyGateConfig,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_runtime import (
+    PolicyRuntime,
+    PolicyRuntimeGateInputs,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    EVALUATION_METRICS,
+    PolicyArtifactManifest,
+    PolicyEvaluationRecord,
+)
+from course_insight.modules.m6_tutoring_fsm.safety_envelope import SafetyEnvelope
 from course_insight.modules.m6_tutoring_fsm.service import (
     M6TutoringControlService,
 )
@@ -356,6 +375,10 @@ def _assemble_application(
         M6TutoringControlService(
             DEFAULT_STATE_MACHINE,
             durable["m6"],
+            policy_runtime=_build_m6_policy_runtime(
+                settings,
+                durable["m6"],
+            ),
         )
         if service_overrides.m6 is None
         else service_overrides.m6
@@ -528,6 +551,147 @@ def _supports_outbox(repository: object) -> bool:
         "renew_outbox_leases",
     )
     return all(callable(getattr(repository, name, None)) for name in methods)
+
+
+def _build_m6_policy_runtime(
+    settings: PlatformSettings,
+    repository: object,
+) -> PolicyRuntime:
+    configured = settings.m6_policy
+    if configured.mode == "rules":
+        return PolicyRuntime(
+            mode="rules",
+            gate_policy_version=configured.gate_policy_version,
+        )
+    manifest = _load_policy_manifest(repository, configured.policy_id)
+    if manifest is None:
+        return PolicyRuntime(
+            mode=configured.mode,
+            gate_policy_version=configured.gate_policy_version,
+        )
+    try:
+        loaded = load_policy_artifact_for_manifest(
+            configured.runtime_directory,
+            manifest,
+            expected_action_ids=SafetyEnvelope.all_candidate_ids(),
+        )
+        adapter = LinUCBPolicyAdapter(
+            loaded,
+            exploration_rate=configured.exploration_rate,
+        )
+    except (OSError, TypeError, ValueError):
+        return PolicyRuntime(
+            mode=configured.mode,
+            gate_policy_version=configured.gate_policy_version,
+        )
+    evaluation = _load_policy_evaluation(
+        repository,
+        policy_id=manifest.policy_id,
+        dataset_identity=configured.evaluation_dataset_identity,
+    )
+    usable_evaluation = _usable_active_evaluation(
+        evaluation,
+        minimum_support=configured.minimum_support,
+    )
+    gate_inputs = PolicyRuntimeGateInputs(
+        support=(
+            None if evaluation is None else evaluation.observation_count
+        ),
+        offline_evaluation_approved=usable_evaluation,
+        allowed_course_ids=configured.allowed_course_ids,
+        allowed_class_ids=configured.allowed_class_ids,
+    )
+    gate = ActivePolicyGate(
+        PolicyGateConfig(
+            gate_policy_version=configured.gate_policy_version,
+            minimum_support=configured.minimum_support,
+            maximum_uncertainty=configured.maximum_uncertainty,
+            rollout_percentage=configured.rollout_percentage,
+            kill_switch=configured.global_kill_switch,
+        )
+    )
+    return PolicyRuntime(
+        mode=configured.mode,
+        learned_adapter=adapter,
+        artifact_loader=_fixed_artifact_loader(loaded),
+        active_gate=gate,
+        gate_inputs=gate_inputs,
+        gate_policy_version=configured.gate_policy_version,
+    )
+
+
+def _load_policy_manifest(
+    repository: object,
+    policy_id: str | None,
+) -> PolicyArtifactManifest | None:
+    getter = getattr(repository, "get_policy_artifact", None)
+    if policy_id is None or not callable(getter):
+        return None
+    try:
+        value = getter(policy_id)
+    except Exception:
+        return None
+    return (
+        value
+        if isinstance(value, PolicyArtifactManifest)
+        and value.policy_id == policy_id
+        else None
+    )
+
+
+def _load_policy_evaluation(
+    repository: object,
+    *,
+    policy_id: str,
+    dataset_identity: str | None,
+) -> PolicyEvaluationRecord | None:
+    getter = getattr(repository, "get_policy_evaluation", None)
+    if dataset_identity is None or not callable(getter):
+        return None
+    try:
+        value = getter(policy_id, dataset_identity)
+    except Exception:
+        return None
+    return (
+        value
+        if isinstance(value, PolicyEvaluationRecord)
+        and value.policy_id == policy_id
+        and value.dataset_identity == dataset_identity
+        else None
+    )
+
+
+def _usable_active_evaluation(
+    evaluation: PolicyEvaluationRecord | None,
+    *,
+    minimum_support: int,
+) -> bool:
+    if evaluation is None:
+        return False
+    metric_names = {name for name, _ in evaluation.metrics}
+    interval_names = {
+        name for name, _, _ in evaluation.confidence_intervals
+    }
+    return (
+        evaluation.status == "sufficient_data"
+        and evaluation.approved
+        and evaluation.observation_count >= minimum_support
+        and metric_names == set(EVALUATION_METRICS)
+        and interval_names == set(EVALUATION_METRICS)
+    )
+
+
+def _fixed_artifact_loader(
+    loaded: LoadedPolicyArtifact,
+) -> Callable[[tuple[str, ...]], LoadedPolicyArtifact]:
+    action_ids = frozenset(loaded.payload["actions"])
+
+    def load(candidate_ids: tuple[str, ...]) -> LoadedPolicyArtifact:
+        if not candidate_ids or not set(candidate_ids).issubset(action_ids):
+            raise ValueError("safe candidates are missing from artifact")
+        return loaded
+
+    return load
 
 
 def _read_markdown(path: Path) -> str:

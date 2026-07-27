@@ -204,6 +204,7 @@ def test_policy_rows_are_validated_and_imported_in_dependency_order(
         approved=True,
         effective_sample_size=20.0,
         action_coverage=1.0,
+        observation_count=25,
     )
     repository.save_policy_artifact(artifact)
     repository.commit_policy_execution(execution)
@@ -250,6 +251,7 @@ def test_policy_source_rejects_payload_text_normalized_by_dataclass(
         approved=True,
         effective_sample_size=20.0,
         action_coverage=1.0,
+        observation_count=25,
     )
     repository.save_policy_evaluation(evaluation)
     connection = __import__("sqlite3").connect(source)

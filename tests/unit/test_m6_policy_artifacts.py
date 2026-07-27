@@ -6,7 +6,10 @@ import json
 import pytest
 
 from course_insight.modules.m6_tutoring_fsm.decision_policy import DecisionSignals
-from course_insight.modules.m6_tutoring_fsm.policy_artifacts import load_policy_artifact
+from course_insight.modules.m6_tutoring_fsm.policy_artifacts import (
+    load_policy_artifact,
+    load_policy_artifact_for_manifest,
+)
 from course_insight.modules.m6_tutoring_fsm.policy_gate import ActivePolicyGate, PolicyGateConfig
 from course_insight.modules.m6_tutoring_fsm.policy_types import (
     PolicyArtifactManifest,
@@ -49,6 +52,8 @@ def _context(**signal_overrides: bool) -> TutoringPolicyContext:
         target_concept_count=1,
         signals=signals,
         learner_evidence_count=1,
+        course_id="course-1",
+        class_id="class-1",
     )
 
 
@@ -78,13 +83,20 @@ def _write_bundle(tmp_path, *, digest: str | None = None, artifact_overrides: di
         "action_space_version": "m6-action-space-v1",
         "adapter_id": "m6-linucb-adapter",
         "adapter_version": "v1",
-        "allowed_scopes": ["school-a"],
+        "algorithm": "linucb",
+        "baseline_policy_version": "m6-policy-v1",
+        "created_at": "2026-07-27T01:00:00Z",
+        "allowed_scopes": ["course:course-1", "class:class-1"],
         "artifact_reference": "model.json",
         "artifact_sha256": digest or sha256(artifact_json.encode("utf-8")).hexdigest(),
         "feature_schema_version": "m6-features-v1",
         "gate_policy_version": "m6-active-gate-v1",
         "policy_id": "m6-linucb-v1",
+        "reward_version": "m6-reward-v1",
+        "state_graph_version": "m6-state-graph-v1",
         "status": "approved",
+        "training_data_checksum": "b" * 64,
+        "training_data_watermark": "2026-07-27T00:00:00Z",
     }
     (tmp_path / "manifest.json").write_text(_canonical(manifest), encoding="utf-8")
     return manifest, artifact
@@ -97,7 +109,12 @@ def test_loads_only_canonical_json_and_checks_digest_version_dimension_and_actio
         tmp_path, "manifest.json", expected_action_ids=EXPECTED_ACTION_IDS
     )
 
-    assert loaded.manifest == PolicyArtifactManifest(**(manifest | {"allowed_scopes": ("school-a",)}))
+    assert loaded.manifest == PolicyArtifactManifest(
+        **(
+            manifest
+            | {"allowed_scopes": ("course:course-1", "class:class-1")}
+        )
+    )
     assert loaded.payload == artifact
 
     _write_bundle(tmp_path, digest="0" * 64)
@@ -105,6 +122,39 @@ def test_loads_only_canonical_json_and_checks_digest_version_dimension_and_actio
         load_policy_artifact(
             tmp_path, "manifest.json", expected_action_ids=EXPECTED_ACTION_IDS
         )
+
+
+def test_repository_manifest_loader_accepts_a_safe_request_subset(
+    tmp_path,
+) -> None:
+    manifest_data, artifact = _write_bundle(
+        tmp_path,
+        artifact_overrides={
+            "actions": {
+                **_write_bundle(tmp_path)[1]["actions"],
+                "m6.transition.s4_to_s5.v1": {
+                    "inverse_covariance": [[1.0, 0.0], [0.0, 1.0]],
+                    "theta": [1.0, 0.0],
+                },
+            }
+        },
+    )
+    manifest = PolicyArtifactManifest(
+        **(
+            manifest_data
+            | {"allowed_scopes": ("course:course-1", "class:class-1")}
+        )
+    )
+
+    loaded = load_policy_artifact_for_manifest(
+        tmp_path,
+        manifest,
+        expected_action_ids=("m6.transition.s1_to_s3.v1",),
+    )
+
+    assert set(loaded.payload["actions"]) > {
+        "m6.transition.s1_to_s3.v1",
+    }
 
     _write_bundle(tmp_path, artifact_overrides={"dimension": 3})
     with pytest.raises(ValueError, match="dimension"):
@@ -144,7 +194,7 @@ def test_artifact_loader_rejects_an_expected_candidate_action_mismatch(tmp_path)
         load_policy_artifact(
             tmp_path,
             "manifest.json",
-            expected_action_ids=("m6.transition.s1_to_s3.v1",),
+            expected_action_ids=("unknown-safe-action",),
         )
 
 
@@ -157,7 +207,11 @@ def test_artifact_loader_requires_a_nonempty_current_safe_action_set(tmp_path) -
 
 def test_active_gate_requires_every_approved_condition_and_reports_all_reasons(tmp_path) -> None:
     manifest_data, _ = _write_bundle(tmp_path)
-    manifest = PolicyArtifactManifest(**(manifest_data | {"allowed_scopes": ("school-a",)}))
+    manifest = PolicyArtifactManifest(
+        **(manifest_data | {
+            "allowed_scopes": ("course:course-1", "class:class-1")
+        })
+    )
     gate = ActivePolicyGate(
         PolicyGateConfig(
             gate_policy_version="m6-active-gate-v1",
@@ -177,7 +231,8 @@ def test_active_gate_requires_every_approved_condition_and_reports_all_reasons(t
         support=9,
         uncertainty=0.3,
         offline_evaluation_approved=False,
-        scope="school-b",
+        allowed_course_ids=("course-2",),
+        allowed_class_ids=("class-2",),
         request_fingerprint="request-1",
         context=_context(),
     )
@@ -198,7 +253,11 @@ def test_active_gate_requires_every_approved_condition_and_reports_all_reasons(t
 
 def test_active_gate_allows_valid_rollout_and_fails_closed_for_kill_switch_or_missing_manifest(tmp_path) -> None:
     manifest_data, _ = _write_bundle(tmp_path)
-    manifest = PolicyArtifactManifest(**(manifest_data | {"allowed_scopes": ("school-a",)}))
+    manifest = PolicyArtifactManifest(
+        **(manifest_data | {
+            "allowed_scopes": ("course:course-1", "class:class-1")
+        })
+    )
     config = PolicyGateConfig(
         gate_policy_version="m6-active-gate-v1",
         minimum_support=10,
@@ -215,7 +274,8 @@ def test_active_gate_allows_valid_rollout_and_fails_closed_for_kill_switch_or_mi
         "support": 10,
         "uncertainty": 0.2,
         "offline_evaluation_approved": True,
-        "scope": "school-a",
+        "allowed_course_ids": ("course-1",),
+        "allowed_class_ids": ("class-1",),
         "request_fingerprint": "request-1",
         "context": _context(),
     }
@@ -235,7 +295,11 @@ def test_active_gate_allows_valid_rollout_and_fails_closed_for_kill_switch_or_mi
 
 def test_active_gate_reports_kill_switch_and_rollout_rejections_together(tmp_path) -> None:
     manifest_data, _ = _write_bundle(tmp_path)
-    manifest = PolicyArtifactManifest(**(manifest_data | {"allowed_scopes": ("school-a",)}))
+    manifest = PolicyArtifactManifest(
+        **(manifest_data | {
+            "allowed_scopes": ("course:course-1", "class:class-1")
+        })
+    )
     result = ActivePolicyGate(
         PolicyGateConfig(
             gate_policy_version="m6-active-gate-v1",
@@ -253,7 +317,8 @@ def test_active_gate_reports_kill_switch_and_rollout_rejections_together(tmp_pat
         support=0,
         uncertainty=0.0,
         offline_evaluation_approved=True,
-        scope="school-a",
+        allowed_course_ids=("course-1",),
+        allowed_class_ids=("class-1",),
         request_fingerprint="request-1",
         context=_context(),
     )
@@ -274,7 +339,11 @@ def test_active_gate_rejects_every_remediation_signal(
     tmp_path, signal_overrides: dict[str, bool]
 ) -> None:
     manifest_data, _ = _write_bundle(tmp_path)
-    manifest = PolicyArtifactManifest(**(manifest_data | {"allowed_scopes": ("school-a",)}))
+    manifest = PolicyArtifactManifest(
+        **(manifest_data | {
+            "allowed_scopes": ("course:course-1", "class:class-1")
+        })
+    )
 
     result = ActivePolicyGate(
         PolicyGateConfig(
@@ -293,7 +362,8 @@ def test_active_gate_rejects_every_remediation_signal(
         support=0,
         uncertainty=0.0,
         offline_evaluation_approved=True,
-        scope="school-a",
+        allowed_course_ids=("course-1",),
+        allowed_class_ids=("class-1",),
         request_fingerprint="request-1",
         context=_context(**signal_overrides),
     )

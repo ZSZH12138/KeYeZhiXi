@@ -16,6 +16,115 @@ def _write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload), encoding="utf-8")
 
 
+def test_m6_policy_defaults_are_strict_rules_without_learned_io(
+    tmp_path: Path,
+) -> None:
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=None,
+        dotenv_path=None,
+        environment={},
+    )
+
+    assert settings.m6_policy.mode == "rules"
+    assert settings.m6_policy.policy_id is None
+    assert settings.m6_policy.evaluation_dataset_identity is None
+    assert settings.m6_policy.rollout_percentage == 0.0
+    assert settings.m6_policy.exploration_rate == 0.0
+    assert settings.m6_policy.maximum_exploration_rate == 0.05
+    assert settings.m6_policy.global_kill_switch is False
+    assert settings.m6_policy.allowed_course_ids == ()
+    assert settings.m6_policy.allowed_class_ids == ()
+    assert settings.m6_policy.runtime_directory == (
+        tmp_path / "runtime" / "m6_policy"
+    ).resolve()
+
+
+@pytest.mark.parametrize(
+    "m6_policy",
+    [
+        {"mode": "shadow"},
+        {"mode": "active", "policy_id": "policy-v1"},
+        {
+            "mode": "active",
+            "policy_id": "policy-v1",
+            "evaluation_dataset_identity": "dataset-v1",
+            "maximum_exploration_rate": 0.051,
+        },
+        {
+            "mode": "shadow",
+            "policy_id": "policy-v1",
+            "exploration_rate": 0.02,
+            "maximum_exploration_rate": 0.01,
+        },
+        {
+            "mode": "shadow",
+            "policy_id": "policy-v1",
+            "rollout_percentage": 1.01,
+        },
+        {
+            "mode": "shadow",
+            "policy_id": "policy-v1",
+            "allowed_course_ids": ["course-1", "course-1"],
+        },
+    ],
+)
+def test_m6_policy_rejects_incomplete_or_unsafe_configuration(
+    tmp_path: Path,
+    m6_policy: dict[str, object],
+) -> None:
+    with pytest.raises(ConfigurationError):
+        load_platform_settings(
+            project_root=tmp_path,
+            app_json_path=None,
+            dotenv_path=None,
+            environment={},
+            overrides={"m6_policy": m6_policy},
+        )
+
+
+def test_m6_policy_runtime_directory_must_stay_below_runtime_root(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ConfigurationError) as captured:
+        load_platform_settings(
+            project_root=tmp_path,
+            app_json_path=None,
+            dotenv_path=None,
+            environment={},
+            overrides={
+                "m6_policy": {
+                    "runtime_directory": "../outside",
+                }
+            },
+        )
+
+    assert captured.value.fields == ("m6_policy.runtime_directory",)
+
+
+def test_active_policy_may_be_configured_fail_closed_with_empty_rollout_and_scopes(
+    tmp_path: Path,
+) -> None:
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=None,
+        dotenv_path=None,
+        environment={},
+        overrides={
+            "m6_policy": {
+                "mode": "active",
+                "policy_id": "policy-v1",
+                "evaluation_dataset_identity": "dataset-v1",
+            }
+        },
+    )
+
+    assert settings.m6_policy.mode == "active"
+    assert settings.m6_policy.rollout_percentage == 0.0
+    assert settings.m6_policy.allowed_course_ids == ()
+    assert settings.m6_policy.allowed_class_ids == ()
+
+
 def test_configuration_sources_use_deterministic_field_level_precedence(
     tmp_path: Path,
 ) -> None:

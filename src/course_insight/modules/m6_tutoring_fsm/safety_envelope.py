@@ -14,6 +14,21 @@ class SafetyEnvelope:
 
     action_space_version = "m6-action-space-v1"
 
+    @staticmethod
+    def all_candidate_ids() -> tuple[str, ...]:
+        """Return the complete versioned action space in stable graph order."""
+
+        return (
+            "m6.transition.s0_to_s1.v1",
+            "m6.transition.s1_to_s2.v1",
+            "m6.transition.s1_to_s3.v1",
+            "m6.transition.s2_to_s3.v1",
+            "m6.transition.s3_to_s4.v1",
+            "m6.transition.s4_to_s2.v1",
+            "m6.transition.s4_to_s3.v1",
+            "m6.transition.s4_to_s5.v1",
+        )
+
     def candidates_for(
         self,
         context: TutoringPolicyContext,

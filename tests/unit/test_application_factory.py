@@ -35,6 +35,11 @@ from course_insight.infrastructure.config import (
     LoggingSettings,
     PlatformSettings,
 )
+from course_insight.infrastructure.config.models import M6PolicySettings
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyArtifactManifest,
+    PolicyEvaluationRecord,
+)
 from course_insight.infrastructure.postgresql.m0_repository import (
     PostgresM0Repository,
 )
@@ -73,7 +78,12 @@ from course_insight.modules.m2_evidence_retrieval.stubs import (
 NOW = datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc)
 
 
-def _settings(tmp_path: Path, *, backend: str = "sqlite") -> PlatformSettings:
+def _settings(
+    tmp_path: Path,
+    *,
+    backend: str = "sqlite",
+    m6_policy: M6PolicySettings | None = None,
+) -> PlatformSettings:
     database_url = (
         SecretStr("postgresql://user:password@db.invalid/course_insight")
         if backend == "postgresql"
@@ -90,6 +100,7 @@ def _settings(tmp_path: Path, *, backend: str = "sqlite") -> PlatformSettings:
             url=database_url,
         ),
         logging=LoggingSettings(directory=runtime_dir / "logs"),
+        m6_policy=m6_policy or M6PolicySettings(),
     )
 
 
@@ -229,6 +240,158 @@ class _FailingM2Repository:
     ) -> EvidenceIndexRef | None:
         del index_id, index_version
         return None
+
+
+class _PolicyConfigurationRepository(_RepositorySentinel):
+    def __init__(
+        self,
+        manifest: PolicyArtifactManifest | None,
+        evaluation: PolicyEvaluationRecord | None,
+    ) -> None:
+        self.manifest = manifest
+        self.evaluation = evaluation
+        self.manifest_reads = 0
+        self.evaluation_reads = 0
+
+    def get_policy_artifact(
+        self,
+        policy_id: str,
+    ) -> PolicyArtifactManifest | None:
+        self.manifest_reads += 1
+        assert policy_id == "policy-1"
+        return self.manifest
+
+    def get_policy_evaluation(
+        self,
+        policy_id: str,
+        dataset_identity: str,
+    ) -> PolicyEvaluationRecord | None:
+        self.evaluation_reads += 1
+        assert (policy_id, dataset_identity) == ("policy-1", "dataset-1")
+        return self.evaluation
+
+
+def test_factory_rules_mode_never_reads_policy_repository_or_artifacts(
+    tmp_path: Path,
+) -> None:
+    repository = _PolicyConfigurationRepository(None, None)
+
+    container = build_application(
+        _settings(tmp_path),
+        repositories=RepositoryOverrides(m6=repository),
+    )
+
+    assert container.m6_service._policy_runtime.mode == "rules"  # noqa: SLF001
+    assert repository.manifest_reads == 0
+    assert repository.evaluation_reads == 0
+
+
+def test_factory_constructs_real_active_linucb_runtime_from_exact_records(
+    tmp_path: Path,
+) -> None:
+    dimension = 23
+    identity = [
+        [1.0 if row == column else 0.0 for column in range(dimension)]
+        for row in range(dimension)
+    ]
+    action_ids = (
+        "m6.transition.s0_to_s1.v1",
+        "m6.transition.s1_to_s2.v1",
+        "m6.transition.s1_to_s3.v1",
+        "m6.transition.s2_to_s3.v1",
+        "m6.transition.s3_to_s4.v1",
+        "m6.transition.s4_to_s2.v1",
+        "m6.transition.s4_to_s3.v1",
+        "m6.transition.s4_to_s5.v1",
+    )
+    artifact = {
+        "policy_id": "policy-1",
+        "adapter_id": "m6-linucb-adapter",
+        "adapter_version": "v1",
+        "feature_schema_version": "m6-features-v1",
+        "action_space_version": "m6-action-space-v1",
+        "dimension": dimension,
+        "alpha": 0.1,
+        "actions": {
+            action_id: {
+                "theta": [0.0] * dimension,
+                "inverse_covariance": identity,
+            }
+            for action_id in action_ids
+        },
+    }
+    artifact_text = json.dumps(
+        artifact,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    policy_root = tmp_path / "runtime" / "policies"
+    policy_root.mkdir(parents=True)
+    (policy_root / "model.json").write_text(artifact_text, encoding="utf-8")
+    manifest = PolicyArtifactManifest(
+        policy_id="policy-1",
+        adapter_id="m6-linucb-adapter",
+        adapter_version="v1",
+        algorithm="linucb",
+        state_graph_version="m6-state-graph-v1",
+        baseline_policy_version="m6-rules-v1",
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-action-space-v1",
+        reward_version="m6-reward-v1",
+        gate_policy_version="m6-active-gate-v1",
+        training_data_watermark="2026-07-27T00:00:00Z",
+        training_data_checksum="b" * 64,
+        artifact_sha256=hashlib.sha256(artifact_text.encode()).hexdigest(),
+        status="approved",
+        created_at="2026-07-27T01:00:00Z",
+        artifact_reference="model.json",
+        allowed_scopes=("course:course-1", "class:class-1"),
+    )
+    evaluation = PolicyEvaluationRecord(
+        policy_id="policy-1",
+        dataset_identity="dataset-1",
+        status="sufficient_data",
+        approved=True,
+        effective_sample_size=20,
+        action_coverage=1.0,
+        observation_count=20,
+        metrics={"ips": 0.5, "snips": 0.5, "dm": 0.5, "dr": 0.5},
+        confidence_intervals={
+            "ips": (0.4, 0.6),
+            "snips": (0.4, 0.6),
+            "dm": (0.4, 0.6),
+            "dr": (0.4, 0.6),
+        },
+    )
+    repository = _PolicyConfigurationRepository(manifest, evaluation)
+    settings = _settings(
+        tmp_path,
+        m6_policy=M6PolicySettings(
+            mode="active",
+            policy_id="policy-1",
+            evaluation_dataset_identity="dataset-1",
+            rollout_percentage=1.0,
+            exploration_rate=0.01,
+            maximum_exploration_rate=0.05,
+            allowed_course_ids=("course-1",),
+            allowed_class_ids=("class-1",),
+            minimum_support=10,
+            maximum_uncertainty=100.0,
+            runtime_directory=policy_root,
+        ),
+    )
+
+    container = build_application(
+        settings,
+        repositories=RepositoryOverrides(m6=repository),
+    )
+
+    runtime = container.m6_service._policy_runtime  # noqa: SLF001
+    assert runtime.mode == "active"
+    assert runtime._learned_adapter.__class__.__name__ == "LinUCBPolicyAdapter"  # noqa: SLF001
+    assert repository.manifest_reads == 1
+    assert repository.evaluation_reads == 1
 
 
 def test_m0_legacy_constructor_and_keyword_repository_share_one_identity(

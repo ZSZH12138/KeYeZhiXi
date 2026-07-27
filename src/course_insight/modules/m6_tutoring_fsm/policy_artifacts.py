@@ -38,6 +38,24 @@ def load_policy_artifact(
         )
     except (TypeError, ValueError) as error:
         raise ValueError("invalid policy manifest") from error
+    return load_policy_artifact_for_manifest(
+        root_path,
+        manifest,
+        expected_action_ids=expected_action_ids,
+    )
+
+
+def load_policy_artifact_for_manifest(
+    root: str | Path,
+    manifest: PolicyArtifactManifest,
+    *,
+    expected_action_ids: tuple[str, ...],
+) -> LoadedPolicyArtifact:
+    """Load an artifact for a repository-selected immutable manifest."""
+
+    if not isinstance(manifest, PolicyArtifactManifest):
+        raise TypeError("manifest must be a PolicyArtifactManifest")
+    root_path = Path(root).resolve(strict=True)
     artifact_path = _resolve_under_root(root_path, manifest.artifact_reference)
     artifact_data, artifact_bytes = _load_canonical_json_with_bytes(artifact_path)
     actual_digest = sha256(artifact_bytes).hexdigest()
@@ -152,8 +170,8 @@ def _validate_expected_actions(actions: Mapping[str, Any], expected_action_ids: 
         or any(not isinstance(action_id, str) or not action_id.strip() for action_id in expected_action_ids)
     ):
         raise ValueError("expected action ids must be unique non-blank strings")
-    if set(actions) != set(expected_action_ids):
-        raise ValueError("artifact actions do not match expected safety candidates")
+    if not set(expected_action_ids).issubset(actions):
+        raise ValueError("safe candidates are missing from artifact action space")
 
 
 def _canonical_json(value: Mapping[str, Any]) -> str:

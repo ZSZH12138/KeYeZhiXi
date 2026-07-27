@@ -265,6 +265,7 @@ def test_real_postgres_m6_atomic_concurrency_conflict_and_recovery(
         artifact_sha256=None,
         feature_schema_version="m6-features-v1",
         action_space_version="m6-actions-v1",
+        gate_policy_version="m6-gate-v1",
     )
     observation = PolicyObservation(
         policy_execution_fingerprint=execution.policy_execution_fingerprint,

@@ -27,6 +27,7 @@ EnvironmentName = Literal["development", "test", "production"]
 DatabaseBackend = Literal["sqlite", "postgresql"]
 LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LogMode = Literal["rotating_file", "stdout"]
+M6PolicyMode = Literal["rules", "shadow", "active"]
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
 _POSTGRES_DSN_ADAPTER = TypeAdapter(PostgresDsn)
 
@@ -191,6 +192,80 @@ class SecuritySettings(_FrozenModel):
         return self
 
 
+class M6PolicySettings(_FrozenModel):
+    """Fail-closed private M6 policy runtime configuration."""
+
+    mode: M6PolicyMode = "rules"
+    policy_id: str | None = None
+    evaluation_dataset_identity: str | None = None
+    rollout_percentage: Annotated[FiniteFloat, Field(ge=0, le=1)] = 0.0
+    exploration_rate: Annotated[FiniteFloat, Field(ge=0, le=0.05)] = 0.0
+    maximum_exploration_rate: Annotated[
+        FiniteFloat,
+        Field(ge=0, le=0.05),
+    ] = 0.05
+    gate_policy_version: str = Field(
+        default="m6-active-gate-v1",
+        min_length=1,
+        max_length=128,
+    )
+    global_kill_switch: bool = False
+    allowed_course_ids: tuple[str, ...] = ()
+    allowed_class_ids: tuple[str, ...] = ()
+    minimum_support: int = Field(default=1, ge=1)
+    maximum_uncertainty: Annotated[FiniteFloat, Field(ge=0)] = 0.0
+    runtime_directory: Path = Path("m6_policy")
+
+    @field_validator(
+        "policy_id",
+        "evaluation_dataset_identity",
+        mode="before",
+    )
+    @classmethod
+    def _validate_optional_identity(cls, value: object) -> object:
+        if value is not None and (
+            not isinstance(value, str)
+            or not value.strip()
+            or value != value.strip()
+        ):
+            raise ValueError("policy identity must be a non-padded string")
+        return value
+
+    @field_validator(
+        "gate_policy_version",
+    )
+    @classmethod
+    def _validate_gate_version(cls, value: str) -> str:
+        if value != value.strip():
+            raise ValueError("gate policy version must not be padded")
+        return value
+
+    @field_validator("allowed_course_ids", "allowed_class_ids")
+    @classmethod
+    def _validate_allowlist(
+        cls,
+        value: tuple[str, ...],
+    ) -> tuple[str, ...]:
+        if (
+            any(not item or item != item.strip() for item in value)
+            or len(value) != len(set(value))
+        ):
+            raise ValueError("policy allowlist entries must be unique and non-blank")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_policy_mode(self) -> Self:
+        if self.exploration_rate > self.maximum_exploration_rate:
+            raise ValueError("exploration_rate exceeds maximum_exploration_rate")
+        if self.mode != "rules" and self.policy_id is None:
+            raise ValueError("learned policy modes require policy_id")
+        if self.mode == "active" and self.evaluation_dataset_identity is None:
+            raise ValueError(
+                "active policy mode requires evaluation_dataset_identity"
+            )
+        return self
+
+
 class PlatformSettings(BaseSettings):
     """Complete immutable settings assembled by the explicit loader."""
 
@@ -210,6 +285,31 @@ class PlatformSettings(BaseSettings):
     outbox: OutboxSettings = Field(default_factory=OutboxSettings)
     web: WebSettings = Field(default_factory=WebSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
+    m6_policy: M6PolicySettings = Field(default_factory=M6PolicySettings)
+
+    @model_validator(mode="after")
+    def _validate_m6_runtime_boundary(self) -> Self:
+        runtime_root = self.runtime_dir.resolve()
+        configured = self.m6_policy.runtime_directory
+        candidate = (
+            configured.resolve()
+            if configured.is_absolute()
+            else (runtime_root / configured).resolve()
+        )
+        if candidate == runtime_root or not candidate.is_relative_to(runtime_root):
+            raise ConfigurationError(
+                code="UNSAFE_CONFIGURATION_PATH",
+                fields=("m6_policy.runtime_directory",),
+                reason="path_boundary",
+            )
+        object.__setattr__(
+            self,
+            "m6_policy",
+            self.m6_policy.model_copy(
+                update={"runtime_directory": candidate}
+            ),
+        )
+        return self
 
     @model_validator(mode="after")
     def _validate_production_security(self) -> Self:

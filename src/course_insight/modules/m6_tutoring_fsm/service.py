@@ -302,6 +302,8 @@ class M6TutoringControlService:
             learner_evidence_count=(
                 state_update_result.learner_state_snapshot.evidence_count
             ),
+            course_id=task_plan.course_id,
+            class_id=task_plan.class_id,
         )
         candidates = self._safety_envelope.candidates_for(context)
         return targets, current_evidence, signals, context, candidates
