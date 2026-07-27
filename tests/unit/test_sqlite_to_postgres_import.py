@@ -233,6 +233,61 @@ def test_policy_rows_are_validated_and_imported_in_dependency_order(
     )
 
 
+def test_policy_source_rejects_payload_text_normalized_by_dataclass(
+    tmp_path: Path,
+) -> None:
+    from course_insight.modules.m6_tutoring_fsm.policy_types import (
+        PolicyEvaluationRecord,
+    )
+    from tests.integration.test_m6_persistence import _repository
+
+    source = tmp_path / "normalized-policy-source.sqlite3"
+    repository = _repository(source)
+    evaluation = PolicyEvaluationRecord(
+        policy_id="policy_import",
+        dataset_identity="dataset_import",
+        status="sufficient_data",
+        approved=True,
+        effective_sample_size=20.0,
+        action_coverage=1.0,
+    )
+    repository.save_policy_evaluation(evaluation)
+    connection = __import__("sqlite3").connect(source)
+    try:
+        payload = str(
+            connection.execute(
+                """
+                SELECT payload
+                FROM m6_policy_evaluations
+                WHERE evaluation_identity = ?
+                """,
+                (evaluation.identity,),
+            ).fetchone()[0]
+        )
+        tampered = payload.replace(
+            '"effective_sample_size":20.0',
+            '"effective_sample_size":20',
+        )
+        assert tampered != payload
+        connection.execute(
+            """
+            UPDATE m6_policy_evaluations
+            SET payload = ?
+            WHERE evaluation_identity = ?
+            """,
+            (tampered, evaluation.identity),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+    with pytest.raises(MigrationError, match="SOURCE_VALIDATION_FAILED"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=_MemoryDestination(),
+        ).run(mode="dry-run")
+
+
 def test_failed_batch_rolls_back_and_report_redacts_exception(
     tmp_path: Path,
 ) -> None:

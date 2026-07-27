@@ -414,7 +414,8 @@ def _prepare_policy_record(
     table: str,
     row: sqlite3.Row,
 ) -> PreparedImportRow:
-    payload = _canonical_json_object(row["payload"])
+    source_payload = row["payload"]
+    payload = _canonical_json_object(source_payload)
     record_type = _POLICY_RECORD_TYPES[table]
     values = dict(payload)
     if record_type is PolicyArtifactManifest:
@@ -428,6 +429,9 @@ def _prepare_policy_record(
             raise ValueError("policy candidate IDs are invalid")
         values["candidate_ids"] = tuple(candidate_ids)
     record = record_type(**values)
+    canonical_payload = dumps_json(record.canonical_payload())
+    if source_payload != canonical_payload:
+        raise ValueError("policy payload is not exact canonical JSON")
     checksum = _required_sha256(row, "payload_checksum")
     if record.identity != checksum:
         raise ValueError("policy payload checksum is invalid")
@@ -435,7 +439,7 @@ def _prepare_policy_record(
     columns = tuple(row.keys())
     row_values = {
         column: (
-            dumps_json(record.canonical_payload())
+            canonical_payload
             if column == "payload"
             else row[column]
         )
