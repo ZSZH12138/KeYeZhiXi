@@ -12,6 +12,8 @@ from course_insight.modules.m6_tutoring_fsm.features import FeatureBuilder
 from course_insight.modules.m6_tutoring_fsm.policy_types import (
     CandidateAction,
     PolicyArtifactManifest,
+    PolicyDecision,
+    PolicyPrediction,
     TutoringPolicyContext,
 )
 from course_insight.modules.m6_tutoring_fsm.safety_envelope import SafetyEnvelope
@@ -148,6 +150,69 @@ def test_artifact_manifest_rejects_non_relative_artifact_references(
             status="approved",
             artifact_reference=artifact_reference,
             allowed_scopes=("course-001",),
+        )
+
+
+@pytest.mark.parametrize("artifact_reference", ("model.pkl", "weights.joblib"))
+def test_artifact_manifest_accepts_only_json_artifact_references(
+    artifact_reference: str,
+) -> None:
+    """Catch an unsafe non-JSON artifact that could trigger deserialization."""
+
+    with pytest.raises(ValueError, match="artifact_reference"):
+        PolicyArtifactManifest(
+            policy_id="policy-001",
+            adapter_id="linucb",
+            adapter_version="v1",
+            artifact_sha256="a" * 64,
+            feature_schema_version="m6-features-v1",
+            action_space_version="m6-action-space-v1",
+            gate_policy_version="m6-gate-v1",
+            status="approved",
+            artifact_reference=artifact_reference,
+            allowed_scopes=("course-001",),
+        )
+
+
+def test_numeric_policy_values_have_one_canonical_representation() -> None:
+    """Catch semantically equal integer and float inputs producing different IDs."""
+
+    integer_prediction = PolicyPrediction(
+        policy_id="policy-001",
+        candidate_id="candidate-001",
+        score=1,
+        propensity=1,
+    )
+    float_prediction = PolicyPrediction(
+        policy_id="policy-001",
+        candidate_id="candidate-001",
+        score=1.0,
+        propensity=1.0,
+    )
+
+    assert integer_prediction.score == 1.0
+    assert integer_prediction.propensity == 1.0
+    assert integer_prediction.canonical_json() == float_prediction.canonical_json()
+    assert integer_prediction.identity == float_prediction.identity
+
+
+def test_policy_decision_rejects_prediction_for_an_unselected_candidate() -> None:
+    """Catch an impossible decision whose prediction names a different candidate."""
+
+    prediction = PolicyPrediction(
+        policy_id="policy-001",
+        candidate_id="candidate-b",
+        score=0.5,
+        propensity=1.0,
+    )
+
+    with pytest.raises(ValueError, match="prediction.candidate_id"):
+        PolicyDecision(
+            request_fingerprint="request-001",
+            mode="shadow",
+            selected_candidate_id="candidate-a",
+            candidate_ids=("candidate-a", "candidate-b"),
+            prediction=prediction,
         )
 
 

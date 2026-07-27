@@ -103,6 +103,7 @@ class TutoringPolicyContext(_CanonicalIdentity):
         _require_member(self.task_type, TASK_TYPES, "task_type")
         _require_nonnegative_int(self.turn_count, "turn_count")
         _require_probability(self.score_ratio, "score_ratio")
+        object.__setattr__(self, "score_ratio", float(self.score_ratio))
         _require_nonnegative_int(self.target_concept_count, "target_concept_count")
         if not isinstance(self.signals, DecisionSignals):
             raise ValueError("signals must be a DecisionSignals instance")
@@ -136,6 +137,8 @@ class PolicyPrediction(_CanonicalIdentity):
         _require_nonblank(self.candidate_id, "candidate_id")
         _require_finite(self.score, "score")
         _require_probability(self.propensity, "propensity")
+        object.__setattr__(self, "score", float(self.score))
+        object.__setattr__(self, "propensity", float(self.propensity))
         _require_nonblank(self.feature_schema_version, "feature_schema_version")
 
     def canonical_payload(self) -> Mapping[str, Any]:
@@ -170,6 +173,11 @@ class PolicyDecision(_CanonicalIdentity):
             self.prediction, PolicyPrediction
         ):
             raise ValueError("prediction must be a PolicyPrediction or None")
+        if (
+            self.prediction is not None
+            and self.prediction.candidate_id != self.selected_candidate_id
+        ):
+            raise ValueError("prediction.candidate_id must equal selected_candidate_id")
         if self.fallback_reason is not None:
             _require_nonblank(self.fallback_reason, "fallback_reason")
 
@@ -324,6 +332,7 @@ class PolicyObservation(_CanonicalIdentity):
         if self.selected_candidate_id not in self.candidate_ids:
             raise ValueError("selected_candidate_id must be a candidate")
         _require_probability(self.propensity, "propensity")
+        object.__setattr__(self, "propensity", float(self.propensity))
 
     def canonical_payload(self) -> Mapping[str, Any]:
         return {
@@ -359,6 +368,7 @@ class PolicyOutcome(_CanonicalIdentity):
             if self.transfer_success is None:
                 raise ValueError("observed outcome requires transfer_success")
             _require_probability(self.transfer_success, "transfer_success")
+            object.__setattr__(self, "transfer_success", float(self.transfer_success))
         elif self.transfer_success is not None:
             raise ValueError("pending or censored outcome must not set transfer_success")
 
@@ -393,6 +403,7 @@ class PolicyRewardRecord(_CanonicalIdentity):
             if self.reward is None:
                 raise ValueError("observed reward record requires reward")
             _require_finite(self.reward, "reward")
+            object.__setattr__(self, "reward", float(self.reward))
         elif self.reward is not None:
             raise ValueError("pending or censored reward record must not set reward")
 
@@ -423,9 +434,15 @@ class PolicyEvaluationRecord(_CanonicalIdentity):
         _require_member(self.status, ("sufficient_data", "insufficient_data"), "status")
         _require_bool(self.approved, "approved")
         _require_finite(self.effective_sample_size, "effective_sample_size")
+        object.__setattr__(
+            self,
+            "effective_sample_size",
+            float(self.effective_sample_size),
+        )
         if self.effective_sample_size < 0.0:
             raise ValueError("effective_sample_size must be non-negative")
         _require_probability(self.action_coverage, "action_coverage")
+        object.__setattr__(self, "action_coverage", float(self.action_coverage))
         if self.status == "insufficient_data" and self.approved:
             raise ValueError("insufficient_data evaluation cannot be approved")
 
@@ -447,9 +464,11 @@ def _signals_payload(signals: DecisionSignals) -> Mapping[str, Any]:
         "has_active_misconception": signals.has_active_misconception,
         "has_prerequisite_gap": signals.has_prerequisite_gap,
         "has_new_evidence": signals.has_new_evidence,
-        "minimum_recent_correction_rate": signals.minimum_recent_correction_rate,
-        "minimum_mastery_confidence": signals.minimum_mastery_confidence,
-        "maximum_hint_dependency": signals.maximum_hint_dependency,
+        "minimum_recent_correction_rate": float(
+            signals.minimum_recent_correction_rate
+        ),
+        "minimum_mastery_confidence": float(signals.minimum_mastery_confidence),
+        "maximum_hint_dependency": float(signals.maximum_hint_dependency),
     }
 
 
@@ -503,6 +522,7 @@ def _require_relative_artifact_reference(value: object) -> None:
         or windows_path.is_absolute()
         or windows_path.drive
         or windows_path.root
+        or windows_path.suffix != ".json"
         or ".." in posix_path.parts
         or ".." in windows_path.parts
     ):
