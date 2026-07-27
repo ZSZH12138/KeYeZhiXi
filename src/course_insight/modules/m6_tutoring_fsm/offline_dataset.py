@@ -1,0 +1,354 @@
+"""Canonical de-identified datasets for M6 offline policy evaluation."""
+
+from __future__ import annotations
+
+from dataclasses import dataclass
+from hashlib import sha256
+import hmac
+import json
+import math
+import re
+from typing import Any, Mapping
+
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyObservation,
+    PolicyRewardRecord,
+    TUTORING_STATES,
+)
+
+
+EXPORT_FIELDS: tuple[str, ...] = (
+    "group_id",
+    "session_id",
+    "event_time",
+    "state",
+    "selected_action",
+    "candidate_actions",
+    "logging_propensity",
+    "target_propensities",
+    "reward",
+    "direct_estimates",
+)
+
+_STRUCTURED_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
+
+
+@dataclass(frozen=True, slots=True)
+class OfflinePolicyRow:
+    """One observed reward with only structured, de-identified policy fields."""
+
+    group_id: str
+    session_id: str
+    event_time: int
+    state: str
+    selected_action: str
+    candidate_actions: tuple[str, ...]
+    logging_propensity: float | None
+    target_propensities: object
+    reward: float
+    direct_estimates: object
+
+    def __post_init__(self) -> None:
+        _require_sha256(self.group_id, "group_id")
+        _require_sha256(self.session_id, "session_id")
+        if type(self.event_time) is not int or self.event_time < 0:
+            raise ValueError("event_time must be a non-negative integer")
+        if self.state not in TUTORING_STATES:
+            raise ValueError("state must be a tutoring state")
+        candidates = _normalize_candidates(self.candidate_actions)
+        object.__setattr__(self, "candidate_actions", candidates)
+        _require_structured_id(self.selected_action, "selected_action")
+        if self.selected_action not in candidates:
+            raise ValueError("selected_action must be a candidate")
+        if self.logging_propensity is not None:
+            _require_probability(
+                self.logging_propensity,
+                "logging_propensity",
+            )
+            object.__setattr__(
+                self,
+                "logging_propensity",
+                float(self.logging_propensity),
+            )
+        target = _normalize_action_values(
+            self.target_propensities,
+            candidates,
+            "target_propensities",
+            probability=True,
+        )
+        if not math.isclose(
+            sum(value for _, value in target),
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ValueError("target_propensities must sum to one")
+        object.__setattr__(self, "target_propensities", target)
+        _require_finite(self.reward, "reward")
+        object.__setattr__(self, "reward", float(self.reward))
+        object.__setattr__(
+            self,
+            "direct_estimates",
+            _normalize_action_values(
+                self.direct_estimates,
+                candidates,
+                "direct_estimates",
+                probability=False,
+            ),
+        )
+
+    def canonical_payload(self) -> dict[str, Any]:
+        """Return the explicit export allowlist in canonical field form."""
+
+        return {
+            "group_id": self.group_id,
+            "session_id": self.session_id,
+            "event_time": self.event_time,
+            "state": self.state,
+            "selected_action": self.selected_action,
+            "candidate_actions": list(self.candidate_actions),
+            "logging_propensity": self.logging_propensity,
+            "target_propensities": dict(self.target_propensities),
+            "reward": self.reward,
+            "direct_estimates": dict(self.direct_estimates),
+        }
+
+    def canonical_json(self) -> str:
+        return json.dumps(
+            self.canonical_payload(),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+    @property
+    def identity(self) -> str:
+        return sha256(self.canonical_json().encode("utf-8")).hexdigest()
+
+
+@dataclass(frozen=True, slots=True)
+class OfflineDatasetSplit:
+    """A group-isolated chronological train/evaluation partition."""
+
+    train: tuple[OfflinePolicyRow, ...]
+    evaluation: tuple[OfflinePolicyRow, ...]
+
+    def __post_init__(self) -> None:
+        if not self.train or not self.evaluation:
+            raise ValueError("both dataset split partitions must be non-empty")
+        train_groups = {row.group_id for row in self.train}
+        evaluation_groups = {row.group_id for row in self.evaluation}
+        if train_groups & evaluation_groups:
+            raise ValueError("dataset groups must not cross split partitions")
+        train_sessions = {row.session_id for row in self.train}
+        evaluation_sessions = {row.session_id for row in self.evaluation}
+        if train_sessions & evaluation_sessions:
+            raise ValueError("dataset sessions must not cross split partitions")
+
+
+def build_offline_row(
+    observation: PolicyObservation,
+    reward: PolicyRewardRecord,
+    *,
+    deidentification_key: bytes,
+    raw_group_id: str,
+    raw_session_id: str,
+    event_time: int,
+    state: str,
+    target_propensities: object,
+    direct_estimates: object,
+) -> OfflinePolicyRow:
+    """Join immutable M6 records while hashing all raw grouping identities."""
+
+    if not isinstance(observation, PolicyObservation):
+        raise TypeError("observation must be a PolicyObservation")
+    if not isinstance(reward, PolicyRewardRecord):
+        raise TypeError("reward must be a PolicyRewardRecord")
+    if (
+        reward.policy_execution_fingerprint
+        != observation.policy_execution_fingerprint
+    ):
+        raise ValueError("reward and observation execution identities differ")
+    if reward.status != "observed" or reward.reward is None:
+        raise ValueError("offline rows require an observed reward")
+    _require_deidentification_key(deidentification_key)
+    return OfflinePolicyRow(
+        group_id=_pseudonymize(
+            "group",
+            raw_group_id,
+            deidentification_key,
+        ),
+        session_id=_pseudonymize(
+            "session",
+            raw_session_id,
+            deidentification_key,
+        ),
+        event_time=event_time,
+        state=state,
+        selected_action=observation.selected_candidate_id,
+        candidate_actions=observation.candidate_ids,
+        logging_propensity=observation.propensity,
+        target_propensities=target_propensities,
+        reward=reward.reward,
+        direct_estimates=direct_estimates,
+    )
+
+
+def canonical_jsonl(rows: tuple[OfflinePolicyRow, ...]) -> str:
+    """Serialize rows deterministically, independent of caller ordering."""
+
+    ordered = _canonical_rows(rows)
+    return "\n".join(row.canonical_json() for row in ordered)
+
+
+def dataset_identity(rows: tuple[OfflinePolicyRow, ...]) -> str:
+    """Return the SHA-256 identity of the exact canonical JSONL bytes."""
+
+    return sha256(canonical_jsonl(rows).encode("utf-8")).hexdigest()
+
+
+def grouped_time_split(
+    rows: tuple[OfflinePolicyRow, ...],
+    *,
+    evaluation_fraction: float,
+) -> OfflineDatasetSplit:
+    """Assign newest whole groups to evaluation without session leakage."""
+
+    ordered = _canonical_rows(rows)
+    _require_finite(evaluation_fraction, "evaluation_fraction")
+    fraction = float(evaluation_fraction)
+    if not 0.0 < fraction < 1.0:
+        raise ValueError("evaluation_fraction must be between zero and one")
+    sessions: dict[str, str] = {}
+    groups: dict[str, list[OfflinePolicyRow]] = {}
+    for row in ordered:
+        prior_group = sessions.get(row.session_id)
+        if prior_group is not None and prior_group != row.group_id:
+            raise ValueError("one session cannot belong to multiple groups")
+        sessions = {**sessions, row.session_id: row.group_id}
+        groups = {
+            **groups,
+            row.group_id: [*groups.get(row.group_id, []), row],
+        }
+    if len(groups) < 2:
+        raise ValueError("grouped split requires at least two groups")
+    chronological_groups = sorted(
+        groups,
+        key=lambda group_id: (
+            max(row.event_time for row in groups[group_id]),
+            group_id,
+        ),
+    )
+    evaluation_group_count = min(
+        len(chronological_groups) - 1,
+        max(1, math.ceil(len(chronological_groups) * fraction)),
+    )
+    evaluation_group_ids = set(
+        chronological_groups[-evaluation_group_count:]
+    )
+    train = tuple(
+        row for row in ordered if row.group_id not in evaluation_group_ids
+    )
+    evaluation = tuple(
+        row for row in ordered if row.group_id in evaluation_group_ids
+    )
+    return OfflineDatasetSplit(train=train, evaluation=evaluation)
+
+
+def _canonical_rows(
+    rows: tuple[OfflinePolicyRow, ...],
+) -> tuple[OfflinePolicyRow, ...]:
+    if type(rows) not in {tuple, list} or not rows:
+        raise ValueError("offline dataset must contain rows")
+    if any(not isinstance(row, OfflinePolicyRow) for row in rows):
+        raise TypeError("offline dataset must contain OfflinePolicyRow values")
+    ordered = tuple(sorted(rows, key=lambda row: (row.event_time, row.identity)))
+    if len({row.identity for row in ordered}) != len(ordered):
+        raise ValueError("offline dataset must not contain duplicate rows")
+    return ordered
+
+
+def _pseudonymize(
+    namespace: str,
+    value: object,
+    key: bytes,
+) -> str:
+    if type(value) is not str or not value.strip():
+        raise ValueError(f"raw_{namespace}_id must be a non-blank string")
+    payload = f"m6-offline-{namespace}-v1\0{value}".encode("utf-8")
+    return hmac.digest(key, payload, "sha256").hex()
+
+
+def _require_deidentification_key(value: object) -> None:
+    if type(value) is not bytes or len(value) < 32:
+        raise ValueError(
+            "deidentification_key must contain at least 32 bytes"
+        )
+
+
+def _normalize_candidates(values: object) -> tuple[str, ...]:
+    if type(values) not in {tuple, list} or not values:
+        raise ValueError("candidate_actions must be a non-empty sequence")
+    candidates = tuple(values)
+    for candidate in candidates:
+        _require_structured_id(candidate, "candidate_actions")
+    if len(candidates) != len(set(candidates)):
+        raise ValueError("candidate_actions must not contain duplicates")
+    return candidates
+
+
+def _normalize_action_values(
+    values: object,
+    candidates: tuple[str, ...],
+    field_name: str,
+    *,
+    probability: bool,
+) -> tuple[tuple[str, float], ...]:
+    if isinstance(values, Mapping):
+        entries = tuple(values.items())
+    elif type(values) in {tuple, list}:
+        entries = tuple(values)
+    else:
+        raise ValueError(f"{field_name} must contain action values")
+    normalized: list[tuple[str, float]] = []
+    for entry in entries:
+        if type(entry) not in {tuple, list} or len(entry) != 2:
+            raise ValueError(f"{field_name} must contain action values")
+        action, value = entry
+        _require_structured_id(action, field_name)
+        if probability:
+            _require_probability(value, field_name)
+        else:
+            _require_finite(value, field_name)
+        normalized.append((str(action), float(value)))
+    if len({action for action, _ in normalized}) != len(normalized):
+        raise ValueError(f"{field_name} must not contain duplicate actions")
+    if {action for action, _ in normalized} != set(candidates):
+        raise ValueError(f"{field_name} must cover exactly the candidates")
+    return tuple(sorted(normalized))
+
+
+def _require_structured_id(value: object, field_name: str) -> None:
+    if type(value) is not str or _STRUCTURED_ID.fullmatch(value) is None:
+        raise ValueError(f"{field_name} must contain structured identifiers")
+
+
+def _require_sha256(value: object, field_name: str) -> None:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(f"{field_name} must be a lowercase SHA-256 digest")
+
+
+def _require_finite(value: object, field_name: str) -> None:
+    if type(value) not in {int, float} or not math.isfinite(float(value)):
+        raise ValueError(f"{field_name} must be finite")
+
+
+def _require_probability(value: object, field_name: str) -> None:
+    _require_finite(value, field_name)
+    if not 0.0 <= float(value) <= 1.0:
+        raise ValueError(f"{field_name} must be a probability")

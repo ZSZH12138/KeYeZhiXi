@@ -13,6 +13,7 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
     CandidateAction,
     PolicyArtifactManifest,
     PolicyDecision,
+    PolicyEvaluationRecord,
     PolicyPrediction,
     TutoringPolicyContext,
 )
@@ -248,3 +249,148 @@ def test_feature_builder_emits_the_fixed_versioned_finite_vector() -> None:
         4.0,
     )
     assert all(math.isfinite(value) for value in vector)
+
+
+def test_policy_evaluation_record_canonically_freezes_complete_ope_evidence() -> None:
+    """Catch metrics, intervals, slices, or safety evidence being lost or mutable."""
+
+    record = PolicyEvaluationRecord(
+        policy_id="policy-001",
+        dataset_identity="d" * 64,
+        status="sufficient_data",
+        approved=True,
+        effective_sample_size=12,
+        action_coverage=0.75,
+        metrics={"snips": 0.6, "ips": 0.5},
+        confidence_intervals={"ips": (0.25, 0.75)},
+        state_slices=(
+            {
+                "key": "S2",
+                "sample_size": 4,
+                "metrics": {"dr": 0.7, "ips": 0.6},
+            },
+        ),
+        group_slices=(
+            {
+                "key": "a" * 64,
+                "sample_size": 3,
+                "metrics": {"dr": 0.65},
+            },
+        ),
+        support_coverage=0.875,
+        safety_reasons=(),
+    )
+
+    assert record.metrics == (("ips", 0.5), ("snips", 0.6))
+    assert record.confidence_intervals == (("ips", 0.25, 0.75),)
+    assert record.state_slices == (
+        ("S2", 4, (("dr", 0.7), ("ips", 0.6))),
+    )
+    assert record.canonical_json() == (
+        '{"action_coverage":0.75,"approved":true,'
+        '"confidence_intervals":{"ips":[0.25,0.75]},'
+        '"dataset_identity":"dddddddddddddddddddddddddddddddddddddddddddddddd'
+        'dddddddddddddddd","effective_sample_size":12.0,'
+        '"group_slices":[{"key":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        'aaaaaaaaaaaaaaaa","metrics":{"dr":0.65},'
+        '"sample_size":3}],"metrics":{"ips":0.5,"snips":0.6},'
+        '"policy_id":"policy-001","safety_reasons":[],'
+        '"state_slices":[{"key":"S2","metrics":{"dr":0.7,"ips":0.6},'
+        '"sample_size":4}],"status":"sufficient_data",'
+        '"support_coverage":0.875}'
+    )
+    assert not hasattr(record, "__dict__")
+    with pytest.raises(FrozenInstanceError):
+        record.metrics = ()  # type: ignore[misc]
+
+
+def test_policy_evaluation_record_keeps_legacy_payload_identity_with_defaults() -> None:
+    """Catch optional OPE evidence changing identities of already persisted rows."""
+
+    record = PolicyEvaluationRecord(
+        policy_id="policy-001",
+        dataset_identity="dataset-001",
+        status="insufficient_data",
+        approved=False,
+        effective_sample_size=0,
+        action_coverage=0,
+    )
+
+    assert record.canonical_json() == (
+        '{"action_coverage":0.0,"approved":false,'
+        '"dataset_identity":"dataset-001","effective_sample_size":0.0,'
+        '"policy_id":"policy-001","status":"insufficient_data"}'
+    )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"metrics": {"ips": math.nan}}, "metrics"),
+        (
+            {
+                "confidence_intervals": {
+                    "ips": (0.8, 0.2),
+                },
+            },
+            "confidence_intervals",
+        ),
+        (
+            {
+                "state_slices": (
+                    {"key": "S2", "sample_size": 1, "metrics": {"dr": 0.5}},
+                    {"key": "S2", "sample_size": 2, "metrics": {"dr": 0.6}},
+                ),
+            },
+            "state_slices",
+        ),
+        ({"support_coverage": math.inf}, "support_coverage"),
+        ({"metrics": {"student@example.edu": 0.5}}, "metrics"),
+        (
+            {
+                "state_slices": (
+                    {
+                        "key": r"C:\Users\Teacher\answer.txt",
+                        "sample_size": 1,
+                        "metrics": {"dr": 0.5},
+                    },
+                ),
+            },
+            "state_slices",
+        ),
+        (
+            {
+                "group_slices": (
+                    {
+                        "key": "student@example.edu",
+                        "sample_size": 1,
+                        "metrics": {"dr": 0.5},
+                    },
+                ),
+            },
+            "group_slices",
+        ),
+        (
+            {"safety_reasons": ("student@example.edu",)},
+            "safety_reasons",
+        ),
+    ],
+)
+def test_policy_evaluation_record_rejects_invalid_nested_evidence(
+    overrides: dict[str, object],
+    message: str,
+) -> None:
+    """Catch non-finite, inverted, or ambiguous OPE evidence."""
+
+    values: dict[str, object] = {
+        "policy_id": "policy-001",
+        "dataset_identity": "d" * 64,
+        "status": "insufficient_data",
+        "approved": False,
+        "effective_sample_size": 0,
+        "action_coverage": 0,
+    }
+    values.update(overrides)
+
+    with pytest.raises(ValueError, match=message):
+        PolicyEvaluationRecord(**values)  # type: ignore[arg-type]

@@ -33,6 +33,15 @@ ARTIFACT_STATUSES: tuple[str, ...] = (
     "rejected",
     "retired",
 )
+EVALUATION_METRICS: tuple[str, ...] = ("ips", "snips", "dm", "dr")
+EVALUATION_SAFETY_REASONS: tuple[str, ...] = (
+    "insufficient_rows",
+    "invalid_propensity",
+    "low_support",
+    "low_effective_sample_size",
+    "poor_action_coverage",
+    "reward_below_approval_threshold",
+)
 
 
 class _CanonicalIdentity:
@@ -427,6 +436,12 @@ class PolicyEvaluationRecord(_CanonicalIdentity):
     approved: bool
     effective_sample_size: float
     action_coverage: float
+    metrics: object = ()
+    confidence_intervals: object = ()
+    state_slices: object = ()
+    group_slices: object = ()
+    support_coverage: float | None = None
+    safety_reasons: object = None
 
     def __post_init__(self) -> None:
         _require_nonblank(self.policy_id, "policy_id")
@@ -443,11 +458,69 @@ class PolicyEvaluationRecord(_CanonicalIdentity):
             raise ValueError("effective_sample_size must be non-negative")
         _require_probability(self.action_coverage, "action_coverage")
         object.__setattr__(self, "action_coverage", float(self.action_coverage))
+        object.__setattr__(
+            self,
+            "metrics",
+            _normalize_metric_entries(self.metrics, "metrics"),
+        )
+        _require_evaluation_metric_names(self.metrics, "metrics")
+        object.__setattr__(
+            self,
+            "confidence_intervals",
+            _normalize_confidence_intervals(
+                self.confidence_intervals,
+                "confidence_intervals",
+            ),
+        )
+        _require_evaluation_metric_names(
+            tuple(
+                (name, lower)
+                for name, lower, _ in self.confidence_intervals
+            ),
+            "confidence_intervals",
+        )
+        object.__setattr__(
+            self,
+            "state_slices",
+            _normalize_evaluation_slices(self.state_slices, "state_slices"),
+        )
+        if any(
+            key not in TUTORING_STATES
+            for key, _, _ in self.state_slices
+        ):
+            raise ValueError("state_slices contains an unsupported state")
+        object.__setattr__(
+            self,
+            "group_slices",
+            _normalize_evaluation_slices(self.group_slices, "group_slices"),
+        )
+        for key, _, _ in self.group_slices:
+            _require_sha256(key, "group_slices")
+        if self.support_coverage is not None:
+            _require_probability(self.support_coverage, "support_coverage")
+            object.__setattr__(
+                self,
+                "support_coverage",
+                float(self.support_coverage),
+            )
+        if self.safety_reasons is not None:
+            reasons = _normalize_string_sequence(
+                self.safety_reasons,
+                "safety_reasons",
+            )
+            if any(
+                reason not in EVALUATION_SAFETY_REASONS
+                for reason in reasons
+            ):
+                raise ValueError(
+                    "safety_reasons contains an unsupported reason"
+                )
+            object.__setattr__(self, "safety_reasons", reasons)
         if self.status == "insufficient_data" and self.approved:
             raise ValueError("insufficient_data evaluation cannot be approved")
 
     def canonical_payload(self) -> Mapping[str, Any]:
-        return {
+        payload: dict[str, Any] = {
             "policy_id": self.policy_id,
             "dataset_identity": self.dataset_identity,
             "status": self.status,
@@ -455,6 +528,26 @@ class PolicyEvaluationRecord(_CanonicalIdentity):
             "effective_sample_size": self.effective_sample_size,
             "action_coverage": self.action_coverage,
         }
+        if self.metrics:
+            payload["metrics"] = dict(self.metrics)
+        if self.confidence_intervals:
+            payload["confidence_intervals"] = {
+                name: [lower, upper]
+                for name, lower, upper in self.confidence_intervals
+            }
+        if self.state_slices:
+            payload["state_slices"] = _evaluation_slices_payload(
+                self.state_slices
+            )
+        if self.group_slices:
+            payload["group_slices"] = _evaluation_slices_payload(
+                self.group_slices
+            )
+        if self.support_coverage is not None:
+            payload["support_coverage"] = self.support_coverage
+        if self.safety_reasons is not None:
+            payload["safety_reasons"] = list(self.safety_reasons)
+        return payload
 
 
 def _signals_payload(signals: DecisionSignals) -> Mapping[str, Any]:
@@ -542,3 +635,128 @@ def _require_nonempty_unique_strings(values: object, field_name: str) -> None:
     _require_unique_strings(values, field_name)
     if not values:
         raise ValueError(f"{field_name} must not be empty")
+
+
+def _normalize_metric_entries(
+    values: object,
+    field_name: str,
+) -> tuple[tuple[str, float], ...]:
+    if isinstance(values, Mapping):
+        raw_entries = tuple(values.items())
+    elif type(values) in {tuple, list}:
+        raw_entries = tuple(values)
+    else:
+        raise ValueError(f"{field_name} must contain named finite metrics")
+    normalized: list[tuple[str, float]] = []
+    for entry in raw_entries:
+        if type(entry) not in {tuple, list} or len(entry) != 2:
+            raise ValueError(f"{field_name} must contain named finite metrics")
+        name, value = entry
+        _require_nonblank(name, field_name)
+        _require_finite(value, field_name)
+        normalized.append((str(name), float(value)))
+    if len({name for name, _ in normalized}) != len(normalized):
+        raise ValueError(f"{field_name} must not contain duplicate names")
+    return tuple(sorted(normalized))
+
+
+def _normalize_confidence_intervals(
+    values: object,
+    field_name: str,
+) -> tuple[tuple[str, float, float], ...]:
+    if isinstance(values, Mapping):
+        raw_entries = tuple(
+            (name, *bounds)
+            if type(bounds) in {tuple, list}
+            else (name,)
+            for name, bounds in values.items()
+        )
+    elif type(values) in {tuple, list}:
+        raw_entries = tuple(values)
+    else:
+        raise ValueError(f"{field_name} must contain finite interval bounds")
+    normalized: list[tuple[str, float, float]] = []
+    for entry in raw_entries:
+        if type(entry) not in {tuple, list} or len(entry) != 3:
+            raise ValueError(f"{field_name} must contain finite interval bounds")
+        name, lower, upper = entry
+        _require_nonblank(name, field_name)
+        _require_finite(lower, field_name)
+        _require_finite(upper, field_name)
+        if float(lower) > float(upper):
+            raise ValueError(f"{field_name} lower bound must not exceed upper bound")
+        normalized.append((str(name), float(lower), float(upper)))
+    if len({name for name, _, _ in normalized}) != len(normalized):
+        raise ValueError(f"{field_name} must not contain duplicate names")
+    return tuple(sorted(normalized))
+
+
+def _normalize_evaluation_slices(
+    values: object,
+    field_name: str,
+) -> tuple[tuple[str, int, tuple[tuple[str, float], ...]], ...]:
+    if type(values) not in {tuple, list}:
+        raise ValueError(f"{field_name} must contain immutable slice summaries")
+    normalized: list[
+        tuple[str, int, tuple[tuple[str, float], ...]]
+    ] = []
+    for item in values:
+        if isinstance(item, Mapping):
+            key = item.get("key")
+            sample_size = item.get("sample_size")
+            metrics = item.get("metrics")
+            if set(item) != {"key", "sample_size", "metrics"}:
+                raise ValueError(f"{field_name} contains unsupported slice fields")
+        elif type(item) in {tuple, list} and len(item) == 3:
+            key, sample_size, metrics = item
+        else:
+            raise ValueError(f"{field_name} contains an invalid slice")
+        _require_nonblank(key, field_name)
+        if type(sample_size) is not int or sample_size <= 0:
+            raise ValueError(f"{field_name} sample_size must be positive")
+        normalized_metrics = _normalize_metric_entries(metrics, field_name)
+        _require_evaluation_metric_names(
+            normalized_metrics,
+            field_name,
+        )
+        if not normalized_metrics:
+            raise ValueError(f"{field_name} slice metrics must not be empty")
+        normalized.append((str(key), sample_size, normalized_metrics))
+    if len({key for key, _, _ in normalized}) != len(normalized):
+        raise ValueError(f"{field_name} must not contain duplicate keys")
+    return tuple(sorted(normalized))
+
+
+def _normalize_string_sequence(
+    values: object,
+    field_name: str,
+) -> tuple[str, ...]:
+    if type(values) not in {tuple, list}:
+        raise ValueError(f"{field_name} must be a sequence of non-blank strings")
+    normalized = tuple(values)
+    if any(type(value) is not str or not value.strip() for value in normalized):
+        raise ValueError(f"{field_name} must be a sequence of non-blank strings")
+    if len(normalized) != len(set(normalized)):
+        raise ValueError(f"{field_name} must not contain duplicates")
+    return tuple(sorted(normalized))
+
+
+def _evaluation_slices_payload(
+    slices: tuple[tuple[str, int, tuple[tuple[str, float], ...]], ...],
+) -> list[dict[str, Any]]:
+    return [
+        {
+            "key": key,
+            "sample_size": sample_size,
+            "metrics": dict(metrics),
+        }
+        for key, sample_size, metrics in slices
+    ]
+
+
+def _require_evaluation_metric_names(
+    metrics: tuple[tuple[str, float], ...],
+    field_name: str,
+) -> None:
+    if any(name not in EVALUATION_METRICS for name, _ in metrics):
+        raise ValueError(f"{field_name} contains an unsupported metric")
