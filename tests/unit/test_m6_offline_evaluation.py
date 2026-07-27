@@ -366,6 +366,49 @@ def test_target_support_cannot_be_borrowed_from_another_tutoring_state() -> None
     assert "low_support" in evaluation.safety_reasons
 
 
+def test_one_supported_row_cannot_hide_a_low_propensity_row_for_same_pair() -> None:
+    """Catch set coverage letting a high-support duplicate mask low support."""
+
+    rows = (
+        _row(
+            fingerprint="s2-action-a-low",
+            raw_group_id="group-1",
+            raw_session_id="session-1",
+            event_time=1,
+            state="S2",
+            selected_action="action-a",
+            candidate_actions=("action-a",),
+            logging_propensity=0.001,
+            target_propensities={"action-a": 1.0},
+            direct_estimates={"action-a": 0.5},
+        ),
+        _row(
+            fingerprint="s2-action-a-high",
+            raw_group_id="group-2",
+            raw_session_id="session-2",
+            event_time=2,
+            state="S2",
+            selected_action="action-a",
+            candidate_actions=("action-a",),
+            logging_propensity=1.0,
+            target_propensities={"action-a": 1.0},
+            direct_estimates={"action-a": 0.5},
+        ),
+    )
+
+    evaluation = evaluate_offline_policy(
+        "policy-candidate",
+        rows,
+        config=_relaxed_config(minimum_logging_propensity=0.01),
+    )
+
+    assert evaluation.action_coverage == pytest.approx(1.0)
+    assert evaluation.support_coverage == pytest.approx(1.0)
+    assert evaluation.status == "insufficient_data"
+    assert evaluation.approved is False
+    assert "low_support" in evaluation.safety_reasons
+
+
 def test_bootstrap_is_reproducible_from_canonical_dataset_identity() -> None:
     """Catch process randomness or input ordering changing bootstrap intervals."""
 

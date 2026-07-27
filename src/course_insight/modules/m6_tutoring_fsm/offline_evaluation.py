@@ -103,6 +103,14 @@ def evaluate_offline_policy(
     if (
         support_coverage < 1.0
         or support_coverage < settings.minimum_support_coverage
+        or any(
+            _target_probability(row, row.selected_action) > 0.0
+            and row.logging_propensity is not None
+            and 0.0
+            < row.logging_propensity
+            < settings.minimum_logging_propensity
+            for row in ordered
+        )
     ):
         reasons.append("low_support")
     if (
