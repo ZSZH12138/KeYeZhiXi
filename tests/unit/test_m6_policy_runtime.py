@@ -263,6 +263,43 @@ def test_active_adopts_only_a_gate_approved_safe_candidate() -> None:
     assert selection.policy_decision.fallback_reason is None
 
 
+@pytest.mark.parametrize("mode", ["shadow", "active"])
+def test_feature_schema_mismatch_rejects_learned_prediction_provenance(
+    mode: str,
+) -> None:
+    def mismatched_schema_loader(
+        candidate_ids: tuple[str, ...],
+    ) -> LoadedPolicyArtifact:
+        loaded = _loaded_artifact(candidate_ids)
+        return replace(
+            loaded,
+            manifest=replace(
+                loaded.manifest,
+                feature_schema_version="m6-features-v2",
+            ),
+        )
+
+    runtime = _runtime(
+        mode=mode,
+        artifact_loader=mismatched_schema_loader,
+    )
+    context = _context()
+    candidates = _candidates()
+
+    execution = runtime.prepare_execution(context, candidates)
+    selection = runtime.select(execution, context, candidates)
+
+    assert execution.feature_schema_version == "m6-features-v2"
+    assert selection.public_candidate is candidates[0]
+    assert selection.policy_decision.fallback_reason == "policy_runtime_failure"
+    assert selection.observation.selected_candidate_id == candidates[0].candidate_id
+    assert selection.observation.propensity == 1.0
+    assert (
+        selection.observation.feature_schema_version
+        == execution.feature_schema_version
+    )
+
+
 @pytest.mark.parametrize(
     "runtime",
     [

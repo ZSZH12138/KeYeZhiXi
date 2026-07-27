@@ -277,6 +277,8 @@ def _validated_learned_decision(
         or decision.candidate_ids != candidate_ids
         or decision.prediction is None
         or decision.prediction.policy_id != execution.policy_id
+        or decision.prediction.feature_schema_version
+        != execution.feature_schema_version
     ):
         raise ValueError("learned policy returned an invalid prediction")
     return PolicyDecision(

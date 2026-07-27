@@ -99,21 +99,36 @@ class M6TutoringControlService:
         )
         stored = self._load_policy_execution(request_key)
         if stored is not None:
+            replay = self._repository.get_decision_by_request(request_key)
+            if replay is not None:
+                self._validate_replay_policy_execution(
+                    replay,
+                    stored,
+                    request_key,
+                )
             return stored
         replay = self._repository.get_decision_by_request(request_key)
         if replay is not None:
-            desired = (
-                replay.policy_execution_ref
-                if replay.policy_execution_ref is not None
-                else rules_policy_execution(request_key)
-            )
-            return self._commit_policy_execution(desired)
+            return self._prepare_replay_policy_execution(replay, request_key)
 
-        previous = self._resolve_previous_snapshot(
-            task_plan,
-            scoring_result_bundle,
-            previous_session_state_snapshot,
-        )
+        try:
+            previous = self._resolve_previous_snapshot(
+                task_plan,
+                scoring_result_bundle,
+                previous_session_state_snapshot,
+            )
+        except DomainError as error:
+            if (
+                error.module != "m6"
+                or error.code != "TUTORING_REFERENCE_MISMATCH"
+                or error.details.get("reason")
+                != "caller_session_history_is_stale"
+            ):
+                raise
+            replay = self._repository.get_decision_by_request(request_key)
+            if replay is None:
+                raise
+            return self._prepare_replay_policy_execution(replay, request_key)
         _, _, _, context, candidates = self._build_policy_inputs(
             task_plan,
             scoring_result_bundle,
@@ -150,11 +165,7 @@ class M6TutoringControlService:
         )
         replay = self._repository.get_decision_by_request(request_key)
         if replay is not None:
-            self._commit_policy_execution(
-                replay.policy_execution_ref
-                if replay.policy_execution_ref is not None
-                else rules_policy_execution(request_key)
-            )
+            self._prepare_replay_policy_execution(replay, request_key)
             return _validated_replay(replay, task_plan, request_key)
 
         try:
@@ -174,11 +185,7 @@ class M6TutoringControlService:
             replay = self._repository.get_decision_by_request(request_key)
             if replay is None:
                 raise
-            self._commit_policy_execution(
-                replay.policy_execution_ref
-                if replay.policy_execution_ref is not None
-                else rules_policy_execution(request_key)
-            )
+            self._prepare_replay_policy_execution(replay, request_key)
             return _validated_replay(replay, task_plan, request_key)
         (
             targets,
@@ -352,6 +359,46 @@ class M6TutoringControlService:
         ):
             _raise_policy_integrity_error("policy_execution_request_mismatch")
         return execution
+
+    def _prepare_replay_policy_execution(
+        self,
+        replay: TutoringDecisionRecord,
+        request_key: str,
+    ) -> PolicyExecutionRef:
+        expected = (
+            replay.policy_execution_ref
+            if replay.policy_execution_ref is not None
+            else rules_policy_execution(request_key)
+        )
+        stored = self._load_policy_execution(request_key)
+        authoritative = (
+            stored
+            if stored is not None
+            else self._commit_policy_execution(expected)
+        )
+        self._validate_replay_policy_execution(
+            replay,
+            authoritative,
+            request_key,
+        )
+        return authoritative
+
+    @staticmethod
+    def _validate_replay_policy_execution(
+        replay: TutoringDecisionRecord,
+        execution: PolicyExecutionRef,
+        request_key: str,
+    ) -> None:
+        expected = (
+            replay.policy_execution_ref
+            if replay.policy_execution_ref is not None
+            else rules_policy_execution(request_key)
+        )
+        if (
+            replay.request_fingerprint != request_key
+            or execution != expected
+        ):
+            _raise_policy_integrity_error("replay_policy_execution_mismatch")
 
     def _resolve_previous_snapshot(
         self,

@@ -41,6 +41,7 @@ from course_insight.modules.m6_tutoring_fsm.policy_gate import (
 from course_insight.modules.m6_tutoring_fsm.policy_runtime import (
     PolicyRuntime,
     PolicyRuntimeGateInputs,
+    rules_policy_execution,
 )
 from course_insight.modules.m6_tutoring_fsm.policy_types import (
     PolicyArtifactManifest,
@@ -1371,3 +1372,98 @@ def test_policy_persistence_failure_falls_back_to_rules_behavior() -> None:
     ).decide_next_action(task, scoring, state, _session("S1"))
 
     assert result.next_state() == "S3"
+
+
+@pytest.mark.parametrize("entrypoint", ["prepare", "decide"])
+def test_replay_rejects_a_different_stored_binding_for_the_same_request(
+    entrypoint: str,
+) -> None:
+    task, scoring, state = _valid_inputs()
+    previous = _session("S1")
+    repository = InMemoryM6Repository()
+    service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+        policy_runtime=_learned_runtime("active"),
+    )
+    service.decide_next_action(task, scoring, state, previous)
+    request_key = request_fingerprint(
+        task_plan=task,
+        scoring_result_bundle=scoring,
+        state_update_result=state,
+        caller_previous_session_state_snapshot=previous,
+    )
+    stored = repository.get_decision_by_request(request_key)
+    assert stored is not None
+    assert stored.policy_execution_ref is not None
+    repository._policy_executions = {  # noqa: SLF001
+        request_key: rules_policy_execution(request_key)
+    }
+
+    with pytest.raises(DomainError) as raised:
+        if entrypoint == "prepare":
+            service.prepare_policy_execution(task, scoring, state, previous)
+        else:
+            service.decide_next_action(task, scoring, state, previous)
+
+    assert raised.value.code == "TUTORING_POLICY_INTEGRITY_ERROR"
+    assert raised.value.details["reason"] == "replay_policy_execution_mismatch"
+
+
+def test_prepare_recovers_same_binding_when_same_request_wins_stale_race() -> None:
+    class PublishAuthoritativeReplayRepository(InMemoryM6Repository):
+        def __init__(self, authoritative: InMemoryM6Repository) -> None:
+            super().__init__()
+            self._authoritative = authoritative
+            self._publish_on_request_lookup = True
+
+        def get_decision_by_request(self, request_key: str) -> Any:
+            if self._publish_on_request_lookup:
+                self._publish_on_request_lookup = False
+                source = self._authoritative
+                self._snapshots = dict(source._snapshots)  # noqa: SLF001
+                self._decisions_by_request = dict(  # noqa: SLF001
+                    source._decisions_by_request  # noqa: SLF001
+                )
+                self._decisions_by_input = dict(  # noqa: SLF001
+                    source._decisions_by_input  # noqa: SLF001
+                )
+                self._decisions_by_turn = dict(  # noqa: SLF001
+                    source._decisions_by_turn  # noqa: SLF001
+                )
+                self._policy_executions = dict(  # noqa: SLF001
+                    source._policy_executions  # noqa: SLF001
+                )
+                return None
+            return super().get_decision_by_request(request_key)
+
+    task, scoring, state = _valid_inputs()
+    previous = _session("S1")
+    authoritative = InMemoryM6Repository()
+    authority_service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        authoritative,
+        policy_runtime=_learned_runtime("active"),
+    )
+    expected = authority_service.prepare_policy_execution(
+        task,
+        scoring,
+        state,
+        previous,
+    )
+    authority_service.decide_next_action(task, scoring, state, previous)
+    racing_repository = PublishAuthoritativeReplayRepository(authoritative)
+    racing_service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        racing_repository,
+        policy_runtime=PolicyRuntime(mode="rules"),
+    )
+
+    recovered = racing_service.prepare_policy_execution(
+        task,
+        scoring,
+        state,
+        previous,
+    )
+
+    assert recovered == expected
