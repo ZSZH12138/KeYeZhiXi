@@ -107,6 +107,12 @@ class _Adapter:
         )
 
 
+class _RaisingAdapter(_Adapter):
+    def predict(self, text: str) -> IntentPrediction:
+        del text
+        raise RuntimeError("private adapter failure")
+
+
 def _bundle() -> KnowledgeBundle:
     blueprint = AssessmentBlueprint(
         blueprint_id="blueprint_stage1",
@@ -530,6 +536,49 @@ def test_stage1_public_factory_active_oos_refuses_and_replays_without_task_plan(
             "SELECT COUNT(*) FROM m4_task_plans"
         ).fetchone()[0]
     assert decision == ("out_of_scope", "refusal")
+    assert decision_count == 1
+    assert task_count == 0
+
+
+def test_stage1_active_adapter_failure_is_persisted_and_replayed(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "stage1.sqlite3"
+    service = _service(
+        database_path,
+        mode="active",
+        adapter=_RaisingAdapter(
+            label="qa",
+            confidence=0.90,
+            margin=0.30,
+            version="failing-v1",
+        ),
+    )
+
+    for _ in range(2):
+        with pytest.raises(DomainError) as captured:
+            _create_plan(service, student_text="greetings")
+        assert captured.value.code == "UNSUPPORTED_TASK"
+        assert captured.value.recoverable is True
+
+    with sqlite3.connect(database_path) as connection:
+        decision = connection.execute(
+            """
+            SELECT decision_status, decision_source, reason_codes_json
+            FROM m4_intent_decisions
+            """
+        ).fetchone()
+        decision_count = connection.execute(
+            "SELECT COUNT(*) FROM m4_intent_decisions"
+        ).fetchone()[0]
+        task_count = connection.execute(
+            "SELECT COUNT(*) FROM m4_task_plans"
+        ).fetchone()[0]
+    assert decision == (
+        "failed",
+        "refusal",
+        '["adapter_exception","no_supported_intent"]',
+    )
     assert decision_count == 1
     assert task_count == 0
 

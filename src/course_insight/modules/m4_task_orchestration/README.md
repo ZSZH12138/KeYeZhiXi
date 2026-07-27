@@ -91,7 +91,8 @@ SQLite migration 仍由应用初始化阶段统一执行；M4 service 不执行 
 私有决策存于 SQLite/PG 的 `m4_intent_decisions`：只保存 request key、输入
 SHA-256、任务/拒绝状态、决策来源、adapter/policy 版本、置信度/margin、原因码、
 影子审计、UTC 时间和 payload checksum。它绝不保存原始学生文本或完整请求。
-SQLite schema v10 与 PostgreSQL `0010_m4_intent_decisions.sql` 同步；
+SQLite schema v10 与 PostgreSQL `0010_m4_intent_decisions.sql` 创建该表，v11 与
+`0011_m4_intent_runtime_statuses.sql` 同步补齐 `unavailable`、`failed` 拒绝状态；
 SQLite→PostgreSQL 导入以 `request_key` 做 identity，并保留 first-writer 决定。
 
 ## 消费关系与边界

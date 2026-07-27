@@ -30,11 +30,12 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     migrate_workflow_v8_to_v9,
 )
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
 _M4_INTENT_DECISION_MIGRATION_NAME = "m4_intent_decisions"
+_M4_INTENT_STATUS_MIGRATION_NAME = "m4_intent_runtime_statuses"
 _MODULE_RECOVERY_MIGRATION_NAME = "module_owned_recovery"
 _ASSESSMENT_WORKFLOW_MIGRATION_NAME = "m0_assessment_workflow"
 _ASSESSMENT_WORKFLOW_REFS_MIGRATION_NAME = "m0_assessment_workflow_refs"
@@ -204,7 +205,7 @@ CREATE TABLE IF NOT EXISTS m6_tutoring_decisions (
         REFERENCES m6_session_states(session_id, turn_count)
 )
 """
-_M4_INTENT_DECISION_SQL = """
+_M4_INTENT_DECISION_V10_SQL = """
 CREATE TABLE IF NOT EXISTS m4_intent_decisions (
     request_key TEXT PRIMARY KEY CHECK (length(trim(request_key)) > 0),
     resolved_task_type TEXT NULL,
@@ -292,6 +293,20 @@ CREATE TABLE IF NOT EXISTS m4_intent_decisions (
     )
 )
 """
+_M4_INTENT_DECISION_SQL = _M4_INTENT_DECISION_V10_SQL.replace(
+    "decision_status IN ('accepted', 'abstained', 'out_of_scope', 'invalid')",
+    (
+        "decision_status IN ("
+        "'accepted', 'abstained', 'out_of_scope', "
+        "'unavailable', 'failed', 'invalid'"
+        ")"
+    ),
+)
+_M4_INTENT_DECISION_V11_STAGING_SQL = _M4_INTENT_DECISION_SQL.replace(
+    "CREATE TABLE IF NOT EXISTS m4_intent_decisions",
+    "CREATE TABLE m4_intent_decisions_v11",
+    1,
+)
 _M6_DECISION_COLUMNS = (
     ("decision_id", "TEXT", 0, None, 1),
     ("session_id", "TEXT", 1, None, 0),
@@ -561,12 +576,65 @@ def _validate_m6_decision_schema(connection: sqlite3.Connection) -> None:
 
 def _validate_m4_intent_decision_schema(
     connection: sqlite3.Connection,
+    *,
+    expected_sql: str = _M4_INTENT_DECISION_SQL,
 ) -> None:
-    if _normalized_table_schema_sql(
+    actual_sql = _normalized_table_schema_sql(
         connection,
         "m4_intent_decisions",
-    ) != _normalize_create_table_sql(_M4_INTENT_DECISION_SQL):
+    ).replace('"m4_intent_decisions"', "m4_intent_decisions")
+    if actual_sql != _normalize_create_table_sql(expected_sql):
         raise RuntimeError("M4 intent decision schema is incompatible")
+
+
+def _migrate_m4_intent_runtime_statuses(
+    connection: sqlite3.Connection,
+) -> None:
+    """Extend the M4 status constraint without losing v10 decisions."""
+
+    connection.execute(_M4_INTENT_DECISION_V11_STAGING_SQL)
+    connection.execute(
+        """
+        INSERT INTO m4_intent_decisions_v11(
+            request_key,
+            resolved_task_type,
+            decision_status,
+            decision_source,
+            adapter_id,
+            adapter_version,
+            policy_version,
+            confidence,
+            margin,
+            input_checksum,
+            reason_codes_json,
+            shadow_json,
+            schema_version,
+            payload_checksum,
+            created_at
+        )
+        SELECT
+            request_key,
+            resolved_task_type,
+            decision_status,
+            decision_source,
+            adapter_id,
+            adapter_version,
+            policy_version,
+            confidence,
+            margin,
+            input_checksum,
+            reason_codes_json,
+            shadow_json,
+            schema_version,
+            payload_checksum,
+            created_at
+        FROM m4_intent_decisions
+        """
+    )
+    connection.execute("DROP TABLE m4_intent_decisions")
+    connection.execute(
+        "ALTER TABLE m4_intent_decisions_v11 RENAME TO m4_intent_decisions"
+    )
 
 
 def _migrate_m5_learner_scope(connection: sqlite3.Connection) -> None:
@@ -798,11 +866,36 @@ def migrate(connection: sqlite3.Connection) -> None:
                 schema_version=SCHEMA_VERSION,
             )
         if 10 not in applied_versions:
-            connection.execute(_M4_INTENT_DECISION_SQL)
-            _validate_m4_intent_decision_schema(connection)
+            connection.execute(_M4_INTENT_DECISION_V10_SQL)
+            try:
+                _validate_m4_intent_decision_schema(
+                    connection,
+                    expected_sql=_M4_INTENT_DECISION_V10_SQL,
+                )
+            except RuntimeError:
+                # Recovery tests and repaired ledgers can retain the v11 table
+                # while replaying the forward-only migration sequence.
+                _validate_m4_intent_decision_schema(connection)
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                 (10, _M4_INTENT_DECISION_MIGRATION_NAME),
+            )
+            applied_versions.add(10)
+        else:
+            _validate_m4_intent_decision_schema(
+                connection,
+                expected_sql=(
+                    _M4_INTENT_DECISION_SQL
+                    if 11 in applied_versions
+                    else _M4_INTENT_DECISION_V10_SQL
+                ),
+            )
+        if 11 not in applied_versions:
+            _migrate_m4_intent_runtime_statuses(connection)
+            _validate_m4_intent_decision_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (11, _M4_INTENT_STATUS_MIGRATION_NAME),
             )
         else:
             _validate_m4_intent_decision_schema(connection)

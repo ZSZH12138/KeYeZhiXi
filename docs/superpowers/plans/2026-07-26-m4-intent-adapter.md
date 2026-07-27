@@ -17,7 +17,10 @@
 > arguments and operator commands are documented in
 > `docs/m4_intent_operations.md` and `docs/postgresql_migration.md`; earlier
 > `model_dir` and four-field dataset snippets in this historical plan are not
-> the final runtime interface.
+> the final runtime interface. A final persistence correction advances both
+> backends to schema v11 so the already-defined `unavailable` and `failed`
+> runtime refusal states are durable. Offline evaluation now shares the
+> runtime rule that an `out_of_scope` top-two competitor must be refused.
 
 **Tech Stack:** Python 3.12, frozen dataclasses, Pydantic v2 settings, SQLite, PostgreSQL/psycopg 3, scikit-learn character TF-IDF and logistic regression, joblib, JSONL, pytest/pytest-cov.
 

@@ -104,7 +104,8 @@ course_package_id, blueprint_id`。所以不同 hint/文本可产生不同的私
 OOS recall、`task_coverage`、selective accuracy、固定 6×6 confusion matrix、
 组间重叠、`production_gate` 与 `evidence_scope`。生产门禁必须使用受控离线数据与
 预先批准的阈值；sample-only artifact 的 `eligible/passed` 始终为 false。
-`task_coverage` 只衡量真实五任务样本中达到双阈值并被接收的比例；selective
+`task_coverage` 只衡量真实五任务样本中达到双阈值、且 top-2 均不是 OOS 后被接收
+的比例；selective
 accuracy 的分母则包含所有被自动接收为五任务的样本，因此把真实 OOS 却被误接收
 为任务的样本计为错误，不能通过缩小分母抬高生产门禁结果。
 
@@ -122,7 +123,9 @@ accuracy 的分母则包含所有被自动接收为五任务的样本，因此�
 ## 持久化、导入与监控
 
 SQLite schema v10 和 PostgreSQL core migration `0010_m4_intent_decisions.sql`
-都创建 `m4_intent_decisions`。SQLite→PostgreSQL 导入把它列入固定 allowlist，
+创建 `m4_intent_decisions`；schema v11 与
+`0011_m4_intent_runtime_statuses.sql` 进一步允许持久化 `unavailable`、`failed`
+这两类运行时拒绝状态。SQLite→PostgreSQL 导入把该表列入固定 allowlist，
 以 `request_key` insert-or-get 并回读核验；导入报告仍须按
 `docs/postgresql_migration.md` 的逻辑源快照 checksum 和 source-limit 语义解释。
 

@@ -26,6 +26,7 @@ from sklearn.pipeline import Pipeline
 
 from course_insight.modules.m4_task_orchestration.intent import (
     SUPPORTED_INTENT_LABELS,
+    is_supported_intent_ranking,
 )
 from course_insight.modules.m4_task_orchestration.intent_dataset import (
     EXPECTED_LABELS,
@@ -280,9 +281,16 @@ def _evaluate_partition(
         confidence = float(row[top_index])
         margin = confidence - float(row[second_index])
         predicted_label = EXPECTED_LABELS[top_index]
-        predicted.append(predicted_label)
+        second_label = EXPECTED_LABELS[second_index]
+        ranking_is_supported = is_supported_intent_ranking(
+            predicted_label,
+            second_label,
+        )
+        predicted.append(
+            predicted_label if ranking_is_supported else "out_of_scope"
+        )
         accepted_predictions.append(
-            predicted_label != "out_of_scope"
+            ranking_is_supported
             and confidence >= thresholds["min_confidence"]
             and margin >= thresholds["min_margin"]
         )

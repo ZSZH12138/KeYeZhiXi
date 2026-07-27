@@ -20,6 +20,7 @@ from course_insight.infrastructure.sqlite.migrations import (
     current_schema_version,
     migrate,
 )
+from course_insight.infrastructure.sqlite import migrations as sqlite_migrations
 from course_insight.modules.m4_task_orchestration.identity import (
     canonical_idempotency_key,
 )
@@ -182,7 +183,7 @@ def _intent_row_count(database_path: Path) -> int:
         )
 
 
-def test_sqlite_v9_to_v10_migration_is_forward_only_and_repeatable(
+def test_sqlite_v9_to_current_migration_is_forward_only_and_repeatable(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "runtime" / "course_insight.sqlite3"
@@ -193,16 +194,21 @@ def test_sqlite_v9_to_v10_migration_is_forward_only_and_repeatable(
     with connect_sqlite(database_path) as connection:
         connection.execute("BEGIN IMMEDIATE")
         connection.execute("DROP TABLE m4_intent_decisions")
-        connection.execute("DELETE FROM schema_migrations WHERE version = 10")
+        connection.execute(
+            "DELETE FROM schema_migrations WHERE version IN (10, 11)"
+        )
         connection.execute("COMMIT")
         assert current_schema_version(connection) == 9
 
         migrate(connection)
         migrate(connection)
 
-        assert current_schema_version(connection) == 10
+        assert current_schema_version(connection) == SCHEMA_VERSION
         assert connection.execute(
             "SELECT COUNT(*) FROM schema_migrations WHERE version = 10"
+        ).fetchone()[0] == 1
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 11"
         ).fetchone()[0] == 1
         assert connection.execute(
             "SELECT COUNT(*) FROM m4_task_plans"
@@ -231,7 +237,52 @@ def test_sqlite_v9_to_v10_migration_is_forward_only_and_repeatable(
             "payload_checksum",
             "created_at",
         }
-    assert SCHEMA_VERSION == 10
+    assert SCHEMA_VERSION >= 10
+
+
+def test_sqlite_v10_to_v11_preserves_rows_and_accepts_runtime_failure_statuses(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository_type()(database_path)
+    repository.initialize()
+    accepted = repository.insert_or_get_intent_decision(_decision())
+
+    with connect_sqlite(database_path) as connection:
+        connection.execute("BEGIN IMMEDIATE")
+        connection.execute(
+            "ALTER TABLE m4_intent_decisions RENAME TO m4_intent_decisions_v11"
+        )
+        connection.execute(sqlite_migrations._M4_INTENT_DECISION_V10_SQL)
+        connection.execute(
+            """
+            INSERT INTO m4_intent_decisions
+            SELECT * FROM m4_intent_decisions_v11
+            """
+        )
+        connection.execute("DROP TABLE m4_intent_decisions_v11")
+        connection.execute("DELETE FROM schema_migrations WHERE version = 11")
+        connection.execute("COMMIT")
+        assert current_schema_version(connection) == 10
+
+        migrate(connection)
+        migrate(connection)
+
+        assert current_schema_version(connection) == 11
+        assert connection.execute(
+            "SELECT COUNT(*) FROM schema_migrations WHERE version = 11"
+        ).fetchone()[0] == 1
+
+    restarted = _repository_type()(database_path)
+    assert restarted.get_intent_decision(accepted.request_key) == accepted
+    for status in (IntentStatus.UNAVAILABLE, IntentStatus.FAILED):
+        candidate = _decision(
+            request_key=f"request-{status.value}",
+            decision_status=status,
+        )
+        assert restarted.insert_or_get_intent_decision(candidate) == candidate
+
+    assert SCHEMA_VERSION == 11
 
 
 @pytest.mark.parametrize(

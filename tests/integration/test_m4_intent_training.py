@@ -611,6 +611,28 @@ def test_evaluation_uses_five_task_macro_and_excludes_oos_accepts() -> None:
     assert report["counts"]["covered_in_scope"] == 4
 
 
+def test_evaluation_refuses_when_out_of_scope_is_the_runner_up() -> None:
+    class _FakePipeline:
+        def predict_proba(self, texts: list[str]) -> list[list[float]]:
+            del texts
+            return [[0.025, 0.025, 0.20, 0.025, 0.70, 0.025]]
+
+    report = train_m4_intent._evaluate_partition(
+        _FakePipeline(),
+        (_example("qa", 0),),
+        group_count=1,
+        thresholds={"min_confidence": 0.60, "min_margin": 0.10},
+    )
+
+    assert report["task_coverage"] == 0.0
+    assert report["selective_accuracy"] is None
+    assert report["per_class"]["qa"]["recall"] == 0.0
+    assert report["confusion_matrix"]["matrix"][4][2] == 1
+    assert report["counts"]["accepted_predictions"] == 0
+    assert report["counts"]["covered_in_scope"] == 0
+    assert report["counts"]["correct"] == 0
+
+
 def test_selective_accuracy_counts_oos_requests_wrongly_accepted_as_tasks() -> None:
     class _FakePipeline:
         def predict_proba(self, texts: list[str]) -> list[list[float]]:

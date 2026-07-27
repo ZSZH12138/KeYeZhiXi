@@ -567,6 +567,7 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
         "0008_m0_review_workflow.sql",
         "0009_m0_workflow_recovery_freeze.sql",
         "0010_m4_intent_decisions.sql",
+        "0011_m4_intent_runtime_statuses.sql",
     )
     all_sql = "\n".join(migration.sql for migration in migrations)
     for table_name in CORE_TABLES:
@@ -583,7 +584,7 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
 
 
 def test_m4_intent_migration_is_checksum_locked_and_constraint_complete() -> None:
-    migration = load_migrations()[-1]
+    migration = load_migrations()[-2]
 
     assert migration.version == 10
     assert migration.name == "m4_intent_decisions"
@@ -606,6 +607,39 @@ def test_m4_intent_migration_is_checksum_locked_and_constraint_complete() -> Non
     assert "jsonb_typeof(shadow_json) = 'object'" in sql
     assert "schema_version = 1" in sql
     assert sql.count("~ '^[0-9a-f]{64}$'") == 2
+
+
+def test_m4_runtime_status_migration_extends_the_database_constraint() -> None:
+    migration = load_migrations()[-1]
+
+    assert migration.version == 11
+    assert migration.name == "m4_intent_runtime_statuses"
+    assert migration.checksum == hashlib.sha256(
+        migration.path.read_bytes()
+    ).hexdigest()
+    assert len(migration.checksum) == 64
+    assert migration.statements == (
+        (
+            "ALTER TABLE m4_intent_decisions\n"
+            "    DROP CONSTRAINT "
+            "m4_intent_decisions_decision_status_check"
+        ),
+        (
+            "ALTER TABLE m4_intent_decisions\n"
+            "    ADD CONSTRAINT "
+            "m4_intent_decisions_decision_status_check\n"
+            "    CHECK (\n"
+            "        decision_status IN (\n"
+            "            'accepted',\n"
+            "            'abstained',\n"
+            "            'out_of_scope',\n"
+            "            'unavailable',\n"
+            "            'failed',\n"
+            "            'invalid'\n"
+            "        )\n"
+            "    )"
+        ),
+    )
 
 
 def test_contract_payload_tables_store_checksum_and_schema_version() -> None:

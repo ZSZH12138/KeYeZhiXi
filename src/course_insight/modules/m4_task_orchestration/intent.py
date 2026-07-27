@@ -62,6 +62,18 @@ class IntentStatus(StrEnum):
     INVALID = "invalid"
 
 
+def is_supported_intent_ranking(
+    top_label: str,
+    second_label: str,
+) -> bool:
+    """Return whether both leading labels stay inside the five-task boundary."""
+
+    return (
+        top_label in _SUPPORTED_INTENT_LABELS
+        and second_label in _SUPPORTED_INTENT_LABELS
+    )
+
+
 @dataclass(frozen=True, slots=True)
 class IntentPrediction:
     """An immutable intent-adapter result with no source text attached."""

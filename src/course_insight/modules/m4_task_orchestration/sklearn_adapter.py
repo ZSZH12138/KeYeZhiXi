@@ -27,6 +27,7 @@ from course_insight.modules.m4_task_orchestration.intent import (
     SUPPORTED_INTENT_LABELS,
     IntentAdapter,
     IntentPrediction,
+    is_supported_intent_ranking,
 )
 from course_insight.modules.m4_task_orchestration.normalization import (
     NORMALIZATION_VERSION,
@@ -132,7 +133,7 @@ class SklearnIntentAdapter:
             label: probabilities[_EXPECTED_LABELS.index(label)]
             for label in _EXPECTED_PUBLIC_LABELS
         }
-        if "out_of_scope" in {top_label, second_label}:
+        if not is_supported_intent_ranking(top_label, second_label):
             return IntentPrediction.out_of_scope(
                 scores=public_scores,
                 confidence=confidence,

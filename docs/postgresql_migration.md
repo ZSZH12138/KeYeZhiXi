@@ -15,7 +15,7 @@
   - `pg_advisory_xact_lock`
   - `schema_migrations` 校验
 - `src/course_insight/infrastructure/postgresql/migrations/*.sql`
-  - 当前 bundled schema version 为 `10`
+  - 当前 bundled schema version 为 `11`
   - v8 为 `m0_assessment_runs` 增加同一 `paper_id` 只允许一个
     `status <> completed` review 的部分唯一索引（包含 failed）；相同 operation
     可重放，只有完成当前 review 后才允许新的 review operation
@@ -29,6 +29,8 @@
   - v10 新增 `m4_intent_decisions`：以 `request_key` 唯一保存 M4 私有意图决定、
     输入 SHA-256、adapter/policy 元数据、原因码、可选 shadow JSON、UTC 时间和
     payload checksum。该表没有学生原文列；公开 `TaskPlan` 和既有 M4 表不扩字段。
+  - v11 扩展该表的状态约束，允许持久化 `unavailable` 与 `failed`，保证适配器
+    不可用或抛出异常时仍能形成可恢复、可审计、可重放的拒绝决定。
 - `src/course_insight/infrastructure/postgresql/sqlite_import.py`
   - 显式、可恢复、批量提交的导入编排
 - `src/course_insight/infrastructure/postgresql/sqlite_import_checkpoint.py`

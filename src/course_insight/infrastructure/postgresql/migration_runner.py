@@ -18,7 +18,7 @@ from course_insight.infrastructure.postgresql.base import (
 )
 
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 MIGRATION_LOCK_ID = 0x434F55525345494E
 MIGRATIONS_DIRECTORY = Path(__file__).with_name("migrations")
 

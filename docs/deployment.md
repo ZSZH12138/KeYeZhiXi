@@ -506,7 +506,7 @@ python manage.py check
 python manage.py run_outbox_worker --once
 ```
 
-预期：SQLite migration 仍可前向到 version 10，应用可读取切换前的 SQLite 基线。
+预期：SQLite migration 仍可前向到 version 11，应用可读取切换前的 SQLite 基线。
 失败时检查备份、文件权限和 schema ledger。仓库没有 PostgreSQL→SQLite 自动
 反向迁移；切到 PostgreSQL 后产生的新数据不会出现在旧 SQLite。只有在明确接受
 该数据水位差异、或另行完成受审计的数据回迁后，才能把回切用于生产。

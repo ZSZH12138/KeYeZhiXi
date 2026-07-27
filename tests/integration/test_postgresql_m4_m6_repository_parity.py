@@ -22,6 +22,9 @@ from course_insight.contracts.tutoring import (
 from course_insight.infrastructure.postgresql.m4_repository import (
     PostgresM4Repository,
 )
+from course_insight.infrastructure.postgresql.migration_runner import (
+    load_migrations,
+)
 from course_insight.infrastructure.postgresql.m6_repository import (
     PostgresM6Repository,
 )
@@ -361,6 +364,112 @@ def test_real_postgres_m4_intent_round_trip_first_writer_and_checksums(
                 connection.execute(
                     "DELETE FROM m4_intent_decisions WHERE request_key = %s",
                     (first.request_key,),
+                )
+
+
+@pytest.mark.parametrize(
+    "status",
+    [IntentStatus.UNAVAILABLE, IntentStatus.FAILED],
+)
+def test_real_postgres_m4_runtime_refusal_status_round_trip(
+    postgres_pool: PostgresPool,
+    status: IntentStatus,
+) -> None:
+    token = uuid4().hex
+    candidate = StoredIntentDecision(
+        request_key=_fingerprint(token, "intent-request"),
+        resolved_task_type=None,
+        decision_status=status,
+        decision_source="refusal",
+        adapter_id="live-adapter",
+        adapter_version="v1",
+        policy_version="intent-policy-v1",
+        confidence=None,
+        margin=None,
+        input_checksum=_fingerprint(token, "private-input"),
+        reason_codes=(
+            "adapter_unavailable"
+            if status is IntentStatus.UNAVAILABLE
+            else "adapter_exception",
+        ),
+        created_at=NOW,
+        _generate_checksum=True,
+    )
+    repository = PostgresM4Repository(postgres_pool)
+    try:
+        assert repository.insert_or_get_intent_decision(candidate) == candidate
+        assert repository.get_intent_decision(candidate.request_key) == candidate
+    finally:
+        with postgres_pool.connection() as connection:
+            with connection.transaction():
+                connection.execute(
+                    "DELETE FROM m4_intent_decisions WHERE request_key = %s",
+                    (candidate.request_key,),
+                )
+
+
+def test_real_postgres_v10_to_v11_status_migration_preserves_rows(
+    postgres_pool: PostgresPool,
+) -> None:
+    token = uuid4().hex
+    accepted = _m4_intent(token)
+    failed = StoredIntentDecision(
+        request_key=_fingerprint(token, "failed-request"),
+        resolved_task_type=None,
+        decision_status=IntentStatus.FAILED,
+        decision_source="refusal",
+        adapter_id="live-adapter",
+        adapter_version="v1",
+        policy_version="intent-policy-v1",
+        confidence=None,
+        margin=None,
+        input_checksum=_fingerprint(token, "failed-input"),
+        reason_codes=("adapter_exception",),
+        created_at=NOW,
+        _generate_checksum=True,
+    )
+    repository = PostgresM4Repository(postgres_pool)
+    try:
+        repository.insert_or_get_intent_decision(accepted)
+        migration = load_migrations()[-1]
+        with postgres_pool.connection() as connection:
+            with connection.transaction():
+                connection.execute(
+                    """
+                    ALTER TABLE m4_intent_decisions
+                        DROP CONSTRAINT
+                        m4_intent_decisions_decision_status_check
+                    """
+                )
+                connection.execute(
+                    """
+                    ALTER TABLE m4_intent_decisions
+                        ADD CONSTRAINT
+                        m4_intent_decisions_decision_status_check
+                        CHECK (
+                            decision_status IN (
+                                'accepted',
+                                'abstained',
+                                'out_of_scope',
+                                'invalid'
+                            )
+                        )
+                    """
+                )
+                for statement in migration.statements:
+                    connection.execute(statement)
+
+        assert repository.get_intent_decision(accepted.request_key) == accepted
+        assert repository.insert_or_get_intent_decision(failed) == failed
+    finally:
+        with postgres_pool.connection() as connection:
+            with connection.transaction():
+                connection.execute(
+                    """
+                    DELETE FROM m4_intent_decisions
+                    WHERE request_key IN (%s, %s)
+                    """,
+                    (accepted.request_key, failed.request_key),
                 )
 
 
