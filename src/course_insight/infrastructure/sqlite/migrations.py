@@ -23,14 +23,16 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL as _M0_ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL,
     ASSESSMENT_RUNS_V5_SQL as _M0_ASSESSMENT_RUNS_V5_SQL,
     ASSESSMENT_RUNS_V6_SQL as _M0_ASSESSMENT_RUNS_V6_SQL,
-    ASSESSMENT_RUNS_V9_SQL as _M0_ASSESSMENT_RUNS_SQL,
+    ASSESSMENT_RUNS_V11_SQL as _M0_ASSESSMENT_RUNS_SQL,
+    ASSESSMENT_RUNS_V9_SQL as _M0_ASSESSMENT_RUNS_V9_SQL,
     ASSESSMENT_RUNS_SUBMIT_INDEX_SQL as _M0_ASSESSMENT_RUNS_SUBMIT_INDEX_SQL,
     migrate_workflow_v5_to_v6,
     migrate_workflow_v7_to_v8,
     migrate_workflow_v8_to_v9,
+    migrate_workflow_v10_to_v11,
 )
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
@@ -44,6 +46,7 @@ _ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME = (
     "m0_assessment_workflow_recovery_freeze"
 )
 _M6_POLICY_LEARNING_MIGRATION_NAME = "m6_policy_learning"
+_ASSESSMENT_POLICY_FREEZE_MIGRATION_NAME = "m0_assessment_policy_freeze"
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -549,8 +552,12 @@ def _validate_assessment_workflow_schema(
 ) -> None:
     expected_sql = (
         _M0_ASSESSMENT_RUNS_SQL
-        if schema_version >= 9
-        else _M0_ASSESSMENT_RUNS_V6_SQL
+        if schema_version >= 11
+        else (
+            _M0_ASSESSMENT_RUNS_V9_SQL
+            if schema_version >= 9
+            else _M0_ASSESSMENT_RUNS_V6_SQL
+        )
     )
     if _normalized_table_schema_sql(
         connection,
@@ -810,9 +817,13 @@ def migrate(connection: sqlite3.Connection) -> None:
             _validate_assessment_workflow_schema(
                 connection,
                 schema_version=(
-                    9
-                    if 9 in applied_versions
-                    else min(max(applied_versions), 7)
+                    11
+                    if 11 in applied_versions
+                    else (
+                        9
+                        if 9 in applied_versions
+                        else min(max(applied_versions), 7)
+                    )
                 ),
             )
         if 7 not in applied_versions:
@@ -827,7 +838,11 @@ def migrate(connection: sqlite3.Connection) -> None:
             migrate_workflow_v7_to_v8(connection)
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=9 if 9 in applied_versions else 8,
+                schema_version=(
+                    11
+                    if 11 in applied_versions
+                    else 9 if 9 in applied_versions else 8
+                ),
             )
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
@@ -837,7 +852,11 @@ def migrate(connection: sqlite3.Connection) -> None:
         else:
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=9 if 9 in applied_versions else 8,
+                schema_version=(
+                    11
+                    if 11 in applied_versions
+                    else 9 if 9 in applied_versions else 8
+                ),
             )
         if 9 not in applied_versions:
             migrate_workflow_v8_to_v9(connection)
@@ -852,7 +871,7 @@ def migrate(connection: sqlite3.Connection) -> None:
         else:
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=9,
+                schema_version=11 if 11 in applied_versions else 9,
             )
         if 10 not in applied_versions:
             for _, statement in _M6_POLICY_TABLES:
@@ -864,6 +883,21 @@ def migrate(connection: sqlite3.Connection) -> None:
             )
         else:
             _validate_m6_policy_schema(connection)
+        if 11 not in applied_versions:
+            migrate_workflow_v10_to_v11(connection)
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=11,
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (11, _ASSESSMENT_POLICY_FREEZE_MIGRATION_NAME),
+            )
+        else:
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=11,
+            )
         validate_outbox_schema(connection, schema_version=SCHEMA_VERSION)
         connection.execute("COMMIT")
     except Exception:

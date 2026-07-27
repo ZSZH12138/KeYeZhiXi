@@ -54,6 +54,18 @@ def test_workflow_decoder_rejects_status_outside_domain_state_machine() -> None:
         _run_from_row(row)
 
 
+def test_workflow_decoder_rejects_partial_policy_identity() -> None:
+    run = _pending_run()
+    row = {
+        field: getattr(run, field)
+        for field in run.__dataclass_fields__
+    }
+    row["policy_id"] = "partial-policy"
+
+    with pytest.raises(ValueError, match="workflow metadata"):
+        _run_from_row(row)
+
+
 def test_schema_health_uses_migration_checksum_validation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

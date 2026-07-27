@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from inspect import signature
 from pathlib import Path
 from typing import Any
 
@@ -66,6 +67,18 @@ LEARNER_ID = "pseudonym_learner"
 SESSION_ID = "session_1"
 CONCEPT_ID = "concept_1"
 COURSE_PACKAGE_ID = "package_authoritative_not_derived_from_bundle"
+
+
+def test_public_decision_contract_keeps_its_four_inputs() -> None:
+    assert tuple(
+        signature(M6TutoringControlService.decide_next_action).parameters
+    ) == (
+        "self",
+        "task_plan",
+        "scoring_result_bundle",
+        "state_update_result",
+        "previous_session_state_snapshot",
+    )
 
 
 @dataclass(frozen=True)
@@ -641,6 +654,9 @@ class _RecordingM6:
         self._delegate = delegate
         self.previous_arguments: tuple[Any, ...] = ()
         self.results: tuple[TutoringControlResult, ...] = ()
+
+    def prepare_policy_execution(self, **kwargs: Any):
+        return self._delegate.prepare_policy_execution(**kwargs)
 
     def decide_next_action(self, **kwargs: Any) -> TutoringControlResult:
         self.previous_arguments = (

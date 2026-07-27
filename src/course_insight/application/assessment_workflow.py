@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -11,6 +12,8 @@ from typing import Any
 from course_insight.application.assessment_dependencies import (
     AssessmentDependencies,
     capture_assessment_dependencies,
+    policy_execution_run_fields,
+    verify_policy_execution,
     verify_policy_dependencies,
 )
 from course_insight.application.assessment_recovery import (
@@ -322,6 +325,32 @@ class AssessmentWorkflow:
                     state_version=state.learner_state_snapshot.state_version,
                 )
 
+            policy_execution = self._execute(
+                run,
+                lambda: self._m6.prepare_policy_execution(
+                    task_plan=task,
+                    scoring_result_bundle=scoring,
+                    state_update_result=state,
+                    previous_session_state_snapshot=None,
+                ),
+            )
+            if run.checkpoint == "state_saved":
+                run = self._advance(
+                    run,
+                    "policy_frozen",
+                    **policy_execution_run_fields(policy_execution),
+                )
+            elif run.policy_id is None:
+                run = self._m0.adopt_legacy_assessment_run(
+                    replace(
+                        run,
+                        updated_at=self._now(),
+                        **policy_execution_run_fields(policy_execution),
+                    )
+                )
+            else:
+                verify_policy_execution(run, policy_execution)
+
             tutoring = self._execute(
                 run,
                 lambda: self._m6.decide_next_action(
@@ -331,7 +360,7 @@ class AssessmentWorkflow:
                     previous_session_state_snapshot=None,
                 ),
             )
-            if run.checkpoint == "state_saved":
+            if run.checkpoint == "policy_frozen":
                 run = self._advance(run, "tutoring_saved")
 
             feedback = self._m7.get_feedback_for_task(
@@ -704,7 +733,7 @@ class AssessmentWorkflow:
         self,
         run: AssessmentRun,
         checkpoint: str,
-        **refs: str | None,
+        **refs: object,
     ) -> AssessmentRun:
         return self._recovery.advance(run, checkpoint, **refs)
 

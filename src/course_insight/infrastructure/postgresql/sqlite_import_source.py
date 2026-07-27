@@ -351,6 +351,22 @@ def _prepare_assessment_run(row: sqlite3.Row) -> PreparedImportRow:
             row,
             "previous_class_state_version",
         ),
+        policy_id=_optional_text(row, "policy_id"),
+        adapter_id=_optional_text(row, "adapter_id"),
+        adapter_version=_optional_text(row, "adapter_version"),
+        artifact_sha256=_optional_text(row, "artifact_sha256"),
+        feature_schema_version=_optional_text(
+            row,
+            "feature_schema_version",
+        ),
+        action_space_version=_optional_text(
+            row,
+            "action_space_version",
+        ),
+        gate_policy_version=_optional_text(
+            row,
+            "gate_policy_version",
+        ),
     )
     values["previous_state_frozen"] = run.previous_state_frozen
     return _build_prepared(

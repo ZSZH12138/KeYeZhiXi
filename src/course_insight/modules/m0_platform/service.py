@@ -240,6 +240,13 @@ class M0PlatformService:
         previous_learner_state_version: int | None = None,
         previous_class_snapshot_id: str | None = None,
         previous_class_state_version: int | None = None,
+        policy_id: str | None = None,
+        adapter_id: str | None = None,
+        adapter_version: str | None = None,
+        artifact_sha256: str | None = None,
+        feature_schema_version: str | None = None,
+        action_space_version: str | None = None,
+        gate_policy_version: str | None = None,
     ) -> AssessmentRun:
         return self._repository.advance_assessment_run(
             operation_id,
@@ -256,6 +263,13 @@ class M0PlatformService:
             previous_learner_state_version=previous_learner_state_version,
             previous_class_snapshot_id=previous_class_snapshot_id,
             previous_class_state_version=previous_class_state_version,
+            policy_id=policy_id,
+            adapter_id=adapter_id,
+            adapter_version=adapter_version,
+            artifact_sha256=artifact_sha256,
+            feature_schema_version=feature_schema_version,
+            action_space_version=action_space_version,
+            gate_policy_version=gate_policy_version,
         )
 
     def reclaim_assessment_run(

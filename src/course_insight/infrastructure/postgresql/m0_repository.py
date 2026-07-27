@@ -97,6 +97,13 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
                     previous_learner_state_version,
                     previous_class_snapshot_id,
                     previous_class_state_version,
+                    policy_id,
+                    adapter_id,
+                    adapter_version,
+                    artifact_sha256,
+                    feature_schema_version,
+                    action_space_version,
+                    gate_policy_version,
                     checkpoint,
                     status,
                     version,
@@ -110,7 +117,8 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
                     %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s,
+                    %s, %s, %s, %s, %s
                 )
                 ON CONFLICT DO NOTHING
                 RETURNING {_WORKFLOW_COLUMNS}
@@ -134,10 +142,18 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
                     candidate,
                 )
                 if reconciled is not authoritative:
-                    authoritative = _adopt_workflow_dependencies(
-                        connection,
-                        expected=authoritative,
-                        updated=reconciled,
+                    authoritative = (
+                        _adopt_workflow_dependencies(
+                            connection,
+                            expected=authoritative,
+                            updated=reconciled,
+                        )
+                        if authoritative.knowledge_bundle_id is None
+                        else _adopt_workflow_policy(
+                            connection,
+                            expected=authoritative,
+                            updated=reconciled,
+                        )
                     )
                 return authoritative
 
@@ -202,10 +218,18 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
             )
             if reconciled is current:
                 return current
-            return _adopt_workflow_dependencies(
-                connection,
-                expected=current,
-                updated=reconciled,
+            return (
+                _adopt_workflow_dependencies(
+                    connection,
+                    expected=current,
+                    updated=reconciled,
+                )
+                if current.knowledge_bundle_id is None
+                else _adopt_workflow_policy(
+                    connection,
+                    expected=current,
+                    updated=reconciled,
+                )
             )
 
     def get_assessment_run(
@@ -377,6 +401,13 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
         previous_learner_state_version: int | None = None,
         previous_class_snapshot_id: str | None = None,
         previous_class_state_version: int | None = None,
+        policy_id: str | None = None,
+        adapter_id: str | None = None,
+        adapter_version: str | None = None,
+        artifact_sha256: str | None = None,
+        feature_schema_version: str | None = None,
+        action_space_version: str | None = None,
+        gate_policy_version: str | None = None,
     ) -> AssessmentRun:
         """Advance an owned workflow by its one legal domain checkpoint."""
 
@@ -396,6 +427,17 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
                 previous_learner_state_version=previous_learner_state_version,
                 previous_class_snapshot_id=previous_class_snapshot_id,
                 previous_class_state_version=previous_class_state_version,
+            )
+            _validate_policy_transition(
+                current,
+                checkpoint=checkpoint,
+                policy_id=policy_id,
+                adapter_id=adapter_id,
+                adapter_version=adapter_version,
+                artifact_sha256=artifact_sha256,
+                feature_schema_version=feature_schema_version,
+                action_space_version=action_space_version,
+                gate_policy_version=gate_policy_version,
             )
             completing = checkpoint == "completed"
             updated = advance_run(
@@ -429,6 +471,23 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
                 previous_class_state_version=(
                     previous_class_state_version
                     or current.previous_class_state_version
+                ),
+                policy_id=policy_id or current.policy_id,
+                adapter_id=adapter_id or current.adapter_id,
+                adapter_version=adapter_version or current.adapter_version,
+                artifact_sha256=(
+                    artifact_sha256
+                    if policy_id is not None
+                    else current.artifact_sha256
+                ),
+                feature_schema_version=(
+                    feature_schema_version or current.feature_schema_version
+                ),
+                action_space_version=(
+                    action_space_version or current.action_space_version
+                ),
+                gate_policy_version=(
+                    gate_policy_version or current.gate_policy_version
                 ),
                 error_code=error_code,
                 locked_by=None if completing else current.locked_by,
@@ -565,6 +624,13 @@ previous_learner_snapshot_id,
 previous_learner_state_version,
 previous_class_snapshot_id,
 previous_class_state_version,
+policy_id,
+adapter_id,
+adapter_version,
+artifact_sha256,
+feature_schema_version,
+action_space_version,
+gate_policy_version,
 checkpoint,
 status,
 version,
@@ -641,6 +707,13 @@ def _run_parameters(run: AssessmentRun) -> tuple[object, ...]:
         run.previous_learner_state_version,
         run.previous_class_snapshot_id,
         run.previous_class_state_version,
+        run.policy_id,
+        run.adapter_id,
+        run.adapter_version,
+        run.artifact_sha256,
+        run.feature_schema_version,
+        run.action_space_version,
+        run.gate_policy_version,
         run.checkpoint,
         run.status,
         run.version,
@@ -675,6 +748,13 @@ def _update_workflow_row(
             previous_learner_state_version = %s,
             previous_class_snapshot_id = %s,
             previous_class_state_version = %s,
+            policy_id = %s,
+            adapter_id = %s,
+            adapter_version = %s,
+            artifact_sha256 = %s,
+            feature_schema_version = %s,
+            action_space_version = %s,
+            gate_policy_version = %s,
             error_code = %s,
             updated_at = %s
         WHERE operation_id = %s
@@ -696,6 +776,13 @@ def _update_workflow_row(
             updated.previous_learner_state_version,
             updated.previous_class_snapshot_id,
             updated.previous_class_state_version,
+            updated.policy_id,
+            updated.adapter_id,
+            updated.adapter_version,
+            updated.artifact_sha256,
+            updated.feature_schema_version,
+            updated.action_space_version,
+            updated.gate_policy_version,
             updated.error_code,
             updated.updated_at,
             expected.operation_id,
@@ -728,6 +815,13 @@ def _adopt_workflow_dependencies(
             state_policy_checksum = %s,
             teacher_policy_checksum = %s,
             previous_state_frozen = %s,
+            policy_id = %s,
+            adapter_id = %s,
+            adapter_version = %s,
+            artifact_sha256 = %s,
+            feature_schema_version = %s,
+            action_space_version = %s,
+            gate_policy_version = %s,
             version = %s,
             updated_at = %s
         WHERE operation_id = %s
@@ -746,6 +840,13 @@ def _adopt_workflow_dependencies(
           AND previous_learner_state_version IS NULL
           AND previous_class_snapshot_id IS NULL
           AND previous_class_state_version IS NULL
+          AND policy_id IS NULL
+          AND adapter_id IS NULL
+          AND adapter_version IS NULL
+          AND artifact_sha256 IS NULL
+          AND feature_schema_version IS NULL
+          AND action_space_version IS NULL
+          AND gate_policy_version IS NULL
         RETURNING {_WORKFLOW_COLUMNS}
         """,
         (
@@ -759,6 +860,64 @@ def _adopt_workflow_dependencies(
             updated.state_policy_checksum,
             updated.teacher_policy_checksum,
             updated.previous_state_frozen,
+            updated.policy_id,
+            updated.adapter_id,
+            updated.adapter_version,
+            updated.artifact_sha256,
+            updated.feature_schema_version,
+            updated.action_space_version,
+            updated.gate_policy_version,
+            updated.version,
+            updated.updated_at,
+            expected.operation_id,
+            expected.version,
+        ),
+    )
+    row = cursor.fetchone()
+    if cursor.rowcount != 1 or row is None:
+        raise _version_conflict(
+            "assessment workflow row changed concurrently"
+        )
+    return _run_from_row(row)
+
+
+def _adopt_workflow_policy(
+    connection: object,
+    *,
+    expected: AssessmentRun,
+    updated: AssessmentRun,
+) -> AssessmentRun:
+    cursor = connection.execute(  # type: ignore[attr-defined]
+        f"""
+        UPDATE m0_assessment_runs
+        SET policy_id = %s,
+            adapter_id = %s,
+            adapter_version = %s,
+            artifact_sha256 = %s,
+            feature_schema_version = %s,
+            action_space_version = %s,
+            gate_policy_version = %s,
+            version = %s,
+            updated_at = %s
+        WHERE operation_id = %s
+          AND version = %s
+          AND policy_id IS NULL
+          AND adapter_id IS NULL
+          AND adapter_version IS NULL
+          AND artifact_sha256 IS NULL
+          AND feature_schema_version IS NULL
+          AND action_space_version IS NULL
+          AND gate_policy_version IS NULL
+        RETURNING {_WORKFLOW_COLUMNS}
+        """,
+        (
+            updated.policy_id,
+            updated.adapter_id,
+            updated.adapter_version,
+            updated.artifact_sha256,
+            updated.feature_schema_version,
+            updated.action_space_version,
+            updated.gate_policy_version,
             updated.version,
             updated.updated_at,
             expected.operation_id,
@@ -875,6 +1034,34 @@ def _run_from_row(row: Mapping[str, object]) -> AssessmentRun:
                 row["previous_class_state_version"],
                 field="previous_class_state_version",
             ),
+            policy_id=_optional_text(
+                row["policy_id"],
+                field="policy_id",
+            ),
+            adapter_id=_optional_text(
+                row["adapter_id"],
+                field="adapter_id",
+            ),
+            adapter_version=_optional_text(
+                row["adapter_version"],
+                field="adapter_version",
+            ),
+            artifact_sha256=_optional_text(
+                row["artifact_sha256"],
+                field="artifact_sha256",
+            ),
+            feature_schema_version=_optional_text(
+                row["feature_schema_version"],
+                field="feature_schema_version",
+            ),
+            action_space_version=_optional_text(
+                row["action_space_version"],
+                field="action_space_version",
+            ),
+            gate_policy_version=_optional_text(
+                row["gate_policy_version"],
+                field="gate_policy_version",
+            ),
             checkpoint=_required_text(
                 row["checkpoint"],
                 field="checkpoint",
@@ -936,6 +1123,13 @@ def _run_mapping(run: AssessmentRun) -> dict[str, object]:
         "previous_learner_state_version": run.previous_learner_state_version,
         "previous_class_snapshot_id": run.previous_class_snapshot_id,
         "previous_class_state_version": run.previous_class_state_version,
+        "policy_id": run.policy_id,
+        "adapter_id": run.adapter_id,
+        "adapter_version": run.adapter_version,
+        "artifact_sha256": run.artifact_sha256,
+        "feature_schema_version": run.feature_schema_version,
+        "action_space_version": run.action_space_version,
+        "gate_policy_version": run.gate_policy_version,
         "checkpoint": run.checkpoint,
         "status": run.status,
         "version": run.version,
@@ -995,6 +1189,49 @@ def _validate_state_input_transition(
             code="WORKFLOW_TRANSITION_INVALID",
             module="m0",
             message="state baseline metadata requires its dedicated checkpoint",
+            recoverable=True,
+        )
+
+
+def _validate_policy_transition(
+    current: AssessmentRun,
+    *,
+    checkpoint: str,
+    policy_id: str | None,
+    adapter_id: str | None,
+    adapter_version: str | None,
+    artifact_sha256: str | None,
+    feature_schema_version: str | None,
+    action_space_version: str | None,
+    gate_policy_version: str | None,
+) -> None:
+    required = (
+        policy_id,
+        adapter_id,
+        adapter_version,
+        feature_schema_version,
+        action_space_version,
+        gate_policy_version,
+    )
+    supplied = artifact_sha256 is not None or any(
+        value is not None for value in required
+    )
+    if checkpoint == "policy_frozen":
+        if current.policy_id is not None or any(
+            value is None for value in required
+        ):
+            raise DomainError(
+                code="WORKFLOW_RECOVERY_CONTEXT_MISSING",
+                module="m0",
+                message="assessment policy identity cannot be frozen safely",
+                recoverable=True,
+            )
+        return
+    if supplied:
+        raise DomainError(
+            code="WORKFLOW_TRANSITION_INVALID",
+            module="m0",
+            message="policy metadata requires its dedicated checkpoint",
             recoverable=True,
         )
 

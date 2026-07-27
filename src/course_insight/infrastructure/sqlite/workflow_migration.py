@@ -266,6 +266,70 @@ CREATE TABLE IF NOT EXISTS m0_assessment_runs (
     )
 )
 """
+ASSESSMENT_RUNS_V11_SQL = ASSESSMENT_RUNS_V9_SQL.replace(
+    "    checkpoint TEXT NOT NULL CHECK (length(checkpoint) > 0),",
+    """    policy_id TEXT CHECK (
+        policy_id IS NULL OR length(policy_id) > 0
+    ),
+    adapter_id TEXT CHECK (
+        adapter_id IS NULL OR length(adapter_id) > 0
+    ),
+    adapter_version TEXT CHECK (
+        adapter_version IS NULL OR length(adapter_version) > 0
+    ),
+    artifact_sha256 TEXT CHECK (
+        artifact_sha256 IS NULL
+        OR (
+            length(artifact_sha256) = 64
+            AND artifact_sha256 NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    feature_schema_version TEXT CHECK (
+        feature_schema_version IS NULL
+        OR length(feature_schema_version) > 0
+    ),
+    action_space_version TEXT CHECK (
+        action_space_version IS NULL
+        OR length(action_space_version) > 0
+    ),
+    gate_policy_version TEXT CHECK (
+        gate_policy_version IS NULL
+        OR length(gate_policy_version) > 0
+    ),
+    checkpoint TEXT NOT NULL CHECK (length(checkpoint) > 0),""",
+).replace(
+    "    CHECK ((locked_by IS NULL) = (lease_until IS NULL)),",
+    """    CHECK ((locked_by IS NULL) = (lease_until IS NULL)),
+    CHECK (
+        (
+            policy_id IS NULL
+            AND adapter_id IS NULL
+            AND adapter_version IS NULL
+            AND artifact_sha256 IS NULL
+            AND feature_schema_version IS NULL
+            AND action_space_version IS NULL
+            AND gate_policy_version IS NULL
+        )
+        OR (
+            operation = 'submit'
+            AND checkpoint IN (
+                'policy_frozen',
+                'tutoring_saved',
+                'feedback_saved',
+                'analytics_saved',
+                'completed'
+            )
+            AND state_version IS NOT NULL
+            AND previous_state_frozen = 1
+            AND policy_id IS NOT NULL
+            AND adapter_id IS NOT NULL
+            AND adapter_version IS NOT NULL
+            AND feature_schema_version IS NOT NULL
+            AND action_space_version IS NOT NULL
+            AND gate_policy_version IS NOT NULL
+        )
+    ),""",
+)
 ASSESSMENT_RUNS_SUBMIT_INDEX_SQL = """
 CREATE UNIQUE INDEX m0_one_submit_per_paper
 ON m0_assessment_runs(paper_id)
@@ -401,5 +465,60 @@ def migrate_workflow_v8_to_v9(connection: sqlite3.Connection) -> None:
         """
     )
     connection.execute("DROP TABLE m0_assessment_runs_v8")
+    connection.execute(ASSESSMENT_RUNS_SUBMIT_INDEX_SQL)
+    connection.execute(ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL)
+
+
+def migrate_workflow_v10_to_v11(connection: sqlite3.Connection) -> None:
+    """Add complete nullable policy identities while retaining every v10 row."""
+
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info('m0_assessment_runs')"
+        ).fetchall()
+    }
+    if not columns or columns & {
+        "policy_id",
+        "gate_policy_version",
+    }:
+        raise RuntimeError("M0 workflow v10 schema is incompatible")
+    connection.execute(
+        "DROP INDEX IF EXISTS m0_one_nonterminal_review_per_paper"
+    )
+    connection.execute("DROP INDEX IF EXISTS m0_one_submit_per_paper")
+    connection.execute(
+        "ALTER TABLE m0_assessment_runs RENAME TO m0_assessment_runs_v10"
+    )
+    connection.execute(ASSESSMENT_RUNS_V11_SQL)
+    names = ", ".join(
+        (
+            *_COPY_COLUMNS[:12],
+            *_REFERENCE_COLUMNS_IN_ORDER,
+            "knowledge_bundle_id",
+            "knowledge_bundle_version",
+            "knowledge_bundle_checksum",
+            "course_package_id",
+            "evidence_index_id",
+            "evidence_index_version",
+            "evidence_index_checksum",
+            "state_policy_checksum",
+            "teacher_policy_checksum",
+            "previous_state_frozen",
+            "previous_learner_snapshot_id",
+            "previous_learner_state_version",
+            "previous_class_snapshot_id",
+            "previous_class_state_version",
+            *_COPY_COLUMNS[12:],
+        )
+    )
+    connection.execute(
+        f"""
+        INSERT INTO m0_assessment_runs({names})
+        SELECT {names}
+        FROM m0_assessment_runs_v10
+        """
+    )
+    connection.execute("DROP TABLE m0_assessment_runs_v10")
     connection.execute(ASSESSMENT_RUNS_SUBMIT_INDEX_SQL)
     connection.execute(ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL)

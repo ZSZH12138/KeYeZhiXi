@@ -102,6 +102,18 @@ def _legacy(run: AssessmentRun, **updates: object) -> AssessmentRun:
     return replace(run, **values)
 
 
+def _policy_fields() -> dict[str, object]:
+    return {
+        "policy_id": "m6-deterministic-v1",
+        "adapter_id": "m6-rules-adapter",
+        "adapter_version": "v1",
+        "artifact_sha256": None,
+        "feature_schema_version": "m6-features-v1",
+        "action_space_version": "m6-action-space-v1",
+        "gate_policy_version": "m6-active-gate-v1",
+    }
+
+
 def _repository(path: Path) -> SQLiteM0Repository:
     repository = SQLiteM0Repository(path)
     repository.initialize()
@@ -382,6 +394,86 @@ def test_postgres_legacy_adoption_locks_and_cas_updates_only_all_null_row() -> N
     )
 
     assert result == adopted
+
+
+def test_postgres_narrowly_cas_adopts_all_null_v10_policy_identity() -> None:
+    candidate = _run(
+        "submit",
+        checkpoint="tutoring_saved",
+        status="running",
+        state_version=3,
+        previous_state_frozen=True,
+        locked_by="worker-1",
+        lease_until=NOW + timedelta(seconds=30),
+        **_policy_fields(),
+    )
+    legacy = replace(
+        candidate,
+        policy_id=None,
+        adapter_id=None,
+        adapter_version=None,
+        artifact_sha256=None,
+        feature_schema_version=None,
+        action_space_version=None,
+        gate_policy_version=None,
+    )
+    adopted = replace(candidate, version=legacy.version + 1)
+    connection = _Connection(
+        [
+            _Step(
+                ("WHERE operation_id = %s", "FOR UPDATE"),
+                one=_mapping(legacy),
+            ),
+            _Step(
+                (
+                    "UPDATE m0_assessment_runs",
+                    "SET policy_id = %s",
+                    "gate_policy_version = %s",
+                    "policy_id IS NULL",
+                    "RETURNING operation_id",
+                ),
+                one=_mapping(adopted),
+                rowcount=1,
+            ),
+        ]
+    )
+
+    result = PostgresM0Repository(_Pool(connection)).adopt_legacy_assessment_run(
+        candidate
+    )
+
+    assert result == adopted
+
+
+def test_policy_frozen_checkpoint_cannot_be_adopted_without_identity(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path / "policy-frozen-corrupt.db")
+    candidate = _run(
+        "submit",
+        checkpoint="policy_frozen",
+        status="failed",
+        state_version=3,
+        previous_state_frozen=True,
+        **_policy_fields(),
+    )
+    corrupt = replace(
+        candidate,
+        policy_id=None,
+        adapter_id=None,
+        adapter_version=None,
+        artifact_sha256=None,
+        feature_schema_version=None,
+        action_space_version=None,
+        gate_policy_version=None,
+    )
+    repository.insert_or_get_assessment_run(corrupt)
+
+    with pytest.raises(DomainError) as captured:
+        repository.adopt_legacy_assessment_run(candidate)
+
+    assert captured.value.code == "ASSESSMENT_SUBMISSION_CONFLICT"
+    assert repository.get_assessment_run(corrupt.operation_id) == corrupt
 
 
 def _mapping(run: AssessmentRun) -> dict[str, object]:

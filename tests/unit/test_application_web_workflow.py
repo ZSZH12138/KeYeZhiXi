@@ -52,6 +52,9 @@ from tests.integration.test_m6_cross_module import (
 from course_insight.modules.m6_tutoring_fsm.service import (
     M6TutoringControlService,
 )
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyExecutionRef,
+)
 from course_insight.modules.m6_tutoring_fsm.state_machine import (
     DEFAULT_STATE_MACHINE,
 )
@@ -277,6 +280,7 @@ def test_repository_failure_and_completion_preserve_checkpoint_and_clear_lease(
         "events_appended",
         "state_inputs_frozen",
         "state_saved",
+        "policy_frozen",
         "tutoring_saved",
         "feedback_saved",
         "analytics_saved",
@@ -284,7 +288,19 @@ def test_repository_failure_and_completion_preserve_checkpoint_and_clear_lease(
         baseline = (
             {"previous_state_frozen": True}
             if checkpoint == "state_inputs_frozen"
-            else {}
+            else (
+                {
+                    "policy_id": "m6-deterministic-v1",
+                    "adapter_id": "m6-rules-adapter",
+                    "adapter_version": "v1",
+                    "artifact_sha256": None,
+                    "feature_schema_version": "m6-features-v1",
+                    "action_space_version": "m6-action-space-v1",
+                    "gate_policy_version": "m6-active-gate-v1",
+                }
+                if checkpoint == "policy_frozen"
+                else {}
+            )
         )
         current = repository.advance_assessment_run(
             "request_1",
@@ -489,6 +505,10 @@ class _WorkflowStore:
         self.scoring_calls = 0
         self.retrieved_queries: list[tuple[str | None, str | None]] = []
         self.scored_task_ids: list[str] = []
+        self.policy_execution = _policy_execution()
+        self.policy_events: list[str] = []
+        self.prepare_results: list[PolicyExecutionRef] = []
+        self.tutoring_calls = 0
 
     def trip(self, point: str) -> None:
         if self.fail_after == point and not self.failed_once:
@@ -832,9 +852,19 @@ class _M6:
     def __init__(self, store: _WorkflowStore) -> None:
         self.store = store
 
+    def prepare_policy_execution(self, **_: Any) -> PolicyExecutionRef:
+        execution = self.store.policy_execution
+        self.store.prepare_results.append(execution)
+        self.store.policy_events.append("prepare")
+        self.store.trip("policy_binding")
+        return execution
+
     def decide_next_action(self, **_: Any):
+        self.store.tutoring_calls += 1
+        self.store.policy_events.append("decide")
         if self.store.tutoring is None:
             self.store.tutoring = _decide(_complete_inputs())
+        self.store.trip("tutoring")
         return self.store.tutoring.model_copy(deep=True)
 
 
@@ -952,6 +982,29 @@ def _preparation(task_ids: list[str]):
             SimpleNamespace(scoring_task_id=task_id) for task_id in task_ids
         ],
         query_for_task=lambda task_id: queries[task_id],
+    )
+
+
+def _policy_execution(
+    *,
+    mode: str = "rules",
+    artifact_sha256: str | None = None,
+) -> PolicyExecutionRef:
+    learned = mode != "rules"
+    return PolicyExecutionRef(
+        request_fingerprint="f" * 64,
+        mode=mode,
+        policy_id=(
+            "learned-policy-v1" if learned else "m6-deterministic-v1"
+        ),
+        adapter_id=(
+            "linucb-adapter" if learned else "m6-rules-adapter"
+        ),
+        adapter_version="v1",
+        artifact_sha256=artifact_sha256,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-action-space-v1",
+        gate_policy_version="m6-active-gate-v1",
     )
 
 
@@ -1227,6 +1280,128 @@ def test_submit_recovers_after_module_save_before_checkpoint(
     replayed = _coordinator(tmp_path, store).submit_assessment(**arguments)
     assert recovered == replayed
     assert recovered["scoring_result"].attempt_id == submission.attempt_id
+
+
+def test_submit_freezes_rules_policy_before_deciding(tmp_path: Path) -> None:
+    store = _WorkflowStore()
+    coordinator = _coordinator(tmp_path, store)
+    _, _, arguments = _start_and_submission(coordinator, tmp_path)
+
+    coordinator.submit_assessment(**arguments)
+
+    run = coordinator._m0.get_assessment_run("submit:submission_1")
+    assert run.policy_id == "m6-deterministic-v1"
+    assert run.adapter_id == "m6-rules-adapter"
+    assert run.adapter_version == "v1"
+    assert run.artifact_sha256 is None
+    assert run.feature_schema_version == "m6-features-v1"
+    assert run.action_space_version == "m6-action-space-v1"
+    assert run.gate_policy_version == "m6-active-gate-v1"
+    assert store.policy_events[:2] == ["prepare", "decide"]
+
+
+def test_submit_recovers_first_writer_after_binding_before_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    first = _coordinator(tmp_path, store)
+    _, _, arguments = _start_and_submission(first, tmp_path)
+    store.fail_after = "policy_binding"
+
+    with pytest.raises(DomainError) as captured:
+        first.submit_assessment(**arguments)
+    assert captured.value.code == "WORKFLOW_EXECUTION_FAILED"
+    failed = first._m0.get_assessment_run("submit:submission_1")
+    assert failed.checkpoint == "state_saved"
+    assert failed.policy_id is None
+
+    recovered = _coordinator(tmp_path, store).submit_assessment(**arguments)
+    stored = first._m0.get_assessment_run("submit:submission_1")
+
+    assert recovered["tutoring_result"] is not None
+    assert len(store.prepare_results) == 2
+    assert store.prepare_results[0] == store.prepare_results[1]
+    assert stored.policy_id == "m6-deterministic-v1"
+
+
+def test_submit_recovery_requires_exact_frozen_policy_before_deciding(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    first = _coordinator(tmp_path, store)
+    _, _, arguments = _start_and_submission(first, tmp_path)
+    store.fail_after = "tutoring"
+
+    with pytest.raises(DomainError):
+        first.submit_assessment(**arguments)
+    frozen = first._m0.get_assessment_run("submit:submission_1")
+    assert frozen.checkpoint == "policy_frozen"
+    calls_before_recovery = store.tutoring_calls
+    store.policy_execution = _policy_execution(
+        mode="active",
+        artifact_sha256="e" * 64,
+    )
+
+    with pytest.raises(DomainError) as captured:
+        _coordinator(tmp_path, store).submit_assessment(**arguments)
+
+    assert captured.value.code == "WORKFLOW_DEPENDENCY_MISMATCH"
+    assert store.tutoring_calls == calls_before_recovery
+
+
+def test_submit_rejects_learned_policy_without_artifact_sha(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    store.policy_execution = _policy_execution(mode="active")
+    coordinator = _coordinator(tmp_path, store)
+    _, _, arguments = _start_and_submission(coordinator, tmp_path)
+
+    with pytest.raises(DomainError) as captured:
+        coordinator.submit_assessment(**arguments)
+
+    assert captured.value.code == "WORKFLOW_DEPENDENCY_MISMATCH"
+    run = coordinator._m0.get_assessment_run("submit:submission_1")
+    assert run.checkpoint == "state_saved"
+    assert run.policy_id is None
+    assert store.tutoring_calls == 0
+
+
+def test_submit_narrowly_adopts_pre_v11_post_policy_checkpoint(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    coordinator = _coordinator(tmp_path, store)
+    _, _, arguments = _start_and_submission(coordinator, tmp_path)
+    expected = coordinator.submit_assessment(**arguments)
+    with connect_sqlite(tmp_path / "workflow.db") as connection:
+        connection.execute(
+            """
+            UPDATE m0_assessment_runs
+            SET checkpoint = 'tutoring_saved',
+                status = 'failed',
+                locked_by = NULL,
+                lease_until = NULL,
+                error_code = 'LEGACY_V10_FAILURE',
+                policy_id = NULL,
+                adapter_id = NULL,
+                adapter_version = NULL,
+                artifact_sha256 = NULL,
+                feature_schema_version = NULL,
+                action_space_version = NULL,
+                gate_policy_version = NULL,
+                version = version + 1
+            WHERE operation_id = 'submit:submission_1'
+            """
+        )
+
+    recovered = _coordinator(tmp_path, store).submit_assessment(**arguments)
+    adopted = coordinator._m0.get_assessment_run("submit:submission_1")
+
+    assert recovered == expected
+    assert adopted.status == "completed"
+    assert adopted.policy_id == "m6-deterministic-v1"
+    assert adopted.artifact_sha256 is None
 
 
 @pytest.mark.parametrize(

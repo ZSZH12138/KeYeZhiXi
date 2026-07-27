@@ -11,7 +11,11 @@ from pathlib import Path
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef
 from course_insight.contracts.knowledge import KnowledgeBundle
+from course_insight.modules.m0_platform.workflow import AssessmentRun
 from course_insight.modules.m5_learner_class_state.update_policy import StatePolicy
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyExecutionRef,
+)
 from course_insight.modules.m9_teacher_analytics.suggestions import (
     TeacherThresholdPolicy,
 )
@@ -45,6 +49,47 @@ class AssessmentDependencies:
             "state_policy_checksum": self.state_policy_checksum,
             "teacher_policy_checksum": self.teacher_policy_checksum,
         }
+
+
+def policy_execution_run_fields(
+    execution: object,
+) -> dict[str, str | None]:
+    """Validate one prepared M6 binding and return its seven M0 fields."""
+
+    if not isinstance(execution, PolicyExecutionRef):
+        raise _dependency_mismatch(
+            "prepared tutoring policy identity is invalid"
+        )
+    if execution.mode != "rules" and execution.artifact_sha256 is None:
+        raise _dependency_mismatch(
+            "learned tutoring policy identity has no artifact checksum"
+        )
+    return {
+        "policy_id": execution.policy_id,
+        "adapter_id": execution.adapter_id,
+        "adapter_version": execution.adapter_version,
+        "artifact_sha256": execution.artifact_sha256,
+        "feature_schema_version": execution.feature_schema_version,
+        "action_space_version": execution.action_space_version,
+        "gate_policy_version": execution.gate_policy_version,
+    }
+
+
+def verify_policy_execution(
+    run: AssessmentRun,
+    execution: object,
+) -> None:
+    """Require a prepared binding to exactly match M0's frozen identity."""
+
+    actual = policy_execution_run_fields(execution)
+    expected = {
+        field: getattr(run, field)
+        for field in actual
+    }
+    if expected != actual:
+        raise _dependency_mismatch(
+            "prepared tutoring policy identity changed"
+        )
 
 
 def capture_assessment_dependencies(

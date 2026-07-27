@@ -567,6 +567,7 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
         "0008_m0_review_workflow.sql",
         "0009_m0_workflow_recovery_freeze.sql",
         "0010_m6_policy_learning.sql",
+        "0011_m0_policy_freeze.sql",
     )
     all_sql = "\n".join(migration.sql for migration in migrations)
     for table_name in CORE_TABLES:
@@ -626,6 +627,8 @@ def test_outbox_and_workflow_ddl_preserve_v7_lease_version_status_rules() -> Non
     assert "ADD COLUMN knowledge_bundle_checksum CHAR(64)" in all_sql
     assert "ADD COLUMN previous_state_frozen BOOLEAN" in all_sql
     assert "m0_workflow_baseline_frozen" in all_sql
+    assert "ADD COLUMN policy_id TEXT" in all_sql
+    assert "m0_workflow_policy_identity_complete" in all_sql
     assert "request_checksum TEXT NOT NULL" in m0_sql
     assert "scoring_result_checksum CHAR(64)" in m0_sql
 

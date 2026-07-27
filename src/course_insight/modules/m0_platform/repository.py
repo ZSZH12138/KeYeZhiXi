@@ -152,6 +152,13 @@ class M0Repository(Protocol):
         previous_learner_state_version: int | None = None,
         previous_class_snapshot_id: str | None = None,
         previous_class_state_version: int | None = None,
+        policy_id: str | None = None,
+        adapter_id: str | None = None,
+        adapter_version: str | None = None,
+        artifact_sha256: str | None = None,
+        feature_schema_version: str | None = None,
+        action_space_version: str | None = None,
+        gate_policy_version: str | None = None,
     ) -> AssessmentRun:
         """Advance one claimed workflow row by exactly one legal checkpoint."""
 
