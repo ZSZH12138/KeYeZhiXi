@@ -91,24 +91,24 @@ def evaluate_offline_policy(
         if row.logging_propensity is not None
         and row.logging_propensity > 0.0
     )
-    support_coverage = len(valid_rows) / len(ordered)
-    action_coverage = _action_coverage(ordered, valid_rows)
+    action_coverage, support_coverage = _state_action_coverage(
+        ordered,
+        settings.minimum_logging_propensity,
+    )
     reasons: list[str] = []
     if len(ordered) < settings.minimum_rows:
         reasons.append("insufficient_rows")
     if len(valid_rows) != len(ordered):
         reasons.append("invalid_propensity")
-    if support_coverage < settings.minimum_support_coverage:
-        reasons.append("low_support")
-    if any(
-        _target_probability(row, row.selected_action) > 0.0
-        and row.logging_propensity is not None
-        and 0.0 < row.logging_propensity
-        < settings.minimum_logging_propensity
-        for row in ordered
+    if (
+        support_coverage < 1.0
+        or support_coverage < settings.minimum_support_coverage
     ):
         reasons.append("low_support")
-    if action_coverage < settings.minimum_action_coverage:
+    if (
+        action_coverage < 1.0
+        or action_coverage < settings.minimum_action_coverage
+    ):
         reasons.append("poor_action_coverage")
 
     metrics: dict[str, float] = {}
@@ -180,9 +180,15 @@ def persist_evaluation(
         evaluation.dataset_identity,
     )
     if existing is not None:
-        if existing != evaluation:
-            raise ValueError("policy evaluation identity conflict")
-        return existing
+        if existing == evaluation:
+            return existing
+        if (
+            _is_legacy_evaluation_summary(existing)
+            and _legacy_summary_fields(existing)
+            == _legacy_summary_fields(evaluation)
+        ):
+            return existing
+        raise ValueError("policy evaluation identity conflict")
     stored = repository.save_policy_evaluation(evaluation)
     if stored != evaluation:
         raise ValueError("policy evaluation identity conflict")
@@ -249,18 +255,33 @@ def _effective_sample_size(weights: tuple[float, ...]) -> float:
     return sum(weights) ** 2 / squared_sum
 
 
-def _action_coverage(
+def _state_action_coverage(
     rows: tuple[OfflinePolicyRow, ...],
-    valid_rows: tuple[OfflinePolicyRow, ...],
-) -> float:
-    target_actions = {
-        action
+    minimum_logging_propensity: float,
+) -> tuple[float, float]:
+    required_pairs = {
+        (row.state, action)
         for row in rows
         for action, probability in row.target_propensities
         if probability > 0.0
     }
-    observed_actions = {row.selected_action for row in valid_rows}
-    return len(target_actions & observed_actions) / len(target_actions)
+    observed_pairs = {
+        (row.state, row.selected_action)
+        for row in rows
+        if row.logging_propensity is not None
+        and row.logging_propensity > 0.0
+    }
+    supported_pairs = {
+        (row.state, row.selected_action)
+        for row in rows
+        if row.logging_propensity is not None
+        and row.logging_propensity > 0.0
+        and row.logging_propensity >= minimum_logging_propensity
+    }
+    return (
+        len(required_pairs & observed_pairs) / len(required_pairs),
+        len(required_pairs & supported_pairs) / len(required_pairs),
+    )
 
 
 def _target_probability(row: OfflinePolicyRow, action: str) -> float:
@@ -333,3 +354,29 @@ def _require_probability(value: object, field_name: str) -> None:
     _require_finite(value, field_name)
     if not 0.0 <= float(value) <= 1.0:
         raise ValueError(f"{field_name} must be a probability")
+
+
+def _is_legacy_evaluation_summary(
+    evaluation: PolicyEvaluationRecord,
+) -> bool:
+    return (
+        evaluation.metrics == ()
+        and evaluation.confidence_intervals == ()
+        and evaluation.state_slices == ()
+        and evaluation.group_slices == ()
+        and evaluation.support_coverage is None
+        and evaluation.safety_reasons is None
+    )
+
+
+def _legacy_summary_fields(
+    evaluation: PolicyEvaluationRecord,
+) -> tuple[object, ...]:
+    return (
+        evaluation.policy_id,
+        evaluation.dataset_identity,
+        evaluation.status,
+        evaluation.approved,
+        evaluation.effective_sample_size,
+        evaluation.action_coverage,
+    )

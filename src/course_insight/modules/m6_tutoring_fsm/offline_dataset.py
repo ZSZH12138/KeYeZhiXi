@@ -145,6 +145,12 @@ class OfflineDatasetSplit:
         evaluation_sessions = {row.session_id for row in self.evaluation}
         if train_sessions & evaluation_sessions:
             raise ValueError("dataset sessions must not cross split partitions")
+        if max(row.event_time for row in self.train) >= min(
+            row.event_time for row in self.evaluation
+        ):
+            raise ValueError(
+                "dataset split requires a strict whole-group time boundary"
+            )
 
 
 def build_offline_row(
@@ -233,19 +239,48 @@ def grouped_time_split(
         }
     if len(groups) < 2:
         raise ValueError("grouped split requires at least two groups")
-    chronological_groups = sorted(
+    chronological_groups = tuple(sorted(
         groups,
         key=lambda group_id: (
+            min(row.event_time for row in groups[group_id]),
             max(row.event_time for row in groups[group_id]),
             group_id,
         ),
-    )
-    evaluation_group_count = min(
+    ))
+    desired_evaluation_group_count = min(
         len(chronological_groups) - 1,
         max(1, math.ceil(len(chronological_groups) * fraction)),
     )
+    valid_boundaries = tuple(
+        boundary
+        for boundary in range(1, len(chronological_groups))
+        if max(
+            row.event_time
+            for group_id in chronological_groups[:boundary]
+            for row in groups[group_id]
+        )
+        < min(
+            row.event_time
+            for group_id in chronological_groups[boundary:]
+            for row in groups[group_id]
+        )
+    )
+    if not valid_boundaries:
+        raise ValueError(
+            "grouped split has no strict whole-group time boundary"
+        )
+    boundary = min(
+        valid_boundaries,
+        key=lambda candidate: (
+            abs(
+                (len(chronological_groups) - candidate)
+                - desired_evaluation_group_count
+            ),
+            -(len(chronological_groups) - candidate),
+        ),
+    )
     evaluation_group_ids = set(
-        chronological_groups[-evaluation_group_count:]
+        chronological_groups[boundary:]
     )
     train = tuple(
         row for row in ordered if row.group_id not in evaluation_group_ids

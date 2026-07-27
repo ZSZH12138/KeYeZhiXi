@@ -23,6 +23,7 @@ from course_insight.modules.m6_tutoring_fsm.offline_evaluation import (
     persist_evaluation,
 )
 from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyEvaluationRecord,
     PolicyObservation,
     PolicyRewardRecord,
 )
@@ -241,6 +242,40 @@ def test_grouped_time_split_keeps_every_group_and_session_on_one_side() -> None:
     )
 
 
+def test_grouped_time_split_rejects_overlapping_whole_group_intervals() -> None:
+    """Catch max-time ordering silently leaking future rows into training."""
+
+    rows = (
+        _row(
+            fingerprint="a-early",
+            raw_group_id="group-a",
+            raw_session_id="session-a",
+            event_time=1,
+        ),
+        _row(
+            fingerprint="a-late",
+            raw_group_id="group-a",
+            raw_session_id="session-a",
+            event_time=100,
+        ),
+        _row(
+            fingerprint="b-early",
+            raw_group_id="group-b",
+            raw_session_id="session-b",
+            event_time=50,
+        ),
+        _row(
+            fingerprint="b-late",
+            raw_group_id="group-b",
+            raw_session_id="session-b",
+            event_time=60,
+        ),
+    )
+
+    with pytest.raises(ValueError, match="time boundary"):
+        grouped_time_split(rows, evaluation_fraction=0.5)
+
+
 def test_ope_estimators_match_independent_hand_calculation_and_emit_slices() -> None:
     """Catch incorrect IPS, SNIPS, DM, DR, ESS, coverage, or slice formulas."""
 
@@ -262,7 +297,7 @@ def test_ope_estimators_match_independent_hand_calculation_and_emit_slices() -> 
             raw_group_id="group-2",
             raw_session_id="session-2",
             event_time=2,
-            state="S3",
+            state="S2",
             selected_action="action-b",
             logging_propensity=0.5,
             reward=0.0,
@@ -287,8 +322,48 @@ def test_ope_estimators_match_independent_hand_calculation_and_emit_slices() -> 
     assert evaluation.support_coverage == pytest.approx(1.0)
     assert evaluation.status == "sufficient_data"
     assert evaluation.approved is True
-    assert {key for key, _, _ in evaluation.state_slices} == {"S2", "S3"}
+    assert {key for key, _, _ in evaluation.state_slices} == {"S2"}
     assert len(evaluation.group_slices) == 2
+
+
+def test_target_support_cannot_be_borrowed_from_another_tutoring_state() -> None:
+    """Catch global action coverage hiding an unsupported state-action pair."""
+
+    rows = (
+        _row(
+            fingerprint="s2-action-a",
+            raw_group_id="group-1",
+            raw_session_id="session-1",
+            event_time=1,
+            state="S2",
+            selected_action="action-a",
+            target_propensities={"action-a": 0.5, "action-b": 0.5},
+        ),
+        _row(
+            fingerprint="s4-action-b",
+            raw_group_id="group-2",
+            raw_session_id="session-2",
+            event_time=2,
+            state="S4",
+            selected_action="action-b",
+            candidate_actions=("action-b",),
+            target_propensities={"action-b": 1.0},
+            direct_estimates={"action-b": 0.2},
+        ),
+    )
+
+    evaluation = evaluate_offline_policy(
+        "policy-candidate",
+        rows,
+        config=_relaxed_config(),
+    )
+
+    assert evaluation.action_coverage == pytest.approx(2 / 3)
+    assert evaluation.support_coverage == pytest.approx(2 / 3)
+    assert evaluation.status == "insufficient_data"
+    assert evaluation.approved is False
+    assert "poor_action_coverage" in evaluation.safety_reasons
+    assert "low_support" in evaluation.safety_reasons
 
 
 def test_bootstrap_is_reproducible_from_canonical_dataset_identity() -> None:
@@ -469,3 +544,64 @@ def test_complete_evaluation_payload_round_trips_through_m6_private_repository(
     assert loaded.confidence_intervals
     assert loaded.state_slices
     assert loaded.group_slices
+
+
+def test_legacy_summary_replay_is_append_only_and_requires_exact_old_fields(
+    tmp_path: Path,
+) -> None:
+    """Catch a rich recomputation conflicting with its exact legacy summary."""
+
+    rows = (
+        _row(
+            fingerprint="legacy-row-a",
+            raw_group_id="group-1",
+            raw_session_id="session-1",
+            event_time=1,
+        ),
+        _row(
+            fingerprint="legacy-row-b",
+            raw_group_id="group-2",
+            raw_session_id="session-2",
+            event_time=2,
+            selected_action="action-b",
+            reward=0.0,
+        ),
+    )
+    rich = evaluate_offline_policy(
+        "policy-candidate",
+        rows,
+        config=_relaxed_config(),
+    )
+    legacy = PolicyEvaluationRecord(
+        policy_id=rich.policy_id,
+        dataset_identity=rich.dataset_identity,
+        status=rich.status,
+        approved=rich.approved,
+        effective_sample_size=rich.effective_sample_size,
+        action_coverage=rich.action_coverage,
+    )
+    repository = SQLiteM6Repository(tmp_path / "legacy.sqlite3")
+    repository.initialize()
+    repository.save_policy_evaluation(legacy)
+
+    replay = persist_evaluation(repository, rich)
+
+    assert replay == legacy
+    assert replay.metrics == ()
+    assert repository.get_policy_evaluation(
+        rich.policy_id,
+        rich.dataset_identity,
+    ) == legacy
+
+    conflicting_repository = SQLiteM6Repository(
+        tmp_path / "legacy-conflict.sqlite3"
+    )
+    conflicting_repository.initialize()
+    conflicting_repository.save_policy_evaluation(
+        replace(
+            legacy,
+            effective_sample_size=legacy.effective_sample_size + 1.0,
+        )
+    )
+    with pytest.raises(ValueError, match="conflict"):
+        persist_evaluation(conflicting_repository, rich)
