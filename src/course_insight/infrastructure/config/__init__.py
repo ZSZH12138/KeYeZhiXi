@@ -7,6 +7,7 @@ from course_insight.infrastructure.config.errors import (
 from course_insight.infrastructure.config.loader import load_platform_settings
 from course_insight.infrastructure.config.models import (
     DatabaseSettings,
+    IntentSettings,
     LoggingSettings,
     OutboxSettings,
     PlatformSettings,
@@ -24,6 +25,7 @@ from course_insight.infrastructure.config.roles import (
 __all__ = [
     "ConfigurationError",
     "DatabaseSettings",
+    "IntentSettings",
     "LoggingSettings",
     "OutboxSettings",
     "PlatformSettings",

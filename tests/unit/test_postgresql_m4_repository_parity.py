@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import hashlib
 import importlib
+import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from threading import RLock
 from types import ModuleType
@@ -14,6 +17,10 @@ import pytest
 from psycopg.types.json import Jsonb
 
 from course_insight.contracts.tasking import TaskPlan
+from course_insight.modules.m4_task_orchestration.intent import IntentStatus
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    StoredIntentDecision,
+)
 
 
 NOW = datetime(2026, 7, 25, 8, 0, tzinfo=timezone.utc)
@@ -45,6 +52,66 @@ def _plan(*, created_at: datetime = NOW) -> TaskPlan:
     )
 
 
+def _decision(
+    *,
+    adapter_version: str = "adapter-v1",
+    status: IntentStatus = IntentStatus.ACCEPTED,
+    integer_scores: bool = False,
+) -> StoredIntentDecision:
+    accepted = status is IntentStatus.ACCEPTED
+    confidence = 1 if integer_scores else 0.91
+    margin = 0 if integer_scores else 0.31
+    shadow_confidence = 1 if integer_scores else 0.82
+    shadow_margin = 0 if integer_scores else 0.22
+    return StoredIntentDecision(
+        request_key="b" * 64,
+        resolved_task_type="practice" if accepted else None,
+        decision_status=status,
+        decision_source="active_model" if accepted else "refusal",
+        adapter_id="test-adapter",
+        adapter_version=adapter_version,
+        policy_version="intent-policy-v1",
+        confidence=confidence if accepted else None,
+        margin=margin if accepted else None,
+        input_checksum="c" * 64,
+        reason_codes=("model_accepted",) if accepted else ("unsupported_hint",),
+        created_at=NOW,
+        shadow_label="qa" if accepted else None,
+        shadow_status=IntentStatus.ACCEPTED if accepted else None,
+        shadow_adapter_id="shadow-adapter" if accepted else None,
+        shadow_adapter_version="shadow-v1" if accepted else None,
+        shadow_confidence=shadow_confidence if accepted else None,
+        shadow_margin=shadow_margin if accepted else None,
+        shadow_reason_codes=("shadow_accepted",) if accepted else (),
+        shadow_agrees=False if accepted else None,
+        _generate_checksum=True,
+    )
+
+
+def _legacy_v1_integer_score_checksum(
+    decision: StoredIntentDecision,
+) -> str:
+    payload = decision.canonical_payload()
+    for field_name in ("confidence", "margin"):
+        value = payload[field_name]
+        if type(value) is float and value.is_integer():
+            payload[field_name] = int(value)
+    shadow = payload["shadow"]
+    if type(shadow) is dict:
+        for field_name in ("confidence", "margin"):
+            value = shadow[field_name]
+            if type(value) is float and value.is_integer():
+                shadow[field_name] = int(value)
+    serialized = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+
 class _Result:
     def __init__(self, row: dict[str, Any] | None = None) -> None:
         self._row = deepcopy(row)
@@ -57,6 +124,7 @@ class _FakeM4Database:
     def __init__(self) -> None:
         self.lock = RLock()
         self.rows_by_key: dict[str, dict[str, Any]] = {}
+        self.intent_rows_by_key: dict[str, dict[str, Any]] = {}
         self.connection_count = 0
         self.transaction_count = 0
         self.jsonb_bind_count = 0
@@ -68,11 +136,13 @@ class _Transaction:
     def __init__(self, database: _FakeM4Database) -> None:
         self._database = database
         self._backup: dict[str, dict[str, Any]] | None = None
+        self._intent_backup: dict[str, dict[str, Any]] | None = None
 
     def __enter__(self) -> None:
         self._database.lock.acquire()
         self._database.transaction_count += 1
         self._backup = deepcopy(self._database.rows_by_key)
+        self._intent_backup = deepcopy(self._database.intent_rows_by_key)
 
     def __exit__(
         self,
@@ -82,6 +152,7 @@ class _Transaction:
     ) -> None:
         if error_type is not None and self._backup is not None:
             self._database.rows_by_key = self._backup
+            self._database.intent_rows_by_key = self._intent_backup or {}
         self._database.lock.release()
 
 
@@ -99,6 +170,69 @@ class _FakeConnection:
     ) -> _Result:
         normalized = " ".join(query.split())
         self._database.executed.append((normalized, parameters))
+        if normalized.startswith("INSERT INTO m4_intent_decisions"):
+            (
+                request_key,
+                resolved_task_type,
+                decision_status,
+                decision_source,
+                adapter_id,
+                adapter_version,
+                policy_version,
+                confidence,
+                margin,
+                input_checksum,
+                reason_codes_json,
+                shadow_json,
+                schema_version,
+                payload_checksum,
+                created_at,
+            ) = parameters
+            assert isinstance(reason_codes_json, Jsonb)
+            assert shadow_json is None or isinstance(shadow_json, Jsonb)
+            self._database.jsonb_bind_count += 1 + int(shadow_json is not None)
+            key = str(request_key)
+            inserted = key not in self._database.intent_rows_by_key
+            self._database.intent_rows_by_key.setdefault(
+                key,
+                {
+                    "request_key": str(request_key),
+                    "resolved_task_type": resolved_task_type,
+                    "decision_status": str(decision_status),
+                    "decision_source": str(decision_source),
+                    "adapter_id": str(adapter_id),
+                    "adapter_version": str(adapter_version),
+                    "policy_version": str(policy_version),
+                    "confidence": (
+                        None if confidence is None else float(confidence)
+                    ),
+                    "margin": None if margin is None else float(margin),
+                    "input_checksum": str(input_checksum),
+                    "reason_codes_json": deepcopy(reason_codes_json.obj),
+                    "shadow_json": (
+                        None if shadow_json is None else deepcopy(shadow_json.obj)
+                    ),
+                    "schema_version": schema_version,
+                    "payload_checksum": str(payload_checksum),
+                    "created_at": created_at,
+                },
+            )
+            return _Result(
+                (
+                    self._database.intent_rows_by_key[key]
+                    if inserted and not self._database.fail_authoritative_read
+                    else None
+                )
+            )
+        if (
+            "FROM m4_intent_decisions" in normalized
+            and "WHERE request_key = %s" in normalized
+        ):
+            if self._database.fail_authoritative_read:
+                raise RuntimeError("forced authoritative read failure")
+            return _Result(
+                self._database.intent_rows_by_key.get(str(parameters[0]))
+            )
         if normalized.startswith("INSERT INTO m4_task_plans"):
             (
                 task_id,
@@ -290,3 +424,150 @@ def test_twenty_concurrent_replays_return_one_authoritative_plan() -> None:
     assert len({plan.content_checksum() for plan in plans}) == 1
     assert len({plan.created_at for plan in plans}) == 1
     assert len(database.rows_by_key) == 1
+
+
+def test_intent_insert_uses_conflict_safe_parameterized_sql_and_first_writer() -> None:
+    module = _repository_module()
+    database = _FakeM4Database()
+    repository = module.PostgresM4Repository(_FakePool(database))
+    first = _decision()
+    competitor = _decision(adapter_version="adapter-v2")
+
+    authoritative = repository.insert_or_get_intent_decision(first)
+    replay = repository.insert_or_get_intent_decision(competitor)
+    restored = repository.get_intent_decision(first.request_key)
+
+    statement, parameters = next(
+        execution
+        for execution in database.executed
+        if execution[0].startswith("INSERT INTO m4_intent_decisions")
+    )
+    assert "ON CONFLICT (request_key) DO NOTHING" in statement
+    assert "RETURNING" in statement
+    assert statement.count("%s") == 15
+    assert "学生原文" not in statement
+    assert authoritative == replay == restored == first
+    assert authoritative is not first
+    assert all("学生原文" not in str(value) for value in parameters)
+    assert database.intent_rows_by_key[first.request_key]["adapter_version"] == (
+        "adapter-v1"
+    )
+
+
+def test_intent_refusal_round_trip_preserves_nulls_and_utc() -> None:
+    module = _repository_module()
+    database = _FakeM4Database()
+    repository = module.PostgresM4Repository(_FakePool(database))
+    refusal = _decision(status=IntentStatus.INVALID)
+
+    stored = repository.insert_or_get_intent_decision(refusal)
+
+    assert stored == refusal
+    assert stored.resolved_task_type is None
+    assert stored.confidence is None
+    assert stored.margin is None
+    assert stored.created_at.tzinfo is timezone.utc
+    assert database.intent_rows_by_key[refusal.request_key]["shadow_json"] is None
+
+
+def test_intent_integer_scores_survive_double_precision_readback() -> None:
+    module = _repository_module()
+    database = _FakeM4Database()
+    repository = module.PostgresM4Repository(_FakePool(database))
+    decision = _decision(integer_scores=True)
+
+    stored = repository.insert_or_get_intent_decision(decision)
+
+    assert stored == decision
+    assert stored.payload_checksum == decision.payload_checksum
+    assert type(database.intent_rows_by_key[decision.request_key]["confidence"]) is float
+    assert type(database.intent_rows_by_key[decision.request_key]["margin"]) is float
+
+
+def test_intent_reads_legacy_v1_checksum_after_double_precision_coercion() -> None:
+    module = _repository_module()
+    database = _FakeM4Database()
+    repository = module.PostgresM4Repository(_FakePool(database))
+    decision = _decision(integer_scores=True)
+    repository.insert_or_get_intent_decision(decision)
+    legacy_checksum = _legacy_v1_integer_score_checksum(decision)
+    assert legacy_checksum != decision.payload_checksum
+    database.intent_rows_by_key[decision.request_key]["payload_checksum"] = (
+        legacy_checksum
+    )
+
+    restored = repository.get_intent_decision(decision.request_key)
+
+    assert restored is not None
+    assert restored.payload_checksum == legacy_checksum
+    assert restored.confidence == 1.0
+    assert restored.margin == 0.0
+
+
+def test_intent_rejects_fresh_legacy_checksum_before_opening_connection() -> None:
+    module = _repository_module()
+    database = _FakeM4Database()
+    repository = module.PostgresM4Repository(_FakePool(database))
+    current = _decision(integer_scores=True)
+    legacy = replace(
+        current,
+        payload_checksum=_legacy_v1_integer_score_checksum(current),
+    )
+
+    with pytest.raises(ValueError, match="intent decision is invalid"):
+        repository.insert_or_get_intent_decision(legacy)
+
+    assert database.connection_count == 0
+    assert database.executed == []
+    assert database.intent_rows_by_key == {}
+
+
+@pytest.mark.parametrize(
+    "tamper",
+    [
+        pytest.param(
+            lambda row: row.update({"payload_checksum": "0" * 64}),
+            id="payload-checksum",
+        ),
+        pytest.param(
+            lambda row: row.update({"schema_version": 2}),
+            id="schema-version",
+        ),
+        pytest.param(
+            lambda row: row.update({"reason_codes_json": {"not": "an array"}}),
+            id="reason-codes-json",
+        ),
+        pytest.param(
+            lambda row: row["shadow_json"].update({"label": "essay"}),
+            id="shadow-json",
+        ),
+        pytest.param(
+            lambda row: row.update(
+                {"created_at": datetime(2026, 7, 25, 8, 0)}
+            ),
+            id="created-at",
+        ),
+    ],
+)
+def test_intent_read_fails_closed_when_row_is_tampered(tamper: Any) -> None:
+    module = _repository_module()
+    database = _FakeM4Database()
+    repository = module.PostgresM4Repository(_FakePool(database))
+    decision = _decision()
+    repository.insert_or_get_intent_decision(decision)
+    tamper(database.intent_rows_by_key[decision.request_key])
+
+    with pytest.raises(module.PostgresOperationError, match="integrity"):
+        repository.get_intent_decision(decision.request_key)
+
+
+def test_intent_transaction_rolls_back_when_authoritative_read_fails() -> None:
+    module = _repository_module()
+    database = _FakeM4Database()
+    database.fail_authoritative_read = True
+    repository = module.PostgresM4Repository(_FakePool(database))
+
+    with pytest.raises(RuntimeError, match="forced authoritative read"):
+        repository.insert_or_get_intent_decision(_decision())
+
+    assert database.intent_rows_by_key == {}

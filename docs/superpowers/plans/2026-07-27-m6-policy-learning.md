@@ -24,9 +24,9 @@ artifact paths, network calls, optional ML dependency in rules mode, or changes
 to user-owned untracked files.
 
 **Final reconciliation (2026-07-27):** Implementation is complete but remains
-disabled by default in `rules` with zero rollout and zero exploration. M6 policy
-tables remain schema v10 and PostgreSQL 0010/SQLite v10 are unchanged; M0 policy
-freeze was delivered additively as PostgreSQL 0011 and SQLite schema v11. The
+disabled by default in `rules` with zero rollout and zero exploration. The
+published M4 intent migrations retain schema v10/v11; M6 policy tables are
+schema v12 and M0 policy freeze is additive schema v13. The
 final regression added rich observations, real logging distributions, raw
 reward audit fields, structured provenance validation, and the explicit JSONL
 allowlist described in Task 7 below. No real teaching, learned-policy rollout,
@@ -103,13 +103,13 @@ or live PostgreSQL migration was performed.
    final state-machine validation.
 6. Run M6 unit and runtime tests.
 
-### Task 4: SQLite/PostgreSQL v10 persistence and import parity
+### Task 4: SQLite/PostgreSQL v12 persistence and import parity
 
 **Files**
 
 - Modify: `src/course_insight/infrastructure/sqlite/migrations.py`
 - Modify: `src/course_insight/infrastructure/sqlite/m6_repository.py`
-- Add: `src/course_insight/infrastructure/postgresql/migrations/0010_m6_policy_learning.sql`
+- Add: `src/course_insight/infrastructure/postgresql/migrations/0012_m6_policy_learning.sql`
 - Modify: `src/course_insight/infrastructure/postgresql/migration_runner.py`
 - Modify: `src/course_insight/infrastructure/postgresql/m6_repository.py`
 - Modify: `src/course_insight/infrastructure/postgresql/sqlite_import.py`
@@ -125,7 +125,7 @@ or live PostgreSQL migration was performed.
 
 1. Write failing migration, round-trip, atomicity, restart, duplicate, corruption,
    and concurrent first-writer tests.
-2. Add the five M6 policy tables and matching v10 SQLite/PostgreSQL constraints.
+2. Add the five M6 policy tables and matching v12 SQLite/PostgreSQL constraints.
 3. Implement artifact, execution, observation, reward, and evaluation repository
    operations with parameterized SQL and exact payload validation.
 4. Keep decision plus observation atomic and old decision rows readable.
@@ -167,8 +167,9 @@ or live PostgreSQL migration was performed.
 - Modify: `src/course_insight/modules/m0_platform/service.py`
 - Modify: `src/course_insight/infrastructure/sqlite/workflow_migration.py`
 - Modify: `src/course_insight/infrastructure/sqlite/m0_repository.py`
-- Keep unchanged: `src/course_insight/infrastructure/postgresql/migrations/0010_m6_policy_learning.sql`
-- Add: `src/course_insight/infrastructure/postgresql/migrations/0011_m0_policy_freeze.sql`
+- Keep unchanged: the published M4 v10/0010 and v11/0011 migrations
+- Keep: `src/course_insight/infrastructure/postgresql/migrations/0012_m6_policy_learning.sql`
+- Add: `src/course_insight/infrastructure/postgresql/migrations/0013_m0_policy_freeze.sql`
 - Modify: `src/course_insight/infrastructure/postgresql/m0_repository.py`
 - Modify: `src/course_insight/application/assessment_dependencies.py`
 - Modify: `src/course_insight/application/assessment_workflow.py`
@@ -193,13 +194,13 @@ or live PostgreSQL migration was performed.
    `policy_id`, `adapter_id`, `adapter_version`, `artifact_sha256`,
    `feature_schema_version`, `action_space_version`, and
    `gate_policy_version`.
-3. Keep M6 policy tables and PostgreSQL 0010/SQLite v10 unchanged; persist M0
-   freeze additively in PostgreSQL 0011 and SQLite v11.
+3. Preserve the published M4 v10/v11 migrations; keep M6 policy tables in
+   PostgreSQL/SQLite v12 and persist M0 freeze additively in v13.
 4. Add `policy_frozen` between `state_saved` and `tutoring_saved`. Before the
    M6 workflow call, prepare and freeze the policy execution; on recovery
    require an exact seven-field match.
 5. Keep non-M0 direct calls compatible through M6 lazy preparation.
-6. Allow only all-null migrated-v10 submit rows at
+6. Allow only all-null migrated-v12 submit rows at
    `tutoring_saved|feedback_saved|analytics_saved`, with saved-state/frozen
    prior-state markers, to adopt once through CAS; reject partial, review, or
    `policy_frozen` adoption.
@@ -265,7 +266,7 @@ or live PostgreSQL migration was performed.
 
 1. Document modes, safety envelope, feature/action/reward/gate versions,
    artifact promotion and rollback, kill switch, reward/OPE/JSONL limits, M6
-   policy schema v10 plus additive M0 freeze v11, and the explicit M9
+   policy schema v12 plus additive M0 freeze v13, and the explicit M9
    non-integration.
 2. Run focused M6/M0 tests, then `pytest -q`.
 3. Run coverage and require at least 80% overall and at least 90% for new M6

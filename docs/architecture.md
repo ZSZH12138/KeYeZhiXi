@@ -149,9 +149,10 @@ canonical UTF-8 JSON、lowercase SHA-256、有限 23 维 LinUCB 参数，以及�
 `m6-features-v1`/`m6-action-space-v1` 版本匹配。它不是 course runtime manifest
 的一部分。
 
-SQLite/PostgreSQL 当前 bundled schema 为 v11。M6 五张私有 policy 表属于原样
-保留的 v10/`0010_m6_policy_learning.sql`；M0 七字段 freeze 安全追加在
-v11/`0011_m0_policy_freeze.sql`，没有改写 v10。
+SQLite/PostgreSQL 当前 bundled schema 为 v13。M4 intent 使用已发布的 v10/0010
+与 v11/0011；M6 五张私有 policy 表位于
+v12/`0012_m6_policy_learning.sql`，M0 七字段 freeze 安全追加在
+v13/`0013_m0_policy_freeze.sql`。合并没有改写或重编号已发布的 M4 migration。
 
 ## 日志与投递
 

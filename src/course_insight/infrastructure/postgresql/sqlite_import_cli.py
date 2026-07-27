@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Any
+
+from psycopg.conninfo import conninfo_to_dict
 
 from course_insight.infrastructure.config import (
     ConfigurationError,
@@ -41,6 +44,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--source", required=True, type=Path)
     parser.add_argument("--report", required=True, type=Path)
+    parser.add_argument(
+        "--checkpoint",
+        type=Path,
+        help=(
+            "Durable apply checkpoint (default: <report>.checkpoint.json)."
+        ),
+    )
     parser.add_argument(
         "--project-root",
         type=Path,
@@ -98,8 +108,12 @@ def main(
         if database.backend != "postgresql" or database.url is None:
             _print_error("MIGRATION_CONFIGURATION_INVALID")
             return 2
+        database_url = database.url.get_secret_value()
+        checkpoint_path = arguments.checkpoint or Path(
+            f"{arguments.report}.checkpoint.json"
+        )
         pool = create_postgres_pool(
-            database.url.get_secret_value(),
+            database_url,
             min_size=database.pool_min_size,
             max_size=database.pool_max_size,
             connect_timeout_seconds=database.connect_timeout_seconds,
@@ -109,10 +123,14 @@ def main(
             completed = SQLiteToPostgresMigrator(
                 source_path=arguments.source,
                 destination=PostgresImportDestination(pool),
+                destination_fingerprint=_destination_fingerprint(
+                    database_url
+                ),
             ).run(
                 mode="apply",
                 batch_size=arguments.batch_size,
                 report_path=arguments.report,
+                checkpoint_path=checkpoint_path,
             )
         finally:
             pool.close()
@@ -156,6 +174,25 @@ def _print_error(code: str) -> None:
         ),
         file=sys.stderr,
     )
+
+
+def _destination_fingerprint(database_url: str) -> str:
+    """Bind a checkpoint to a target without hashing its password."""
+
+    parsed = conninfo_to_dict(database_url)
+    target_identity = {
+        key: parsed[key]
+        for key in ("host", "hostaddr", "port", "dbname", "user", "service")
+        if parsed.get(key)
+    }
+    serialized = json.dumps(
+        target_identity,
+        ensure_ascii=True,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 __all__ = ["build_parser", "main"]

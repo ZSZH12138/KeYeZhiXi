@@ -32,6 +32,7 @@ from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.platform import ActorContext
 from course_insight.infrastructure.config import (
     DatabaseSettings,
+    IntentSettings,
     LoggingSettings,
     PlatformSettings,
 )
@@ -78,9 +79,21 @@ from course_insight.modules.m0_platform.outbox_worker import OutboxWorker
 from course_insight.modules.m2_evidence_retrieval.stubs import (
     M2EvidenceRetrievalServiceStub,
 )
+from course_insight.modules.m4_task_orchestration import sklearn_adapter
+from course_insight.modules.m4_task_orchestration.intent import IntentStatus
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    StoredIntentDecision,
+)
+from course_insight.modules.m4_task_orchestration.routing import (
+    resolve_task_type,
+)
+from course_insight.modules.m4_task_orchestration.sklearn_adapter import (
+    IntentArtifactError,
+)
 
 
 NOW = datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc)
+MODEL_SHA256 = "a" * 64
 
 
 def _settings(
@@ -88,6 +101,7 @@ def _settings(
     *,
     backend: str = "sqlite",
     m6_policy: M6PolicySettings | None = None,
+    intent: IntentSettings | None = None,
 ) -> PlatformSettings:
     database_url = (
         SecretStr("postgresql://user:password@db.invalid/course_insight")
@@ -106,6 +120,7 @@ def _settings(
         ),
         logging=LoggingSettings(directory=runtime_dir / "logs"),
         m6_policy=m6_policy or M6PolicySettings(),
+        intent=IntentSettings() if intent is None else intent,
     )
 
 
@@ -470,6 +485,218 @@ def test_factory_constructs_real_active_linucb_runtime_from_exact_records(
     assert repository.evaluation_reads == 1
 
 
+class _IntentAdapterSentinel:
+    adapter_id = "factory-adapter"
+    adapter_version = "factory-adapter-v1"
+
+    @staticmethod
+    def predict(text: str) -> object:
+        del text
+        raise AssertionError("factory test does not perform prediction")
+
+
+def test_rules_factory_never_loads_model(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        sklearn_adapter,
+        "load_sklearn_intent_adapter",
+        lambda path, **kwargs: pytest.fail(
+            f"rules mode loaded model: {path.name}; {kwargs}"
+        ),
+    )
+
+    app = build_application(_settings(tmp_path))
+    try:
+        assert app.m4_service is not None
+        assert app.m4_service._intent_service is not None  # noqa: SLF001
+        assert app.m4_service._intent_service._mode == "rules"  # noqa: SLF001
+        assert app.m4_service._intent_service._adapter is None  # noqa: SLF001
+    finally:
+        app.close()
+
+
+def test_default_rules_factory_matches_legacy_cross_conflict_refusal(
+    tmp_path: Path,
+) -> None:
+    app = build_application(_settings(tmp_path))
+    app.m0_service.initialize()
+    request = {
+        "student_text": "explain assessment",
+        "task_type_hint": None,
+        "course_id": "course_1",
+        "class_id": "class_1",
+        "learner_id": "learner_1",
+        "session_id": "session_1",
+        "knowledge_bundle": _knowledge_bundle(),
+        "learner_state_snapshot": None,
+    }
+    try:
+        with pytest.raises(DomainError) as legacy_error:
+            resolve_task_type("explain assessment", None)
+        with pytest.raises(DomainError) as factory_error:
+            app.m4_service.create_task_plan(**request)
+    finally:
+        app.close()
+
+    assert legacy_error.value.code == factory_error.value.code == "UNSUPPORTED_TASK"
+    assert legacy_error.value.recoverable is factory_error.value.recoverable is True
+
+
+@pytest.mark.parametrize("mode", ["shadow", "active"])
+def test_model_factory_loads_configured_adapter_and_policy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    mode: str,
+) -> None:
+    model_ref = Path("models/intent-model")
+    model_dir = (tmp_path / "runtime" / model_ref).resolve()
+    adapter = _IntentAdapterSentinel()
+    calls: list[tuple[Path, dict[str, object]]] = []
+    monkeypatch.setattr(
+        sklearn_adapter,
+        "load_sklearn_intent_adapter",
+        lambda path, **kwargs: calls.append((path, kwargs)) or adapter,
+    )
+    settings = _settings(
+        tmp_path,
+        intent=IntentSettings(
+            mode=mode,
+            backend="sklearn",
+            model_ref=model_ref,
+            model_id="factory-intent",
+            model_version="2.0.0",
+            model_sha256=MODEL_SHA256,
+            min_confidence=0.82,
+            min_margin=0.23,
+            policy_version="factory-policy-v2",
+            fallback_to_rules=False,
+            fail_closed=False,
+        ),
+    )
+
+    app = build_application(settings)
+    try:
+        intent_service = app.m4_service._intent_service  # noqa: SLF001
+        assert calls == [
+            (
+                model_dir,
+                {
+                    "runtime_dir": (tmp_path / "runtime").resolve(),
+                    "expected_model_id": "factory-intent",
+                    "expected_model_version": "2.0.0",
+                    "expected_model_sha256": MODEL_SHA256,
+                },
+            )
+        ]
+        assert intent_service is not None
+        assert intent_service.repository is app.m4_service._repository  # noqa: SLF001
+        assert intent_service._mode == mode  # noqa: SLF001
+        assert intent_service._adapter is adapter  # noqa: SLF001
+        assert intent_service._policy.min_confidence == 0.82  # noqa: SLF001
+        assert intent_service._policy.min_margin == 0.23  # noqa: SLF001
+        assert intent_service._policy.fallback_to_rules is False  # noqa: SLF001
+        assert intent_service._policy.fail_closed is False  # noqa: SLF001
+        assert intent_service._policy_version == "factory-policy-v2"  # noqa: SLF001
+    finally:
+        app.close()
+
+
+def test_model_factory_uses_injected_m4_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _RepositorySentinel()
+    adapter = _IntentAdapterSentinel()
+    monkeypatch.setattr(
+        sklearn_adapter,
+        "load_sklearn_intent_adapter",
+        lambda path, **kwargs: adapter,
+    )
+    settings = _settings(
+        tmp_path,
+        intent=IntentSettings(
+            mode="active",
+            backend="sklearn",
+            model_ref=Path("models/intent-model"),
+            model_id="factory-intent",
+            model_version="1.0.0",
+            model_sha256=MODEL_SHA256,
+        ),
+    )
+
+    app = build_application(
+        settings,
+        repositories=RepositoryOverrides(m4=repository),
+    )
+    try:
+        assert app.m4_service._repository is repository  # noqa: SLF001
+        assert app.m4_service._intent_service.repository is repository  # noqa: SLF001
+    finally:
+        app.close()
+
+
+def test_m4_service_override_avoids_model_load(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacement = _RepositorySentinel()
+    monkeypatch.setattr(
+        sklearn_adapter,
+        "load_sklearn_intent_adapter",
+        lambda path, **kwargs: pytest.fail(
+            f"discarded service loaded: {path.name}; {kwargs}"
+        ),
+    )
+    settings = _settings(
+        tmp_path,
+        intent=IntentSettings(
+            mode="active",
+            backend="sklearn",
+            model_ref=Path("models/intent-model"),
+            model_id="factory-intent",
+            model_version="1.0.0",
+            model_sha256=MODEL_SHA256,
+        ),
+    )
+
+    app = build_application(
+        settings,
+        services=ServiceOverrides(m4=replacement),  # type: ignore[arg-type]
+    )
+    try:
+        assert app.m4_service is replacement
+    finally:
+        app.close()
+
+
+@pytest.mark.parametrize("mode", ["shadow", "active"])
+def test_unreadable_model_artifact_fails_closed_without_path_leak(
+    tmp_path: Path,
+    mode: str,
+) -> None:
+    private_model_dir = (
+        tmp_path / "runtime" / "private-deployment" / "missing-intent-model"
+    ).resolve()
+    settings = _settings(
+        tmp_path,
+        intent=IntentSettings(
+            mode=mode,
+            backend="sklearn",
+            model_ref=Path("private-deployment/missing-intent-model"),
+            model_id="factory-intent",
+            model_version="1.0.0",
+            model_sha256=MODEL_SHA256,
+        ),
+    )
+
+    with pytest.raises(IntentArtifactError) as captured:
+        build_application(settings)
+
+    assert str(private_model_dir) not in str(captured.value)
+
+
 def test_m0_legacy_constructor_and_keyword_repository_share_one_identity(
     tmp_path: Path,
 ) -> None:
@@ -509,6 +736,41 @@ def test_sqlite_factory_uses_all_real_durable_repositories(
     assert container.outbox_worker._status_path.name == (  # noqa: SLF001
         f"{container.outbox_worker.snapshot().worker_id}.status.json"
     )
+
+
+def test_factory_backed_sqlite_repository_replays_intent_after_restart(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    first_container = build_application(settings)
+    first_container.m0_service.initialize()
+    candidate = StoredIntentDecision(
+        request_key="factory-restart-key",
+        resolved_task_type="practice",
+        decision_status=IntentStatus.ACCEPTED,
+        decision_source="active_model",
+        adapter_id="factory-test-adapter",
+        adapter_version="adapter-v1",
+        policy_version="intent-policy-v1",
+        confidence=0.91,
+        margin=0.31,
+        input_checksum=hashlib.sha256("原始文本".encode("utf-8")).hexdigest(),
+        reason_codes=("model_accepted",),
+        created_at=NOW,
+        _generate_checksum=True,
+    )
+    first_repository = first_container.m4_service._repository  # noqa: SLF001
+    first_repository.insert_or_get_intent_decision(candidate)
+    first_container.close()
+
+    restarted_container = build_application(settings)
+    restarted_container.m0_service.initialize()
+    restarted_repository = restarted_container.m4_service._repository  # noqa: SLF001
+    replayed = restarted_repository.get_intent_decision(candidate.request_key)
+    restarted_container.close()
+
+    assert replayed == candidate
+    assert replayed is not candidate
 
 
 def test_container_and_coordinator_share_exact_service_instances(

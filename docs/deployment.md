@@ -241,8 +241,8 @@ python -m pytest -q
 常规生产部署应保持示例的 rules-safe 默认值。任何 shadow/active 变更都必须在
 部署变更单中逐项记录：
 
-- [ ] 当前 core ledger 为 v11；确认 M6 policy 表来自 v10/0010，M0 freeze 来自
-  追加的 v11/0011，未改写已应用 migration；
+- [ ] 当前 core ledger 为 v13；确认 M4 intent 使用 v10/0010 与 v11/0011，
+  M6 policy 使用 v12/0012，M0 freeze 使用追加的 v13/0013，未改写已应用 migration；
 - [ ] 使用全新 immutable `policy_id`；manifest 的 state graph/baseline/feature/
   action/reward/gate version 已治理，artifact 与 manifest 重叠的
   policy/adapter/feature/action 字段及 lowercase SHA-256 完全一致；
@@ -355,10 +355,10 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --apply
 ```
 
-预期：core schema version 为 11；其中 v10/`0010_m6_policy_learning.sql` 新增五张
-M6 私有 policy 表，v11/`0011_m0_policy_freeze.sql` 为
-`m0_assessment_runs` 安全追加七个策略冻结字段；0010 与 SQLite v10 policy
-migration 保持不变。报告为 `validated`/`completed`，或在已投递旧事件
+预期：core schema version 为 13；v10/0010 与 v11/0011 属于 M4 intent，
+v12/`0012_m6_policy_learning.sql` 新增五张 M6 私有 policy 表，
+v13/`0013_m0_policy_freeze.sql` 为 `m0_assessment_runs` 安全追加七个策略冻结字段。
+报告为 `validated`/`completed`，或在已投递旧事件
 存在时明确为 `*_with_source_limitations`。失败时检查 `error_code`、migration
 checksum、源 schema version、`partial_envelope_rows` 和每表 digest。不要用
 `Get-FileHash` 比较报告的 `source_file_checksum`，它是逻辑快照 checksum。
@@ -367,7 +367,7 @@ v8 workflow 行升级后新增字段保持 NULL。应用仅在相同 operation �
 持久化 TaskPlan 的知识包/课程包锚点匹配且新增字段全部为空时做一次 CAS 接管；
 部分填充或缺少必要精确状态引用的行会 fail closed，运维人员不得直接手工填值。
 
-v10→v11 的历史 submit 行同样只允许窄化 adoption：M6 七字段必须全 NULL，
+v12→v13 的历史 submit 行同样只允许窄化 adoption：M6 七字段必须全 NULL，
 checkpoint 只能是 `tutoring_saved|feedback_saved|analytics_saved`，并且已有保存
 状态和 frozen prior-state 标记。部分策略身份、`policy_frozen` 行或 review
 operation 不得手工补齐。

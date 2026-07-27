@@ -31,12 +31,18 @@ create_task_plan(
 服务构造函数可通过仅关键字参数 `blueprint_by_task_type` 接收
 `task_type -> blueprint_id` 映射。该映射属于 M4 路由配置，不进入公共契约。
 
-## 确定性路由
+## 路由与私有意图决策
 
 - 支持 `qa`、`diagnostic`、`practice`、`correction`、
   `stage_assessment`。
-- 合法 hint 优先；没有 hint 时使用 `routing.py` 中固定、有序的中英文关键词表。
-- 无法识别或 hint 非法时返回 `UNSUPPORTED_TASK`，不调用 LLM 或网络。
+- 默认 `rules` 模式不导入 scikit-learn：合法 hint 优先，其后是高精度规则，再是
+  单一 legacy 规则；不调用 LLM 或网络。`shadow` 用相同规则决定结果，只记录模型
+  观测；`active` 仅在规则不能直接确定时才可用模型决定结果。
+- 若高精度与 legacy 规则合起来命中多个类别，规则/影子模式拒绝，不按顺序偷选。
+  在 active 模式，满足双阈值的模型可解决这种冲突；模型拒绝、OOS、低置信度或低
+  margin 时仍拒绝，绝不回退到冲突的规则候选。
+- 无法识别、OOS、空文本或非法 hint 都返回可恢复的 `UNSUPPORTED_TASK`。公开错误
+  不含学生原文；一次拒绝也会成为可重放的私有审计决策。
 - `qa` 不绑定蓝图，工作流固定为 `M2 → M7 → M6`。
 - 其余四类任务绑定同课程、`teacher_approved` 的 bundle 内蓝图，工作流固定为
   `M8 → M2 → M7 → M5 → M6 → M9`。
@@ -45,6 +51,14 @@ create_task_plan(
 
 `workflow` 表示责任域首次参与顺序，不表示一个模块在整个闭环只能调用一次；
 `next_module` 永远是该列表首项。
+
+私有决策先按精确 request key 查询。已存在的决定（包括拒绝）优先于当前模式、
+阈值和模型版本；只在没有该决定时才运行上述管线。request key 的批准方案 B 是
+六个上下文 `course_id`、`class_id`、`learner_id`、`session_id`、
+`knowledge_bundle_id`、`course_package_id`，加规范化 hint 和规范化学生文本的
+SHA-256。它与 `TaskPlan` 的八字段业务身份不同：后者只含课程、班级、学习者、
+会话、任务类别、知识包、课程包和蓝图。因此同一会话中不同文本/hint 可有不同
+私有决定，但若最终八字段相同，仍权威地复用同一 `TaskPlan`。
 
 ## 引用验证
 
@@ -73,6 +87,13 @@ knowledge_bundle_id, course_package_id, blueprint_id
 
 SQLite migration 仍由应用初始化阶段统一执行；M4 service 不执行 SQL，也不让
 `AppCoordinator` 接收 Repository。
+
+私有决策存于 SQLite/PG 的 `m4_intent_decisions`：只保存 request key、输入
+SHA-256、任务/拒绝状态、决策来源、adapter/policy 版本、置信度/margin、原因码、
+影子审计、UTC 时间和 payload checksum。它绝不保存原始学生文本或完整请求。
+SQLite schema v10 与 PostgreSQL `0010_m4_intent_decisions.sql` 创建该表，v11 与
+`0011_m4_intent_runtime_statuses.sql` 同步补齐 `unavailable`、`failed` 拒绝状态；
+SQLite→PostgreSQL 导入以 `request_key` 做 identity，并保留 first-writer 决定。
 
 ## 消费关系与边界
 

@@ -38,17 +38,17 @@ first-writer 策略绑定并返回私有 `PolicyExecutionRef`。M0 在
 不经过 M0 工作流的 Coordinator/直接调用由
 `decide_next_action(...)` 内部惰性执行相同绑定，因此不会出现第二套语义。
 
-最终 migration 策略采用安全追加：M6 五张私有 policy 表仍属于 SQLite/
-PostgreSQL schema v10，`0010_m6_policy_learning.sql` 与 SQLite v10 migration
-保持不变；M0 freeze 以 SQLite schema v11 和
-`0011_m0_policy_freeze.sql` 追加。submit checkpoint 在 `state_saved` 与
+最终 migration 策略采用安全追加：已发布的 M4 intent 保留 SQLite/PostgreSQL
+schema v10/v11；M6 五张私有 policy 表顺延到 schema v12 和
+`0012_m6_policy_learning.sql`，M0 freeze 以 SQLite schema v13 和
+`0013_m0_policy_freeze.sql` 追加。submit checkpoint 在 `state_saved` 与
 `tutoring_saved` 之间增加 `policy_frozen`，恰好冻结 `policy_id`、
 `adapter_id`、`adapter_version`、`artifact_sha256`、
 `feature_schema_version`、`action_space_version`、`gate_policy_version`。
 rules artifact 可为 NULL，learned binding 必须有 lowercase SHA-256。
 
 恢复在 M6 first-writer 已提交但 M0 checkpoint 尚未保存时重新 prepare 并取得
-同一 binding；到达或越过 `policy_frozen` 后七字段必须完全一致。从 v10 升级的
+同一 binding；到达或越过 `policy_frozen` 后七字段必须完全一致。从 v12 升级的
 历史 submit 仅在七字段全 NULL、checkpoint 为
 `tutoring_saved|feedback_saved|analytics_saved`、已有保存状态和 frozen
 prior-state 标记时允许一次 CAS adoption。
@@ -187,7 +187,7 @@ propensity 或覆盖不足时返回 `insufficient_data`，不得批准 active。
 
 ## 持久化
 
-SQLite/PostgreSQL schema v10 新增 M6 私有表：
+SQLite/PostgreSQL schema v12 新增 M6 私有表：
 
 - `m6_policy_artifacts`
 - `m6_policy_executions`
@@ -196,8 +196,8 @@ SQLite/PostgreSQL schema v10 新增 M6 私有表：
 - `m6_policy_evaluations`
 
 旧 M6 决策仍可读取。新策略执行绑定、决策观测和原 M6 决策遵守幂等唯一约束；
-SQLite→PostgreSQL 导入器同步加入这些表。当前 bundled schema 总版本为 v11；
-M0 assessment run 的七个冻结字段由追加的 v11/0011 提供，不保存公共领域
+SQLite→PostgreSQL 导入器同步加入这些表。当前 bundled schema 总版本为 v13；
+M0 assessment run 的七个冻结字段由追加的 v13/0013 提供，不保存公共领域
 payload。
 
 ## 验收
@@ -213,7 +213,7 @@ payload。
 
 ## 验证与未验证边界
 
-最终回归为 905 passed、13 个需要外部 PostgreSQL 的测试 skipped；coverage 总计
-86%。这些结果验证了本地/假 PostgreSQL 语义与安全回归，不等于真实 PostgreSQL
+最终合并回归为 1226 passed、18 个需要外部 PostgreSQL 的测试 skipped；coverage
+总计 86.74%。这些结果验证了本地/假 PostgreSQL 语义与安全回归，不等于真实 PostgreSQL
 live migration 已通过。本阶段没有训练、批准、部署或 rollout 学习策略，没有真实
 教学数据结论，也不声称学习策略优于 baseline 或 active 已可生产启用。

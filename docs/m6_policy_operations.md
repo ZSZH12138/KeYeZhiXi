@@ -208,7 +208,7 @@ lowercase SHA-256。若 M6 first-writer 已提交但 M0 尚未保存 checkpoint�
 再次 prepare 并取得同一 binding；到达或越过 `policy_frozen` 后，恢复必须逐字段
 完全一致，才会调用 `decide_next_action(...)`。
 
-从 v10 升级的历史 submit 行仅在七字段全部为 NULL、checkpoint 为
+从 v12 升级的历史 submit 行仅在七字段全部为 NULL、checkpoint 为
 `tutoring_saved|feedback_saved|analytics_saved`、已有保存状态和 frozen prior-state
 标记时允许一次 CAS adoption。部分字段、`policy_frozen` 行或 review operation
 不得猜测修复。
@@ -260,15 +260,15 @@ OPE 是依赖 logging propensity、direct estimate 和数据覆盖假设的离�
 
 ## Schema 与 PostgreSQL 验证边界
 
-- v10/`0010_m6_policy_learning.sql`：新增
+- v12/`0012_m6_policy_learning.sql`：新增
   `m6_policy_artifacts`、`m6_policy_executions`、
   `m6_policy_observations`、`m6_policy_rewards`、
   `m6_policy_evaluations`。
-- v11/`0011_m0_policy_freeze.sql`：只为 `m0_assessment_runs` 安全追加七个 freeze
+- v13/`0013_m0_policy_freeze.sql`：只为 `m0_assessment_runs` 安全追加七个 freeze
   字段与完整性约束。
-- `0010` 和 SQLite v10 policy migration 保持不变；M0 freeze 没有回写 v10。
-- 当前 bundled PostgreSQL/SQLite schema version 为 11，SQLite→PostgreSQL
-  allowlist 包含五张 M6 policy 表和 v11 M0 字段。
+- 已发布的 M4 v10/0010 与 v11/0011 保持不变；M6/M0 迁移顺延到 v12/v13。
+- 当前 bundled PostgreSQL/SQLite schema version 为 13，SQLite→PostgreSQL
+  allowlist 包含 M4 intent、五张 M6 policy 表和 v13 M0 字段。
 
 仓库的 live PostgreSQL tests 需要受保护的临时数据库。本阶段没有执行真实教学、
 线上 rollout 或 live PostgreSQL migration；跳过 live tests 不能记录为通过。

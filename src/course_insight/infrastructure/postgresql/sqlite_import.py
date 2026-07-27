@@ -35,6 +35,18 @@ from course_insight.contracts.tutoring import (
     StudentFeedbackPackage,
 )
 from course_insight.infrastructure.json_io import dumps_json, write_json
+from course_insight.infrastructure.postgresql.migration_runner import (
+    SCHEMA_VERSION as POSTGRES_MIGRATION_VERSION,
+)
+from course_insight.infrastructure.postgresql.sqlite_import_checkpoint import (
+    CheckpointBinding,
+    CheckpointError,
+    CheckpointState,
+    load_or_create_checkpoint,
+    validate_destination_fingerprint,
+    validated_checkpoint_path,
+    write_checkpoint,
+)
 from course_insight.infrastructure.postgresql.sqlite_import_destination import (
     PostgresImportDestination,
 )
@@ -47,6 +59,7 @@ _TABLE_ORDER = (
     "m0_event_outbox",
     "m0_assessment_runs",
     "m4_task_plans",
+    "m4_intent_decisions",
     "m5_learner_states",
     "m5_class_states",
     "m5_state_updates",
@@ -78,6 +91,9 @@ _SOURCE_SELECTS = {
         SELECT * FROM m0_assessment_runs ORDER BY operation_id
     """,
     "m4_task_plans": "SELECT * FROM m4_task_plans ORDER BY task_id",
+    "m4_intent_decisions": """
+        SELECT * FROM m4_intent_decisions ORDER BY request_key
+    """,
     "m5_learner_states": """
         SELECT * FROM m5_learner_states
         ORDER BY course_id, class_id, learner_id, state_version
@@ -136,6 +152,7 @@ _IDENTITY_COLUMNS = {
     "m0_event_outbox": ("event_id",),
     "m0_assessment_runs": ("operation_id",),
     "m4_task_plans": ("task_id",),
+    "m4_intent_decisions": ("request_key",),
     "m5_learner_states": (
         "course_id",
         "class_id",
@@ -208,6 +225,13 @@ class ImportDestination(Protocol):
     ) -> None:
         """Insert and verify one batch in exactly one transaction."""
 
+    def verify_batch(
+        self,
+        table: str,
+        rows: tuple[PreparedImportRow, ...],
+    ) -> None:
+        """Verify that a previously committed batch still matches."""
+
 
 @dataclass(frozen=True, slots=True)
 class TableMigrationReport:
@@ -266,9 +290,13 @@ class SQLiteToPostgresMigrator:
         *,
         source_path: str | os.PathLike[str],
         destination: ImportDestination,
+        destination_fingerprint: str | None = None,
     ) -> None:
         self._source_path = Path(source_path)
         self._destination = destination
+        self._destination_fingerprint = validate_destination_fingerprint(
+            destination_fingerprint
+        )
 
     def run(
         self,
@@ -276,6 +304,7 @@ class SQLiteToPostgresMigrator:
         mode: MigrationMode = "dry-run",
         batch_size: int = 500,
         report_path: str | os.PathLike[str] | None = None,
+        checkpoint_path: str | os.PathLike[str] | None = None,
     ) -> MigrationReport:
         if mode not in {"dry-run", "apply"}:
             raise ValueError("mode must be 'dry-run' or 'apply'")
@@ -283,6 +312,19 @@ class SQLiteToPostgresMigrator:
             raise ValueError("batch_size must be between 1 and 10000")
         source = _validated_source_path(self._source_path)
         target_report = _validated_report_path(source, report_path)
+        target_checkpoint = validated_checkpoint_path(
+            source,
+            checkpoint_path,
+            report_path=target_report,
+        )
+        if (
+            mode == "apply"
+            and target_checkpoint is not None
+            and self._destination_fingerprint is None
+        ):
+            raise ValueError(
+                "destination_fingerprint is required with checkpoint_path"
+            )
         try:
             (
                 rows_by_table,
@@ -311,23 +353,79 @@ class SQLiteToPostgresMigrator:
             _write_report(target_report, report)
             return report
 
+        batches = _planned_batches(rows_by_table, batch_size=batch_size)
         completed_batches = 0
-        try:
-            for table in _TABLE_ORDER:
-                rows = rows_by_table[table]
-                for start in range(0, len(rows), batch_size):
-                    batch = rows[start : start + batch_size]
-                    self._destination.apply_batch(table, batch)
-                    completed_batches += 1
-                    _write_report(
-                        target_report,
-                        _completed_report(
-                            report,
-                            rows_by_table,
-                            completed_batches=completed_batches,
-                            status="applying",
+        checkpoint_binding: CheckpointBinding | None = None
+        if target_checkpoint is not None:
+            destination_fingerprint = self._destination_fingerprint
+            if destination_fingerprint is None:
+                raise ValueError("destination_fingerprint is required")
+            checkpoint_binding = CheckpointBinding(
+                source_snapshot_checksum=source_checksum,
+                source_schema_version=SCHEMA_VERSION,
+                migration_version=POSTGRES_MIGRATION_VERSION,
+                destination_fingerprint=destination_fingerprint,
+                batch_size=batch_size,
+                total_batches=len(batches),
+                partial_envelope_rows=partial_count,
+                table_order=_TABLE_ORDER,
+            )
+            try:
+                checkpoint = load_or_create_checkpoint(
+                    target_checkpoint,
+                    checkpoint_binding,
+                )
+            except CheckpointError as error:
+                raise MigrationError(error.code) from None
+            completed_batches = checkpoint.next_batch_index
+            try:
+                for table, batch in batches[:completed_batches]:
+                    self._destination.verify_batch(table, batch)
+            except Exception:
+                _write_report(
+                    target_report,
+                    _completed_report(
+                        report,
+                        rows_by_table,
+                        completed_batches=completed_batches,
+                        status="failed",
+                        error_code=(
+                            "MIGRATION_CHECKPOINT_TARGET_MISMATCH"
                         ),
-                    )
+                    ),
+                )
+                raise MigrationError(
+                    "MIGRATION_CHECKPOINT_TARGET_MISMATCH"
+                ) from None
+        try:
+            for table, batch in batches[completed_batches:]:
+                self._destination.apply_batch(table, batch)
+                completed_batches += 1
+                if target_checkpoint is not None:
+                    if checkpoint_binding is None:
+                        raise RuntimeError("checkpoint binding missing")
+                    try:
+                        write_checkpoint(
+                            target_checkpoint,
+                            checkpoint_binding,
+                            CheckpointState(
+                                status="applying",
+                                next_batch_index=completed_batches,
+                            ),
+                        )
+                    except CheckpointError as error:
+                        raise MigrationError(error.code) from None
+                _write_report(
+                    target_report,
+                    _completed_report(
+                        report,
+                        rows_by_table,
+                        completed_batches=completed_batches,
+                        status="applying",
+                    ),
+                )
+        except MigrationError:
+            raise
         except Exception:
             _write_report(
                 target_report,
@@ -350,6 +448,20 @@ class SQLiteToPostgresMigrator:
                 else "completed_with_source_limitations"
             ),
         )
+        if target_checkpoint is not None:
+            if checkpoint_binding is None:
+                raise RuntimeError("checkpoint binding missing")
+            try:
+                write_checkpoint(
+                    target_checkpoint,
+                    checkpoint_binding,
+                    CheckpointState(
+                        status="completed",
+                        next_batch_index=completed_batches,
+                    ),
+                )
+            except CheckpointError as error:
+                raise MigrationError(error.code) from None
         _write_report(target_report, completed)
         return completed
 
@@ -362,6 +474,37 @@ def _read_and_validate_source(
     )
 
     return read_and_validate_source(source)
+
+
+def import_table_order() -> tuple[str, ...]:
+    """Return the immutable fixed import order."""
+
+    return _TABLE_ORDER
+
+
+def source_table_columns(table: str) -> tuple[str, ...]:
+    """Return the exact supported SQLite source shape for one table."""
+
+    from course_insight.infrastructure.postgresql.sqlite_import_destination import (
+        _COLUMNS,
+    )
+
+    if table not in _TABLE_ORDER:
+        raise ValueError("table is outside the migration allowlist")
+    if table in {
+        "m4_intent_decisions",
+        "m6_policy_artifacts",
+        "m6_policy_executions",
+        "m6_policy_observations",
+        "m6_policy_rewards",
+        "m6_policy_evaluations",
+    }:
+        return _COLUMNS[table]
+    return tuple(
+        column
+        for column in _COLUMNS[table]
+        if column not in {"payload_checksum", "schema_version"}
+    )
 
 
 def _validate_contract_identity(
@@ -428,6 +571,19 @@ def _completed_report(
     )
 
 
+def _planned_batches(
+    rows_by_table: dict[str, tuple[PreparedImportRow, ...]],
+    *,
+    batch_size: int,
+) -> tuple[tuple[str, tuple[PreparedImportRow, ...]], ...]:
+    return tuple(
+        (table, rows[start : start + batch_size])
+        for table in _TABLE_ORDER
+        for rows in (rows_by_table[table],)
+        for start in range(0, len(rows), batch_size)
+    )
+
+
 def _validated_source_path(path: Path) -> Path:
     try:
         resolved = path.resolve(strict=True)
@@ -483,4 +639,6 @@ __all__ = [
     "PreparedImportRow",
     "SQLiteToPostgresMigrator",
     "TableMigrationReport",
+    "import_table_order",
+    "source_table_columns",
 ]

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,10 @@ from course_insight.modules.m0_platform.outbox import (
     validate_serialized_record,
 )
 from course_insight.modules.m0_platform.workflow import AssessmentRun
+from course_insight.modules.m4_task_orchestration.intent import IntentStatus
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    StoredIntentDecision,
+)
 from course_insight.modules.m6_tutoring_fsm.identity import EvidenceIdentity
 from course_insight.modules.m6_tutoring_fsm.repository import (
     TutoringDecisionRecord,
@@ -38,11 +42,8 @@ from course_insight.infrastructure.postgresql.sqlite_import import (
     _SOURCE_SELECTS,
     _TABLE_ORDER,
     _digest,
+    source_table_columns,
 )
-from course_insight.infrastructure.postgresql.sqlite_import_destination import (
-    _COLUMNS as _TARGET_COLUMNS,
-)
-
 _POLICY_RECORD_TYPES = {
     "m6_policy_artifacts": PolicyArtifactManifest,
     "m6_policy_executions": PolicyExecutionRef,
@@ -120,15 +121,7 @@ def _validate_source_schema(connection: sqlite3.Connection) -> None:
                 f"PRAGMA table_info('{table}')"
             ).fetchall()
         )
-        expected_columns = (
-            _TARGET_COLUMNS[table]
-            if table in _POLICY_RECORD_TYPES
-            else tuple(
-                column
-                for column in _TARGET_COLUMNS[table]
-                if column not in {"payload_checksum", "schema_version"}
-            )
-        )
+        expected_columns = source_table_columns(table)
         if actual_columns != expected_columns:
             raise ValueError("source table shape is incompatible")
     if connection.execute("PRAGMA foreign_key_check").fetchone() is not None:
@@ -142,6 +135,8 @@ def _prepare_row(table: str, row: sqlite3.Row) -> PreparedImportRow:
         return _prepare_outbox(row)
     if table == "m0_assessment_runs":
         return _prepare_assessment_run(row)
+    if table == "m4_intent_decisions":
+        return _prepare_intent_decision(row)
     if table == "m6_tutoring_decisions":
         return _prepare_tutoring_decision(row)
     if table in _POLICY_RECORD_TYPES:
@@ -166,6 +161,92 @@ def _prepare_row(table: str, row: sqlite3.Row) -> PreparedImportRow:
         values_by_column,
         version=_contract_version(table, row, contract),
         checksum=contract.content_checksum(),
+        contract_validated=True,
+    )
+
+
+def _prepare_intent_decision(row: sqlite3.Row) -> PreparedImportRow:
+    reason_codes_text = _required_text(row, "reason_codes_json")
+    reason_codes = json.loads(reason_codes_text, parse_constant=_reject_constant)
+    if (
+        type(reason_codes) is not list
+        or dumps_json(reason_codes) != reason_codes_text
+    ):
+        raise ValueError("intent reason codes are not canonical")
+    shadow_text = _optional_text(row, "shadow_json")
+    shadow = (
+        None
+        if shadow_text is None
+        else json.loads(shadow_text, parse_constant=_reject_constant)
+    )
+    if shadow is not None and (
+        type(shadow) is not dict
+        or set(shadow) != {
+            "adapter_id",
+            "adapter_version",
+            "agrees",
+            "confidence",
+            "label",
+            "margin",
+            "reason_codes",
+            "status",
+        }
+        or type(shadow["reason_codes"]) is not list
+        or dumps_json(shadow) != shadow_text
+    ):
+        raise ValueError("intent shadow metadata is not canonical")
+    created_at_text = _required_text(row, "created_at")
+    created_at = _aware_datetime(created_at_text)
+    if (
+        created_at.utcoffset() != timezone.utc.utcoffset(created_at)
+        or created_at.isoformat() != created_at_text
+    ):
+        raise ValueError("intent creation time is not canonical UTC")
+    decision = StoredIntentDecision(
+        request_key=_required_text(row, "request_key"),
+        resolved_task_type=_optional_text(row, "resolved_task_type"),
+        decision_status=IntentStatus(_required_text(row, "decision_status")),
+        decision_source=_required_text(row, "decision_source"),
+        adapter_id=_required_text(row, "adapter_id"),
+        adapter_version=_required_text(row, "adapter_version"),
+        policy_version=_required_text(row, "policy_version"),
+        confidence=row["confidence"],
+        margin=row["margin"],
+        input_checksum=_required_sha256(row, "input_checksum"),
+        reason_codes=tuple(reason_codes),
+        created_at=created_at,
+        shadow_label=None if shadow is None else shadow["label"],
+        shadow_status=(
+            None
+            if shadow is None
+            else IntentStatus(str(shadow["status"]))
+        ),
+        shadow_adapter_id=(
+            None if shadow is None else shadow["adapter_id"]
+        ),
+        shadow_adapter_version=(
+            None if shadow is None else shadow["adapter_version"]
+        ),
+        shadow_confidence=(
+            None if shadow is None else shadow["confidence"]
+        ),
+        shadow_margin=None if shadow is None else shadow["margin"],
+        shadow_reason_codes=(
+            () if shadow is None else tuple(shadow["reason_codes"])
+        ),
+        shadow_agrees=None if shadow is None else shadow["agrees"],
+        schema_version=row["schema_version"],
+        payload_checksum=_required_sha256(row, "payload_checksum"),
+    )
+    decision.assert_persisted_integrity()
+    columns = source_table_columns("m4_intent_decisions")
+    values_by_column = {column: row[column] for column in columns}
+    return _build_prepared(
+        "m4_intent_decisions",
+        columns,
+        values_by_column,
+        version=(decision.schema_version,),
+        checksum=str(decision.payload_checksum),
         contract_validated=True,
     )
 

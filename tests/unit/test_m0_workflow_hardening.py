@@ -289,7 +289,7 @@ def test_sqlite_policy_checkpoint_atomically_persists_all_seven_fields(
         assert getattr(frozen, field) == value
 
 
-def test_sqlite_v11_schema_rejects_partial_policy_identity(
+def test_sqlite_v13_schema_rejects_partial_policy_identity(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "partial-policy.db"
@@ -307,7 +307,7 @@ def test_sqlite_v11_schema_rejects_partial_policy_identity(
             )
 
 
-def test_sqlite_v11_schema_rejects_policy_identity_for_review(
+def test_sqlite_v13_schema_rejects_policy_identity_for_review(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "review-policy.db"
@@ -340,7 +340,7 @@ def test_sqlite_v11_schema_rejects_policy_identity_for_review(
             )
 
 
-def test_sqlite_v11_schema_rejects_policy_identity_before_checkpoint(
+def test_sqlite_v13_schema_rejects_policy_identity_before_checkpoint(
     tmp_path: Path,
 ) -> None:
     database_path = tmp_path / "early-policy.db"
@@ -507,15 +507,14 @@ def test_sqlite_v9_migration_preserves_v8_rows_as_explicit_legacy(
             WHERE operation_id = 'legacy-v8'
             """
         ).fetchone()
-        assert SCHEMA_VERSION == 11
-        assert current_schema_version(connection) == 11
+        assert current_schema_version(connection) == SCHEMA_VERSION
         assert tuple(row) == (None, None, None, None, None)
 
 
-def test_sqlite_v11_migration_preserves_v10_rows_with_null_policy_identity(
+def test_sqlite_v13_migration_preserves_v12_rows_with_null_policy_identity(
     tmp_path: Path,
 ) -> None:
-    database_path = tmp_path / "workflow-v10.db"
+    database_path = tmp_path / "workflow-v12.db"
     with connect_sqlite(database_path) as connection:
         migrate(connection)
         connection.execute(
@@ -526,7 +525,7 @@ def test_sqlite_v11_migration_preserves_v10_rows_with_null_policy_identity(
         connection.execute(ASSESSMENT_RUNS_V9_SQL)
         connection.execute(ASSESSMENT_RUNS_SUBMIT_INDEX_SQL)
         connection.execute(ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL)
-        connection.execute("DELETE FROM schema_migrations WHERE version >= 11")
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 13")
         connection.execute(
             """
             INSERT INTO m0_assessment_runs(
@@ -535,9 +534,9 @@ def test_sqlite_v11_migration_preserves_v10_rows_with_null_policy_identity(
                 task_id, paper_id, attempt_id, checkpoint, status, version,
                 created_at, updated_at
             ) VALUES (
-                'legacy-v10', 'submit', 'legacy-checksum',
+                'legacy-v12', 'submit', 'legacy-checksum',
                 'course-1', 'class-1', 'learner-1', 'session-1',
-                'task-1', 'paper-v10', 'attempt-v10',
+                'task-1', 'paper-v12', 'attempt-v12',
                 'state_saved', 'failed', 7,
                 '2026-07-25T04:00:00+00:00',
                 '2026-07-25T04:01:00+00:00'
@@ -559,11 +558,11 @@ def test_sqlite_v11_migration_preserves_v10_rows_with_null_policy_identity(
                    feature_schema_version, action_space_version,
                    gate_policy_version
             FROM m0_assessment_runs
-            WHERE operation_id = 'legacy-v10'
+            WHERE operation_id = 'legacy-v12'
             """
         ).fetchone()
-        assert SCHEMA_VERSION == 11
-        assert current_schema_version(connection) == 11
+        assert SCHEMA_VERSION == 13
+        assert current_schema_version(connection) == 13
         assert {
             "policy_id",
             "adapter_id",

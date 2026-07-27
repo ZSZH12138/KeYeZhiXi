@@ -4,11 +4,16 @@ import json
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 from pydantic_settings import BaseSettings
 
 from course_insight.infrastructure.config import ConfigurationError
+from course_insight.infrastructure.config import IntentSettings
 from course_insight.infrastructure.config import PlatformSettings
 from course_insight.infrastructure.config import load_platform_settings
+
+
+MODEL_SHA256 = "a" * 64
 
 
 def _write_json(path: Path, payload: dict[str, object]) -> None:
@@ -123,6 +128,222 @@ def test_active_policy_may_be_configured_fail_closed_with_empty_rollout_and_scop
     assert settings.m6_policy.rollout_percentage == 0.0
     assert settings.m6_policy.allowed_course_ids == ()
     assert settings.m6_policy.allowed_class_ids == ()
+
+
+def test_intent_defaults_are_rules_only(tmp_path: Path) -> None:
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=None,
+        dotenv_path=None,
+        environment={},
+    )
+
+    assert settings.intent.mode == "rules"
+    assert settings.intent.backend == "none"
+    assert settings.intent.model_ref is None
+    assert settings.intent.model_id is None
+    assert settings.intent.model_version is None
+    assert settings.intent.model_sha256 is None
+    assert settings.intent.min_confidence == 0.70
+    assert settings.intent.min_margin == 0.10
+    assert settings.intent.policy_version == "m4-intent-policy-v1"
+    assert settings.intent.fallback_to_rules is True
+    assert settings.intent.fail_closed is True
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"mode": "active", "backend": "none"},
+        {"mode": "shadow", "backend": "sklearn", "model_ref": None},
+        {"mode": "rules", "backend": "sklearn", "model_ref": "model"},
+        {"mode": "rules", "backend": "none", "model_ref": "model"},
+        {
+            "mode": "active",
+            "backend": "sklearn",
+            "model_ref": "models/intent",
+        },
+        {
+            "mode": "rules",
+            "model_sha256": MODEL_SHA256,
+        },
+        {"min_confidence": float("nan")},
+        {"min_margin": 1.01},
+        {"policy_version": "   "},
+    ],
+)
+def test_invalid_intent_settings_fail_closed(
+    overrides: dict[str, object],
+) -> None:
+    with pytest.raises((ValidationError, ConfigurationError)):
+        IntentSettings(**overrides)
+
+
+@pytest.mark.parametrize("threshold", [0.0, 1.0])
+def test_intent_threshold_boundaries_are_valid(threshold: float) -> None:
+    settings = IntentSettings(
+        min_confidence=threshold,
+        min_margin=threshold,
+        policy_version="  governed-policy-v2  ",
+    )
+
+    assert settings.min_confidence == threshold
+    assert settings.min_margin == threshold
+    assert settings.policy_version == "governed-policy-v2"
+
+
+def test_intent_nested_environment_overrides_and_relative_model_path(
+    tmp_path: Path,
+) -> None:
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=None,
+        dotenv_path=None,
+        environment={
+            "COURSE_INSIGHT_CONFIG_DIR": "governance",
+            "COURSE_INSIGHT_RUNTIME_DIR": "runtime",
+            "COURSE_INSIGHT_INTENT__MODE": "active",
+            "COURSE_INSIGHT_INTENT__BACKEND": "sklearn",
+            "COURSE_INSIGHT_INTENT__MODEL_REF": "models/intent-model-v2",
+            "COURSE_INSIGHT_INTENT__MODEL_ID": "m4-intent",
+            "COURSE_INSIGHT_INTENT__MODEL_VERSION": "2.0.0",
+            "COURSE_INSIGHT_INTENT__MODEL_SHA256": MODEL_SHA256,
+            "COURSE_INSIGHT_INTENT__MIN_CONFIDENCE": "0.83",
+            "COURSE_INSIGHT_INTENT__MIN_MARGIN": "0.24",
+            "COURSE_INSIGHT_INTENT__POLICY_VERSION": " policy-v2 ",
+            "COURSE_INSIGHT_INTENT__FALLBACK_TO_RULES": "false",
+            "COURSE_INSIGHT_INTENT__FAIL_CLOSED": "true",
+        },
+    )
+
+    assert settings.intent.mode == "active"
+    assert settings.intent.backend == "sklearn"
+    assert settings.intent.model_ref == Path("models/intent-model-v2")
+    assert settings.intent.model_id == "m4-intent"
+    assert settings.intent.model_version == "2.0.0"
+    assert settings.intent.model_sha256 == MODEL_SHA256
+    assert settings.intent.min_confidence == 0.83
+    assert settings.intent.min_margin == 0.24
+    assert settings.intent.policy_version == "policy-v2"
+    assert settings.intent.fallback_to_rules is False
+    assert settings.intent.fail_closed is True
+
+
+def test_intent_file_settings_keep_runtime_relative_model_reference(
+    tmp_path: Path,
+) -> None:
+    app_json = tmp_path / "config" / "app.json"
+    _write_json(
+        app_json,
+        {
+            "config_dir": "deployment-config",
+            "intent": {
+                "mode": "shadow",
+                "backend": "sklearn",
+                "model_ref": "models/intent",
+                "model_id": "m4-intent",
+                "model_version": "1.0.0",
+                "model_sha256": MODEL_SHA256,
+            },
+        },
+    )
+
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=app_json,
+        dotenv_path=None,
+        environment={},
+    )
+
+    assert settings.intent.model_ref == Path("models/intent")
+    assert (
+        settings.runtime_dir / settings.intent.model_ref
+    ).resolve().is_relative_to(settings.runtime_dir)
+
+
+def test_relative_intent_model_path_cannot_escape_runtime_dir(
+    tmp_path: Path,
+) -> None:
+    private_model_dir = tmp_path / "private-model"
+
+    with pytest.raises(ConfigurationError) as captured:
+        load_platform_settings(
+            project_root=tmp_path,
+            app_json_path=None,
+            dotenv_path=None,
+            environment={
+                "COURSE_INSIGHT_INTENT__MODE": "active",
+                "COURSE_INSIGHT_INTENT__BACKEND": "sklearn",
+                "COURSE_INSIGHT_INTENT__MODEL_REF": "../private-model",
+                "COURSE_INSIGHT_INTENT__MODEL_ID": "m4-intent",
+                "COURSE_INSIGHT_INTENT__MODEL_VERSION": "1.0.0",
+                "COURSE_INSIGHT_INTENT__MODEL_SHA256": MODEL_SHA256,
+            },
+        )
+
+    assert captured.value.fields == ("intent.model_ref",)
+    assert str(private_model_dir) not in str(captured.value)
+
+
+@pytest.mark.parametrize(
+    "model_ref",
+    [
+        "https://example.invalid/model",
+        "file:///private/model",
+        "file:/private/model",
+        "C:/private/model",
+        "C:private-model",
+        "\\rooted-model",
+        "\\\\server\\private\\model",
+        "models/$private",
+    ],
+)
+def test_intent_model_reference_rejects_url_and_absolute_paths(
+    model_ref: str,
+) -> None:
+    with pytest.raises(ValidationError):
+        IntentSettings(
+            mode="active",
+            backend="sklearn",
+            model_ref=model_ref,
+            model_id="m4-intent",
+            model_version="1.0.0",
+            model_sha256=MODEL_SHA256,
+        )
+
+
+def test_intent_model_reference_rejects_symlink_escape(
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "runtime"
+    outside = tmp_path / "outside"
+    runtime.mkdir()
+    outside.mkdir()
+    link = runtime / "linked-model"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError as error:
+        pytest.skip(f"symlink creation unavailable: {error}")
+
+    with pytest.raises(ValidationError):
+        PlatformSettings(
+            environment="test",
+            runtime_dir=runtime,
+            config_dir=tmp_path / "config",
+            database={
+                "backend": "sqlite",
+                "sqlite_path": runtime / "course_insight.db",
+            },
+            logging={"directory": runtime / "logs"},
+            intent={
+                "mode": "active",
+                "backend": "sklearn",
+                "model_ref": "linked-model",
+                "model_id": "m4-intent",
+                "model_version": "1.0.0",
+                "model_sha256": MODEL_SHA256,
+            },
+        )
 
 
 def test_configuration_sources_use_deterministic_field_level_precedence(

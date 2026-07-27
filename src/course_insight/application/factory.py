@@ -65,8 +65,16 @@ from course_insight.modules.m3_knowledge_bundle.repository import M3Repository
 from course_insight.modules.m3_knowledge_bundle.service import (
     M3KnowledgeBundleService,
 )
+from course_insight.modules.m4_task_orchestration import sklearn_adapter
 from course_insight.modules.m4_task_orchestration.identity import (
     canonical_idempotency_key,
+)
+from course_insight.modules.m4_task_orchestration.intent import IntentAdapter
+from course_insight.modules.m4_task_orchestration.intent_policy import (
+    IntentPolicy,
+)
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    M4IntentService,
 )
 from course_insight.modules.m4_task_orchestration.repository import M4Repository
 from course_insight.modules.m4_task_orchestration.service import (
@@ -356,10 +364,7 @@ def _assemble_application(
         else service_overrides.m3
     )
     m4 = (
-        M4TaskOrchestrationService(
-            durable["m4"],
-            canonical_idempotency_key,
-        )
+        _build_m4_service(settings, cast(M4Repository, durable["m4"]))
         if service_overrides.m4 is None
         else service_overrides.m4
     )
@@ -451,6 +456,63 @@ def _assemble_application(
         outbox_worker=resolved_outbox_worker,
         database_pool=durable_graph.database_pool,
         _owns_database_pool=durable_graph.owns_database_pool,
+    )
+
+
+def _build_m4_service(
+    settings: PlatformSettings,
+    repository: M4Repository,
+) -> M4TaskOrchestrationService:
+    intent_settings = settings.intent
+    adapter: IntentAdapter | None = None
+    if intent_settings.mode in {"shadow", "active"}:
+        model_ref = intent_settings.model_ref
+        model_id = intent_settings.model_id
+        model_version = intent_settings.model_version
+        model_sha256 = intent_settings.model_sha256
+        if (
+            model_ref is None
+            or model_id is None
+            or model_version is None
+            or model_sha256 is None
+        ):
+            raise RuntimeError("validated intent artifact is unavailable")
+        try:
+            runtime_dir = settings.runtime_dir.resolve()
+            model_dir = (runtime_dir / model_ref).resolve()
+        except (OSError, RuntimeError):
+            raise RuntimeError(
+                "validated intent artifact is unavailable"
+            ) from None
+        if (
+            model_dir == runtime_dir
+            or not model_dir.is_relative_to(runtime_dir)
+        ):
+            raise RuntimeError("validated intent artifact is unavailable")
+        adapter = sklearn_adapter.load_sklearn_intent_adapter(
+            model_dir,
+            runtime_dir=runtime_dir,
+            expected_model_id=model_id,
+            expected_model_version=model_version,
+            expected_model_sha256=model_sha256,
+        )
+    intent_service = M4IntentService(
+        repository,
+        canonical_idempotency_key,
+        mode=intent_settings.mode,
+        adapter=adapter,
+        policy=IntentPolicy(
+            intent_settings.min_confidence,
+            intent_settings.min_margin,
+            intent_settings.fallback_to_rules,
+            intent_settings.fail_closed,
+        ),
+        policy_version=intent_settings.policy_version,
+    )
+    return M4TaskOrchestrationService(
+        repository,
+        canonical_idempotency_key,
+        intent_service=intent_service,
     )
 
 

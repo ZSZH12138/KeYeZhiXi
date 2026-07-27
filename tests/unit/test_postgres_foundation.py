@@ -566,8 +566,10 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
         "0007_m9_teacher_analytics.sql",
         "0008_m0_review_workflow.sql",
         "0009_m0_workflow_recovery_freeze.sql",
-        "0010_m6_policy_learning.sql",
-        "0011_m0_policy_freeze.sql",
+        "0010_m4_intent_decisions.sql",
+        "0011_m4_intent_runtime_statuses.sql",
+        "0012_m6_policy_learning.sql",
+        "0013_m0_policy_freeze.sql",
     )
     all_sql = "\n".join(migration.sql for migration in migrations)
     for table_name in CORE_TABLES:
@@ -581,6 +583,73 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
     assert "TEXT" in all_sql
     assert "CHAR(64)" in all_sql
     assert "BOOLEAN" in MIGRATION_TABLE_SQL
+
+
+def test_m4_intent_migration_is_checksum_locked_and_constraint_complete() -> None:
+    migration = next(
+        item for item in load_migrations() if item.version == 10
+    )
+
+    assert migration.version == 10
+    assert migration.name == "m4_intent_decisions"
+    assert migration.checksum == hashlib.sha256(
+        migration.path.read_bytes()
+    ).hexdigest()
+    assert len(migration.checksum) == 64
+    sql = migration.sql
+    assert "CREATE TABLE m4_intent_decisions" in sql
+    assert "request_key TEXT PRIMARY KEY" in sql
+    assert "confidence DOUBLE PRECISION" in sql
+    assert "margin DOUBLE PRECISION" in sql
+    assert "reason_codes_json JSONB NOT NULL" in sql
+    assert "shadow_json JSONB" in sql
+    assert "created_at TIMESTAMPTZ NOT NULL" in sql
+    assert "decision_status IN (" in sql
+    assert "resolved_task_type IN (" in sql
+    assert "decision_source IN (" in sql
+    assert "jsonb_typeof(reason_codes_json) = 'array'" in sql
+    assert "jsonb_typeof(shadow_json) = 'object'" in sql
+    assert "schema_version = 1" in sql
+    assert sql.count("~ '^[0-9a-f]{64}$'") == 2
+
+
+def test_m4_runtime_status_migration_extends_the_database_constraint() -> None:
+    migration = next(
+        item for item in load_migrations() if item.version == 11
+    )
+
+    assert migration.version == 11
+    assert migration.name == "m4_intent_runtime_statuses"
+    assert migration.checksum == hashlib.sha256(
+        migration.path.read_bytes()
+    ).hexdigest()
+    assert len(migration.checksum) == 64
+    statements = tuple(
+        statement.replace("\r\n", "\n")
+        for statement in migration.statements
+    )
+    assert statements == (
+        (
+            "ALTER TABLE m4_intent_decisions\n"
+            "    DROP CONSTRAINT "
+            "m4_intent_decisions_decision_status_check"
+        ),
+        (
+            "ALTER TABLE m4_intent_decisions\n"
+            "    ADD CONSTRAINT "
+            "m4_intent_decisions_decision_status_check\n"
+            "    CHECK (\n"
+            "        decision_status IN (\n"
+            "            'accepted',\n"
+            "            'abstained',\n"
+            "            'out_of_scope',\n"
+            "            'unavailable',\n"
+            "            'failed',\n"
+            "            'invalid'\n"
+            "        )\n"
+            "    )"
+        ),
+    )
 
 
 def test_contract_payload_tables_store_checksum_and_schema_version() -> None:
@@ -600,8 +669,8 @@ def test_contract_payload_tables_store_checksum_and_schema_version() -> None:
         assert sql.count("payload_checksum CHAR(64) NOT NULL") == count
         assert sql.count("schema_version TEXT NOT NULL") == count
     assert "payload_checksum CHAR(64) NOT NULL" not in migration_sql[1]
-    assert migration_sql[10].count("payload_checksum CHAR(64) NOT NULL") == 5
-    assert "schema_version TEXT NOT NULL" not in migration_sql[10]
+    assert migration_sql[12].count("payload_checksum CHAR(64) NOT NULL") == 5
+    assert "schema_version TEXT NOT NULL" not in migration_sql[12]
     assert "record TEXT NOT NULL" in migration_sql[1]
     assert "payload JSONB NOT NULL" in migration_sql[1]
 

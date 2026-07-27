@@ -29,6 +29,9 @@ LogLevel = Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"]
 LogMode = Literal["rotating_file", "stdout"]
 M6PolicyMode = Literal["rules", "shadow", "active"]
 _ENV_NAME = re.compile(r"^[A-Z_][A-Z0-9_]*$")
+_SAFE_INTENT_TOKEN = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:+-]*$")
+_SAFE_MODEL_SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._+-]{0,127}$")
+_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _POSTGRES_DSN_ADAPTER = TypeAdapter(PostgresDsn)
 
 
@@ -266,6 +269,119 @@ class M6PolicySettings(_FrozenModel):
         return self
 
 
+class IntentSettings(_FrozenModel):
+    """Administrator-controlled M4 intent runtime configuration."""
+
+    mode: Literal["rules", "shadow", "active"] = "rules"
+    backend: Literal["none", "sklearn"] = "none"
+    model_ref: Path | None = None
+    model_id: str | None = None
+    model_version: str | None = None
+    model_sha256: str | None = None
+    min_confidence: Annotated[FiniteFloat, Field(ge=0, le=1)] = 0.70
+    min_margin: Annotated[FiniteFloat, Field(ge=0, le=1)] = 0.10
+    policy_version: str = Field(
+        default="m4-intent-policy-v1",
+        min_length=1,
+        max_length=128,
+    )
+    fallback_to_rules: bool = True
+    fail_closed: bool = True
+
+    @field_validator("policy_version", "model_id", "model_version", mode="before")
+    @classmethod
+    def _normalize_identifier(cls, value: object) -> object:
+        return value.strip() if isinstance(value, str) else value
+
+    @field_validator("policy_version", "model_id")
+    @classmethod
+    def _validate_bounded_identifier(cls, value: str | None) -> str | None:
+        if (
+            value is not None
+            and (
+                len(value) > 128
+                or _SAFE_INTENT_TOKEN.fullmatch(value) is None
+            )
+        ):
+            raise ValueError("intent identifier must be a bounded safe token")
+        return value
+
+    @field_validator("model_version")
+    @classmethod
+    def _validate_model_version(cls, value: str | None) -> str | None:
+        if (
+            value is not None
+            and (
+                len(value) > 56
+                or _SAFE_INTENT_TOKEN.fullmatch(value) is None
+            )
+        ):
+            raise ValueError("model version must be a bounded safe token")
+        return value
+
+    @field_validator("model_sha256")
+    @classmethod
+    def _validate_model_sha256(cls, value: str | None) -> str | None:
+        if value is not None and _SHA256.fullmatch(value) is None:
+            raise ValueError("model sha256 must be lowercase hexadecimal")
+        return value
+
+    @field_validator("model_ref", mode="before")
+    @classmethod
+    def _validate_model_ref(cls, value: object) -> object:
+        if value is None:
+            return None
+        if not isinstance(value, (str, Path)):
+            raise ValueError("model reference is invalid")
+        raw = str(value).strip()
+        if (
+            not raw
+            or len(raw) > 512
+            or "://" in raw
+            or raw.startswith("\\\\")
+            or raw.startswith("//")
+        ):
+            raise ValueError("model reference must be runtime-relative")
+        path = Path(raw)
+        if (
+            path.is_absolute()
+            or bool(path.drive)
+            or bool(path.anchor)
+            or path == Path(".")
+            or any(part in {".", ".."} for part in path.parts)
+            or any(
+                _SAFE_MODEL_SEGMENT.fullmatch(part) is None
+                for part in path.parts
+            )
+        ):
+            raise ValueError("model reference must be runtime-relative")
+        return path
+
+    @model_validator(mode="after")
+    def _validate_runtime_combination(self) -> Self:
+        artifact_fields = (
+            self.model_ref,
+            self.model_id,
+            self.model_version,
+            self.model_sha256,
+        )
+        if self.mode == "rules":
+            if self.backend != "none" or any(
+                value is not None for value in artifact_fields
+            ):
+                raise ValueError(
+                    "rules mode requires no backend or model identity"
+                )
+            return self
+        if self.backend != "sklearn" or any(
+            value is None for value in artifact_fields
+        ):
+            raise ValueError(
+                "model-backed intent modes require sklearn and pinned artifact"
+            )
+        return self
+
+
 class PlatformSettings(BaseSettings):
     """Complete immutable settings assembled by the explicit loader."""
 
@@ -286,6 +402,7 @@ class PlatformSettings(BaseSettings):
     web: WebSettings = Field(default_factory=WebSettings)
     security: SecuritySettings = Field(default_factory=SecuritySettings)
     m6_policy: M6PolicySettings = Field(default_factory=M6PolicySettings)
+    intent: IntentSettings = Field(default_factory=IntentSettings)
 
     @model_validator(mode="after")
     def _validate_m6_runtime_boundary(self) -> Self:
@@ -313,6 +430,21 @@ class PlatformSettings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_production_security(self) -> Self:
+        if self.intent.model_ref is not None:
+            try:
+                runtime_root = self.runtime_dir.resolve()
+                model_dir = (runtime_root / self.intent.model_ref).resolve()
+            except (OSError, RuntimeError):
+                raise ValueError(
+                    "intent model reference is unavailable"
+                ) from None
+            if (
+                model_dir == runtime_root
+                or not model_dir.is_relative_to(runtime_root)
+            ):
+                raise ValueError(
+                    "intent model reference must remain within runtime_dir"
+                )
         if self.environment != "production":
             return self
 

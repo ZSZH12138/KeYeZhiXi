@@ -135,16 +135,17 @@ M6 不在业务服务内嵌 migration；SQLite 统一由
 core migrations。
 
 - v3：增加 `m6_tutoring_decisions`，保留既有 session state。
-- v10/`0010_m6_policy_learning.sql`：增加
+- v12/`0012_m6_policy_learning.sql`：增加
   `m6_policy_artifacts`、`m6_policy_executions`、
   `m6_policy_observations`、`m6_policy_rewards`、
   `m6_policy_evaluations`。
-- v11/`0011_m0_policy_freeze.sql`：只为 `m0_assessment_runs` 安全追加七个
+- v13/`0013_m0_policy_freeze.sql`：只为 `m0_assessment_runs` 安全追加七个
   policy freeze 字段。
 
-M6 policy 表仍属于 schema v10；0010 和 SQLite v10 migration 保持不变。当前
-bundled schema 总版本是 v11，因为 M0 freeze 是后续追加。数据库高于应用支持版本
-时拒绝启动；项目不自动破坏性降级，回退旧应用前必须停写并恢复匹配备份。
+M4 intent 已占用 schema v10/v11，且这些已发布 migration 保持不变。M6 policy
+与 M0 freeze 因此安全顺延到 v12/v13；当前 bundled schema 总版本是 v13。
+数据库高于应用支持版本时拒绝启动；项目不自动破坏性降级，回退旧应用前必须停写
+并恢复匹配备份。
 
 ## M0 七字段冻结与恢复
 

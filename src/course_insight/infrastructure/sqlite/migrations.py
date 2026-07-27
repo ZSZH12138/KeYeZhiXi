@@ -32,10 +32,12 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     migrate_workflow_v10_to_v11,
 )
 
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 13
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
+_M4_INTENT_DECISION_MIGRATION_NAME = "m4_intent_decisions"
+_M4_INTENT_STATUS_MIGRATION_NAME = "m4_intent_runtime_statuses"
 _MODULE_RECOVERY_MIGRATION_NAME = "module_owned_recovery"
 _ASSESSMENT_WORKFLOW_MIGRATION_NAME = "m0_assessment_workflow"
 _ASSESSMENT_WORKFLOW_REFS_MIGRATION_NAME = "m0_assessment_workflow_refs"
@@ -46,7 +48,7 @@ _ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME = (
     "m0_assessment_workflow_recovery_freeze"
 )
 _M6_POLICY_LEARNING_MIGRATION_NAME = "m6_policy_learning"
-_ASSESSMENT_POLICY_FREEZE_MIGRATION_NAME = "m0_assessment_policy_freeze"
+_ASSESSMENT_POLICY_FREEZE_MIGRATION_NAME = "m0_policy_freeze"
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -207,6 +209,108 @@ CREATE TABLE IF NOT EXISTS m6_tutoring_decisions (
         REFERENCES m6_session_states(session_id, turn_count)
 )
 """
+_M4_INTENT_DECISION_V10_SQL = """
+CREATE TABLE IF NOT EXISTS m4_intent_decisions (
+    request_key TEXT PRIMARY KEY CHECK (length(trim(request_key)) > 0),
+    resolved_task_type TEXT NULL,
+    decision_status TEXT NOT NULL,
+    decision_source TEXT NOT NULL CHECK (length(trim(decision_source)) > 0),
+    adapter_id TEXT NOT NULL CHECK (length(trim(adapter_id)) > 0),
+    adapter_version TEXT NOT NULL CHECK (length(trim(adapter_version)) > 0),
+    policy_version TEXT NOT NULL CHECK (length(trim(policy_version)) > 0),
+    confidence REAL NULL CHECK (
+        confidence IS NULL
+        OR (
+            typeof(confidence) IN ('real', 'integer')
+            AND confidence >= 0.0
+            AND confidence <= 1.0
+        )
+    ),
+    margin REAL NULL CHECK (
+        margin IS NULL
+        OR (
+            typeof(margin) IN ('real', 'integer')
+            AND margin >= 0.0
+            AND margin <= 1.0
+        )
+    ),
+    input_checksum TEXT NOT NULL CHECK (
+        length(input_checksum) = 64
+        AND input_checksum NOT GLOB '*[^0-9a-f]*'
+    ),
+    reason_codes_json TEXT NOT NULL CHECK (
+        CASE WHEN json_valid(reason_codes_json)
+            THEN json_type(reason_codes_json) = 'array'
+                AND json(reason_codes_json) = reason_codes_json
+            ELSE 0
+        END
+    ),
+    shadow_json TEXT NULL CHECK (
+        shadow_json IS NULL
+        OR CASE WHEN json_valid(shadow_json)
+            THEN json_type(shadow_json) = 'object'
+                AND json(shadow_json) = shadow_json
+            ELSE 0
+        END
+    ),
+    schema_version INTEGER NOT NULL CHECK (schema_version = 1),
+    payload_checksum TEXT NOT NULL CHECK (
+        length(payload_checksum) = 64
+        AND payload_checksum NOT GLOB '*[^0-9a-f]*'
+    ),
+    created_at TEXT NOT NULL CHECK (
+        datetime(created_at) IS NOT NULL
+        AND substr(created_at, -6) = '+00:00'
+    ),
+    CHECK (
+        decision_status IN ('accepted', 'abstained', 'out_of_scope', 'invalid')
+    ),
+    CHECK (
+        resolved_task_type IS NULL
+        OR resolved_task_type IN (
+            'qa',
+            'diagnostic',
+            'practice',
+            'correction',
+            'stage_assessment'
+        )
+    ),
+    CHECK (
+        (decision_status = 'accepted' AND resolved_task_type IS NOT NULL)
+        OR (decision_status != 'accepted' AND resolved_task_type IS NULL)
+    ),
+    CHECK (
+        (
+            decision_status = 'accepted'
+            AND decision_source IN (
+                'legal_hint',
+                'high_precision_rule',
+                'legacy_rule',
+                'active_model'
+            )
+        )
+        OR (decision_status != 'accepted' AND decision_source = 'refusal')
+    ),
+    CHECK (
+        decision_source != 'active_model'
+        OR (confidence IS NOT NULL AND margin IS NOT NULL)
+    )
+)
+"""
+_M4_INTENT_DECISION_SQL = _M4_INTENT_DECISION_V10_SQL.replace(
+    "decision_status IN ('accepted', 'abstained', 'out_of_scope', 'invalid')",
+    (
+        "decision_status IN ("
+        "'accepted', 'abstained', 'out_of_scope', "
+        "'unavailable', 'failed', 'invalid'"
+        ")"
+    ),
+)
+_M4_INTENT_DECISION_V11_STAGING_SQL = _M4_INTENT_DECISION_SQL.replace(
+    "CREATE TABLE IF NOT EXISTS m4_intent_decisions",
+    "CREATE TABLE m4_intent_decisions_v11",
+    1,
+)
 _M6_DECISION_COLUMNS = (
     ("decision_id", "TEXT", 0, None, 1),
     ("session_id", "TEXT", 1, None, 0),
@@ -552,7 +656,7 @@ def _validate_assessment_workflow_schema(
 ) -> None:
     expected_sql = (
         _M0_ASSESSMENT_RUNS_SQL
-        if schema_version >= 11
+        if schema_version >= 13
         else (
             _M0_ASSESSMENT_RUNS_V9_SQL
             if schema_version >= 9
@@ -631,6 +735,69 @@ def _validate_m6_policy_schema(connection: sqlite3.Connection) -> None:
             (table_name,),
         ).fetchone() is not None:
             raise RuntimeError(f"{table_name} data violates foreign keys")
+
+
+def _validate_m4_intent_decision_schema(
+    connection: sqlite3.Connection,
+    *,
+    expected_sql: str = _M4_INTENT_DECISION_SQL,
+) -> None:
+    actual_sql = _normalized_table_schema_sql(
+        connection,
+        "m4_intent_decisions",
+    ).replace('"m4_intent_decisions"', "m4_intent_decisions")
+    if actual_sql != _normalize_create_table_sql(expected_sql):
+        raise RuntimeError("M4 intent decision schema is incompatible")
+
+
+def _migrate_m4_intent_runtime_statuses(
+    connection: sqlite3.Connection,
+) -> None:
+    """Extend the M4 status constraint without losing v10 decisions."""
+
+    connection.execute(_M4_INTENT_DECISION_V11_STAGING_SQL)
+    connection.execute(
+        """
+        INSERT INTO m4_intent_decisions_v11(
+            request_key,
+            resolved_task_type,
+            decision_status,
+            decision_source,
+            adapter_id,
+            adapter_version,
+            policy_version,
+            confidence,
+            margin,
+            input_checksum,
+            reason_codes_json,
+            shadow_json,
+            schema_version,
+            payload_checksum,
+            created_at
+        )
+        SELECT
+            request_key,
+            resolved_task_type,
+            decision_status,
+            decision_source,
+            adapter_id,
+            adapter_version,
+            policy_version,
+            confidence,
+            margin,
+            input_checksum,
+            reason_codes_json,
+            shadow_json,
+            schema_version,
+            payload_checksum,
+            created_at
+        FROM m4_intent_decisions
+        """
+    )
+    connection.execute("DROP TABLE m4_intent_decisions")
+    connection.execute(
+        "ALTER TABLE m4_intent_decisions_v11 RENAME TO m4_intent_decisions"
+    )
 
 
 def _migrate_m5_learner_scope(connection: sqlite3.Connection) -> None:
@@ -817,8 +984,8 @@ def migrate(connection: sqlite3.Connection) -> None:
             _validate_assessment_workflow_schema(
                 connection,
                 schema_version=(
-                    11
-                    if 11 in applied_versions
+                    13
+                    if 13 in applied_versions
                     else (
                         9
                         if 9 in applied_versions
@@ -839,8 +1006,8 @@ def migrate(connection: sqlite3.Connection) -> None:
             _validate_assessment_workflow_schema(
                 connection,
                 schema_version=(
-                    11
-                    if 11 in applied_versions
+                    13
+                    if 13 in applied_versions
                     else 9 if 9 in applied_versions else 8
                 ),
             )
@@ -853,8 +1020,8 @@ def migrate(connection: sqlite3.Connection) -> None:
             _validate_assessment_workflow_schema(
                 connection,
                 schema_version=(
-                    11
-                    if 11 in applied_versions
+                    13
+                    if 13 in applied_versions
                     else 9 if 9 in applied_versions else 8
                 ),
             )
@@ -871,32 +1038,69 @@ def migrate(connection: sqlite3.Connection) -> None:
         else:
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=11 if 11 in applied_versions else 9,
+                schema_version=13 if 13 in applied_versions else 9,
             )
         if 10 not in applied_versions:
+            connection.execute(_M4_INTENT_DECISION_V10_SQL)
+            try:
+                _validate_m4_intent_decision_schema(
+                    connection,
+                    expected_sql=_M4_INTENT_DECISION_V10_SQL,
+                )
+            except RuntimeError:
+                # Recovery tests and repaired ledgers can retain the v11 table
+                # while replaying the forward-only migration sequence.
+                _validate_m4_intent_decision_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (10, _M4_INTENT_DECISION_MIGRATION_NAME),
+            )
+            applied_versions.add(10)
+        else:
+            _validate_m4_intent_decision_schema(
+                connection,
+                expected_sql=(
+                    _M4_INTENT_DECISION_SQL
+                    if 11 in applied_versions
+                    else _M4_INTENT_DECISION_V10_SQL
+                ),
+            )
+        if 11 not in applied_versions:
+            _migrate_m4_intent_runtime_statuses(connection)
+            _validate_m4_intent_decision_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (11, _M4_INTENT_STATUS_MIGRATION_NAME),
+            )
+            applied_versions.add(11)
+        else:
+            _validate_m4_intent_decision_schema(connection)
+        if 12 not in applied_versions:
             for _, statement in _M6_POLICY_TABLES:
                 connection.execute(statement)
             _validate_m6_policy_schema(connection)
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
-                (10, _M6_POLICY_LEARNING_MIGRATION_NAME),
+                (12, _M6_POLICY_LEARNING_MIGRATION_NAME),
             )
+            applied_versions.add(12)
         else:
             _validate_m6_policy_schema(connection)
-        if 11 not in applied_versions:
+        if 13 not in applied_versions:
             migrate_workflow_v10_to_v11(connection)
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=11,
+                schema_version=13,
             )
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
-                (11, _ASSESSMENT_POLICY_FREEZE_MIGRATION_NAME),
+                (13, _ASSESSMENT_POLICY_FREEZE_MIGRATION_NAME),
             )
+            applied_versions.add(13)
         else:
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=11,
+                schema_version=13,
             )
         validate_outbox_schema(connection, schema_version=SCHEMA_VERSION)
         connection.execute("COMMIT")

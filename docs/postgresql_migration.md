@@ -7,8 +7,8 @@
 - PostgreSQL 仓储、schema migration、SQLite→PostgreSQL 导入器已在代码中实现。
 - 本文档不声称这些能力已经在真实 PostgreSQL 环境中完成联调或验收。
 - 准确表述只能是“代码已落地、可配置、可阅读；真实通过状态须以当次实测为准”。
-- 当前 bundled PostgreSQL/SQLite schema version 是 `11`；M6 五张私有 policy 表
-  仍严格属于 v10，M0 policy freeze 是后续安全追加的 v11。
+- 当前 bundled PostgreSQL/SQLite schema version 是 `13`；M4 intent 占用
+  v10/v11，M6 五张私有 policy 表属于 v12，M0 policy freeze 是后续安全追加的 v13。
 
 ## 已实现的组件
 
@@ -17,35 +17,42 @@
   - `pg_advisory_xact_lock`
   - `schema_migrations` 校验
 - `src/course_insight/infrastructure/postgresql/migrations/*.sql`
-  - 当前 bundled schema version 为 `11`
+  - 当前 bundled schema version 为 `13`
   - v8 为 `m0_assessment_runs` 增加同一 `paper_id` 只允许一个
     `status <> completed` review 的部分唯一索引（包含 failed）；相同 operation
     可重放，只有完成当前 review 后才允许新的 review operation
   - v9 为 assessment workflow 增加知识包/课程包/证据索引/policy checksum、
     精确 M5 前态冻结字段与 `state_inputs_frozen` 恢复 checkpoint；lease 续租和
     终态写入继续使用 owner/version/未过期租约 CAS
-  - v10/`0010_m6_policy_learning.sql` 新增
+  - v10 新增 `m4_intent_decisions`：以 `request_key` 唯一保存 M4 私有意图决定、
+    输入 SHA-256、adapter/policy 元数据、原因码、可选 shadow JSON、UTC 时间和
+    payload checksum。该表没有学生原文列；公开 `TaskPlan` 和既有 M4 表不扩字段。
+  - v11 扩展该表的状态约束，允许持久化 `unavailable` 与 `failed`，保证适配器
+    不可用或抛出异常时仍能形成可恢复、可审计、可重放的拒绝决定。
+  - v12/`0012_m6_policy_learning.sql` 新增
     `m6_policy_artifacts`、`m6_policy_executions`、
     `m6_policy_observations`、`m6_policy_rewards` 和
     `m6_policy_evaluations`；这是 M6 policy 表的 schema 版本
-  - v11/`0011_m0_policy_freeze.sql` 只为 `m0_assessment_runs` 追加
+  - v13/`0013_m0_policy_freeze.sql` 只为 `m0_assessment_runs` 追加
     `policy_id`、`adapter_id`、`adapter_version`、`artifact_sha256`、
     `feature_schema_version`、`action_space_version`、`gate_policy_version`
     七列和完整性约束
-  - PostgreSQL 0010 和 SQLite v10 policy migration 保持不变；M0 freeze 没有
-    回写或重编号 v10
+  - 已发布的 M4 v10/v11 migration 保持不变；M6 与 M0 freeze 顺延到 v12/v13，
+    没有回写或重编号已发布 migration
   - v8 旧行的新字段保持 NULL；首次同 operation 重放时，只有旧 identity、持久化
     TaskPlan 锚点和完整的新依赖形状全部一致才会 CAS 接管。部分填充行、
     `state_inputs_frozen` 旧行，以及 state checkpoint 已越过但缺少
     `state_version` 的行不会被猜测修复
-  - v10→v11 历史 submit 行的七个 M6 freeze 字段保持 NULL；只有
+  - v12→v13 历史 submit 行的七个 M6 freeze 字段保持 NULL；只有
     `tutoring_saved|feedback_saved|analytics_saved`、已有保存状态和 frozen
     prior-state 标记、七字段全 NULL 时才允许一次 CAS adoption。部分字段、
     `policy_frozen` 或 review 行不会被猜测修复
 - `src/course_insight/infrastructure/postgresql/sqlite_import.py`
   - 显式、可恢复、批量提交的导入编排
+- `src/course_insight/infrastructure/postgresql/sqlite_import_checkpoint.py`
+  - 与逻辑源快照、SQLite schema、PostgreSQL migration、目标及批计划绑定的原子 checkpoint
 - `src/course_insight/infrastructure/postgresql/sqlite_import_cli.py`
-  - `--project-root`、`--dry-run`、`--apply` 命令入口
+  - `--project-root`、`--dry-run`、`--apply`、`--checkpoint` 命令入口
 - `scripts/migrate_sqlite_to_postgres.py`
   - 包装脚本
 
@@ -55,12 +62,15 @@
 
 ```shell
 python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --dry-run
-python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --apply
+python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --checkpoint runtime/migration-checkpoint.json --apply
 ```
 
 语义是：
 1. `--dry-run`：先验证 SQLite 源与批处理计划。
-2. `--apply`：通过 `--project-root` 加载单一 `PlatformSettings`，要求解析后的 `database.backend=postgresql` 且 `database.url` 可用；然后执行 PostgreSQL schema migration，再分批导入。
+2. `--apply`：通过 `--project-root` 加载单一 `PlatformSettings`，要求解析后的
+   `database.backend=postgresql` 且 `database.url` 可用；然后执行 PostgreSQL
+   schema migration，再分批导入。`--checkpoint` 应指向仅供本次迁移使用的持久文件；
+   若省略，CLI 使用 `<report>.checkpoint.json`。
 
 若配置非法、后端不是 PostgreSQL、或解析后 URL 缺失，CLI 会安全输出 `MIGRATION_CONFIGURATION_INVALID` 并返回错误码 `2`。它不再直接硬编码读取 `DATABASE_URL`，而是复用 `config/app.json.database.url_env` 与统一配置加载链。
 
@@ -69,10 +79,35 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 成功后更新 `completed_batches`，重复执行使用相同权威身份并校验 payload，
 同 ID 不同内容会失败而不是静默覆盖。
 
-当前导入器要求源 SQLite ledger 精确为 1—11 连续版本，并验证 v11
-`m0_assessment_runs` 列/约束以及五张 M6 policy 表。它不会把 v9/v10 源在导入
-过程中自动升级；先在应用备份和停写边界内运行 SQLite `migrate()` 到 v11，再
+当前导入器要求源 SQLite ledger 精确为 1—13 连续版本，并验证 v13
+`m0_assessment_runs` 列/约束、M4 intent 表以及五张 M6 policy 表。它不会把旧源在导入
+过程中自动升级；先在应用备份和停写边界内运行 SQLite `migrate()` 到 v13，再
 执行 dry-run。
+
+### checkpoint 与跨进程恢复
+
+`--apply` 在首批写入前原子创建 checkpoint，并在每一个已回读校验且已提交的
+PostgreSQL 批次后，用同目录临时文件、`fsync` 和原子替换推进
+`next_batch_index`。进程在任意批次间退出后，使用相同命令和同一 checkpoint
+启动新进程即可恢复：
+
+1. 重新读取并验证完整 SQLite 逻辑快照；
+2. 严格核对 checkpoint checksum、格式版本、SQLite schema version、
+   PostgreSQL migration version、逻辑源快照 checksum、批大小、固定表顺序及
+   批次数；
+3. 核对由已解析目标的 host / port / database / user 等非密码字段计算的、
+   不泄漏 DSN 或凭据的 SHA-256 目标指纹；
+4. 对 checkpoint 标记为已提交的每一批执行目标回读校验；
+5. 只从第一个未完成批次继续写入；完成后把 checkpoint 原子标记为
+   `status=completed`。
+
+checkpoint 只保存摘要、版本和计数，不保存 DSN、源路径、行身份、学生文本或
+payload。checkpoint 被编辑、损坏、来自不同逻辑源、不同目标、不同 schema /
+migration version 或不同批计划时，导入器会在新的目标写入前用稳定错误码拒绝，
+不会猜测恢复。仅轮换同一目标的密码不会改变目标指纹；host、port、database、
+user 或 service 绑定变化会安全拒绝旧 checkpoint。运维人员应先确认目标和既有
+批次，再为新的迁移显式使用新的 checkpoint 文件，不得手工修改旧 checkpoint
+以绕过绑定。
 
 ## `source_file_checksum` 的精确定义
 
@@ -97,6 +132,7 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 - `m0_assessment_runs`
 - `m0_learning_events`
 - `m4_task_plans`
+- `m4_intent_decisions`
 - `m5_state_updates`
 - `m5_class_states`
 - `m5_learner_states`
