@@ -2,10 +2,15 @@
 
 ## 文档边界
 
-本文件描述截至 `2026-07-25` 已实现的 M0 部署面与进程角色。它不把未实测的
+本文件描述截至 `2026-07-27` 已实现的 M0 部署面、M6 私有策略配置与进程角色。它不把未实测的
 PostgreSQL 联调写成“已通过”，也不把开发服务器当成生产 WSGI/ASGI 部署。
 M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M7/M9 的 DeepSeek 网络调用仍是
 空实现；部署持久化和 Web 外层不会自动启用这些算法。
+
+M6 已实现 rules/shadow/active runtime、artifact 校验、奖励/OPE 与私有持久化，
+但默认是 `rules`、零 rollout、零探索。本阶段没有真实教学训练、线上 rollout 或
+active 生产验证；部署文档不把这些实现能力写成 active 启用建议，也不声称学习
+策略优于 baseline。
 
 ## 配置来源与优先级
 
@@ -34,6 +39,13 @@ M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M7/M9 的 DeepSeek 网络调�
 - `COURSE_INSIGHT_DATABASE__SQLITE_PATH`
 - `COURSE_INSIGHT_LOGGING__MODE`
 - `COURSE_INSIGHT_WEB__SECURE_COOKIE`
+- `COURSE_INSIGHT_M6_POLICY__MODE`
+- `COURSE_INSIGHT_M6_POLICY__POLICY_ID`
+- `COURSE_INSIGHT_M6_POLICY__EVALUATION_DATASET_IDENTITY`
+- `COURSE_INSIGHT_M6_POLICY__ROLLOUT_PERCENTAGE`
+- `COURSE_INSIGHT_M6_POLICY__EXPLORATION_RATE`
+- `COURSE_INSIGHT_M6_POLICY__GLOBAL_KILL_SWITCH`
+- `COURSE_INSIGHT_M6_POLICY__RUNTIME_DIRECTORY`
 - `DATABASE_URL`
 - `DJANGO_SECRET_KEY`
 - `DJANGO_ALLOWED_HOSTS`
@@ -50,6 +62,8 @@ M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M7/M9 的 DeepSeek 网络调�
 - `DJANGO_ALLOWED_HOSTS` 非空且不含 `*`
 - `web.secure_cookie=true`
 - `logging.mode=stdout`
+- 除非另有完整、受审计的 M6 治理批准，保持 `m6_policy.mode=rules`、
+  `rollout_percentage=0.0`、`exploration_rate=0.0`
 
 数据库 URL、Django secret、Cookie/Authorization、DeepSeek key、学生原始答案和
 完整 prompt 都属于敏感值。配置错误只应暴露字段名与稳定错误码，不应打印值。
@@ -161,6 +175,18 @@ Web 第一次恢复课程上下文时读取
 任一文件缺失、过大、越界、字段多余或内容不一致都会使 readiness 返回 503，
 错误响应不包含绝对路径。
 
+M6 learned policy 使用独立的私有 manifest/artifact 链，不把字段添加到上述课程
+runtime manifest。M6 Repository 按 `m6_policy.policy_id` 读取 immutable
+`PolicyArtifactManifest`，再把其中的相对 `.json` `artifact_reference` 限制在
+`m6_policy.runtime_directory` 下。默认相对目录 `m6_policy` 会解析为
+`<runtime_dir>/m6_policy`。rules 模式在 manifest/artifact/evaluation I/O 前返回；
+shadow/active 才会尝试加载，失败时回退 rules。
+
+Artifact 只允许 UTF-8 canonical JSON；拒绝 pickle/joblib、绝对路径、`..`、符号
+链接逃逸、重复键、NaN/Infinity、SHA-256 或 23 维 feature/8 动作版本不匹配。
+完整字段和 promotion/rollback 见
+[M6 策略学习运维指南](m6_policy_operations.md)。
+
 ### roles.csv 是完整期望状态
 
 `config/roles.csv` 一行表示一个伪匿名授权关系。`sync_roles` 只在命令运行时读取
@@ -209,6 +235,33 @@ python -m pytest -q
 `template0`、`template1`，或没有以 `_`/`-`/边界分隔的 `test`、`ci`、`tmp`
 一次性标记，
 测试会直接失败，避免对危险库执行 schema destroy / rebuild。
+
+## M6 发布门禁清单
+
+常规生产部署应保持示例的 rules-safe 默认值。任何 shadow/active 变更都必须在
+部署变更单中逐项记录：
+
+- [ ] 当前 core ledger 为 v11；确认 M6 policy 表来自 v10/0010，M0 freeze 来自
+  追加的 v11/0011，未改写已应用 migration；
+- [ ] 使用全新 immutable `policy_id`；manifest 的 state graph/baseline/feature/
+  action/reward/gate version 已治理，artifact 与 manifest 重叠的
+  policy/adapter/feature/action 字段及 lowercase SHA-256 完全一致；
+- [ ] artifact 位于解析后的 runtime root 内，是 23 维、覆盖全部 8 个安全动作、
+  有限数值的 canonical JSON；
+- [ ] shadow 证明公共动作仍为 rules baseline，且 observation 的 logging
+  propensity、模型分数、不确定性、原因和版本身份完整；
+- [ ] reward 只来自真实后续证据；pending/censored/invalid 未伪造成 0；
+- [ ] JSONL 使用运行时 HMAC key 去标识，group/session 不跨数据切分；
+- [ ] OPE 精确匹配 `policy_id`/`dataset_identity`，状态为 `sufficient_data`、
+  `approved=true`，IPS/SNIPS/DM/DR、CI、ESS 和 coverage 完整；
+- [ ] active 的 course/class 配置 allowlist 与 manifest scopes 都精确覆盖本次
+  范围，rollout 非零但受控，探索不超过 0.05，支持度/不确定性阈值有审批依据；
+- [ ] kill switch 和回退 rules 的正常重启步骤已演练，旧 execution/M0 freeze
+  不会被重写；
+- [ ] 明确记录 M9 尚未接入 M6 OPE/approval；当前 M9 公共入口只接 M8
+  `CalibrationRunResult`；
+- [ ] 明确记录本阶段没有真实教学/线上 rollout/live PostgreSQL migration 证据，
+  不宣称 active 已可生产启用或优于 baseline。
 
 ## 从零部署与人工验收（20 步）
 
@@ -302,7 +355,10 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --apply
 ```
 
-预期：core schema version 为 9；报告为 `validated`/`completed`，或在已投递旧事件
+预期：core schema version 为 11；其中 v10/`0010_m6_policy_learning.sql` 新增五张
+M6 私有 policy 表，v11/`0011_m0_policy_freeze.sql` 为
+`m0_assessment_runs` 安全追加七个策略冻结字段；0010 与 SQLite v10 policy
+migration 保持不变。报告为 `validated`/`completed`，或在已投递旧事件
 存在时明确为 `*_with_source_limitations`。失败时检查 `error_code`、migration
 checksum、源 schema version、`partial_envelope_rows` 和每表 digest。不要用
 `Get-FileHash` 比较报告的 `source_file_checksum`，它是逻辑快照 checksum。
@@ -310,6 +366,11 @@ checksum、源 schema version、`partial_envelope_rows` 和每表 digest。不�
 v8 workflow 行升级后新增字段保持 NULL。应用仅在相同 operation 首次重放、
 持久化 TaskPlan 的知识包/课程包锚点匹配且新增字段全部为空时做一次 CAS 接管；
 部分填充或缺少必要精确状态引用的行会 fail closed，运维人员不得直接手工填值。
+
+v10→v11 的历史 submit 行同样只允许窄化 adoption：M6 七字段必须全 NULL，
+checkpoint 只能是 `tutoring_saved|feedback_saved|analytics_saved`，并且已有保存
+状态和 frozen prior-state 标记。部分策略身份、`policy_frozen` 行或 review
+operation 不得手工补齐。
 
 ### 7. 检查并执行 Django migration
 
@@ -356,7 +417,7 @@ python manage.py changepassword pseudonym_teacher_001
 预期：两次提示 `Password changed successfully`。失败时检查 actor 是否由
 `sync_roles --apply` 创建，以及 username 是否等于 actor_id。
 
-### 10. 准备并验证 runtime manifest 与两份 policy
+### 10. 准备并验证 course runtime manifest 与两份状态/教师 policy
 
 将课程初始化产生并由 M0 保存的 `CoursePackage`、`EvidenceIndexRef`、
 `KnowledgeBundle` 快照放入 `runtime/snapshots/`；把真实可解析的
@@ -369,6 +430,17 @@ python -c "import django; django.setup(); from course_insight.modules.m0_platfor
 
 预期：输出配置的 course ID。失败时检查相对引用、快照契约、package/index
 checksum、published/ready 状态，以及两份 policy 的必需字段和数值范围。
+
+另行核对 M6 默认关闭状态：
+
+```shell
+python -c "from pathlib import Path; from course_insight.infrastructure.config import load_platform_settings; s=load_platform_settings(project_root=Path.cwd()); p=s.m6_policy; print(p.mode, p.rollout_percentage, p.exploration_rate, p.global_kill_switch, p.runtime_directory)"
+```
+
+常规部署预期前三项为 `rules 0.0 0.0`，kill switch 为 `False`，最后一项是
+`runtime_dir` 下的 `m6_policy` 绝对解析结果。该绝对路径只用于本机人工核对，不得
+复制到共享日志、manifest 或制品。若本次仅部署 baseline，不要注册或加载 learned
+manifest。
 
 ### 11. 配置日志采集
 
@@ -506,7 +578,7 @@ python manage.py check
 python manage.py run_outbox_worker --once
 ```
 
-预期：SQLite migration 仍可前向到 version 9，应用可读取切换前的 SQLite 基线。
+预期：SQLite migration 仍可前向到 version 11，应用可读取切换前的 SQLite 基线。
 失败时检查备份、文件权限和 schema ledger。仓库没有 PostgreSQL→SQLite 自动
 反向迁移；切到 PostgreSQL 后产生的新数据不会出现在旧 SQLite。只有在明确接受
 该数据水位差异、或另行完成受审计的数据回迁后，才能把回切用于生产。
@@ -528,6 +600,17 @@ Worker 回滚通常是停止独立 Worker 进程。由于 outbox 是 at-least-on
 - 已投递并确认的记录不会回到队列
 - 已 claim 但未 ack 的记录会在 lease 过期后被重新领取
 - 协作式停止会等待正在执行的 append，并继续续租；强制杀进程只应作为最后手段
+
+### M6 policy 回滚
+
+最保守的回滚是设置 `m6_policy.mode=rules`、rollout/exploration 为 0，并设置
+`global_kill_switch=true` 后正常重启。不要删除或覆盖 manifest、artifact、
+evaluation、execution、observation、reward 或 M0 freeze 字段。已提交决定继续
+按原结果重放；旧 execution 与当前 runtime 不匹配时回退 rules。
+
+若回到旧 learned policy，只能选先前验证过的 immutable `policy_id` 和精确
+`evaluation_dataset_identity`，重新从 shadow/gate 开始；仓库没有覆盖同一
+policy 记录或热更新 settings 的安全入口。
 
 ### Migration 回滚
 

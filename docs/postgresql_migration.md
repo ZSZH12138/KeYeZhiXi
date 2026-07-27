@@ -2,11 +2,13 @@
 
 ## 结论先行
 
-截至 `2026-07-25`：
+截至 `2026-07-27`：
 
 - PostgreSQL 仓储、schema migration、SQLite→PostgreSQL 导入器已在代码中实现。
 - 本文档不声称这些能力已经在真实 PostgreSQL 环境中完成联调或验收。
 - 准确表述只能是“代码已落地、可配置、可阅读；真实通过状态须以当次实测为准”。
+- 当前 bundled PostgreSQL/SQLite schema version 是 `11`；M6 五张私有 policy 表
+  仍严格属于 v10，M0 policy freeze 是后续安全追加的 v11。
 
 ## 已实现的组件
 
@@ -15,17 +17,31 @@
   - `pg_advisory_xact_lock`
   - `schema_migrations` 校验
 - `src/course_insight/infrastructure/postgresql/migrations/*.sql`
-  - 当前 bundled schema version 为 `9`
+  - 当前 bundled schema version 为 `11`
   - v8 为 `m0_assessment_runs` 增加同一 `paper_id` 只允许一个
     `status <> completed` review 的部分唯一索引（包含 failed）；相同 operation
     可重放，只有完成当前 review 后才允许新的 review operation
   - v9 为 assessment workflow 增加知识包/课程包/证据索引/policy checksum、
     精确 M5 前态冻结字段与 `state_inputs_frozen` 恢复 checkpoint；lease 续租和
     终态写入继续使用 owner/version/未过期租约 CAS
+  - v10/`0010_m6_policy_learning.sql` 新增
+    `m6_policy_artifacts`、`m6_policy_executions`、
+    `m6_policy_observations`、`m6_policy_rewards` 和
+    `m6_policy_evaluations`；这是 M6 policy 表的 schema 版本
+  - v11/`0011_m0_policy_freeze.sql` 只为 `m0_assessment_runs` 追加
+    `policy_id`、`adapter_id`、`adapter_version`、`artifact_sha256`、
+    `feature_schema_version`、`action_space_version`、`gate_policy_version`
+    七列和完整性约束
+  - PostgreSQL 0010 和 SQLite v10 policy migration 保持不变；M0 freeze 没有
+    回写或重编号 v10
   - v8 旧行的新字段保持 NULL；首次同 operation 重放时，只有旧 identity、持久化
     TaskPlan 锚点和完整的新依赖形状全部一致才会 CAS 接管。部分填充行、
     `state_inputs_frozen` 旧行，以及 state checkpoint 已越过但缺少
     `state_version` 的行不会被猜测修复
+  - v10→v11 历史 submit 行的七个 M6 freeze 字段保持 NULL；只有
+    `tutoring_saved|feedback_saved|analytics_saved`、已有保存状态和 frozen
+    prior-state 标记、七字段全 NULL 时才允许一次 CAS adoption。部分字段、
+    `policy_frozen` 或 review 行不会被猜测修复
 - `src/course_insight/infrastructure/postgresql/sqlite_import.py`
   - 显式、可恢复、批量提交的导入编排
 - `src/course_insight/infrastructure/postgresql/sqlite_import_cli.py`
@@ -52,6 +68,11 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 处在同一个 PostgreSQL 事务中；该批任何一行失败，整个批次回滚。报告会在每批
 成功后更新 `completed_batches`，重复执行使用相同权威身份并校验 payload，
 同 ID 不同内容会失败而不是静默覆盖。
+
+当前导入器要求源 SQLite ledger 精确为 1—11 连续版本，并验证 v11
+`m0_assessment_runs` 列/约束以及五张 M6 policy 表。它不会把 v9/v10 源在导入
+过程中自动升级；先在应用备份和停写边界内运行 SQLite `migrate()` 到 v11，再
+执行 dry-run。
 
 ## `source_file_checksum` 的精确定义
 
@@ -81,12 +102,23 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 - `m5_learner_states`
 - `m6_tutoring_decisions`
 - `m6_session_states`
+- `m6_policy_artifacts`
+- `m6_policy_executions`
+- `m6_policy_observations`
+- `m6_policy_rewards`
+- `m6_policy_evaluations`
 - `m7_student_feedback`
 - `m8_scoring_results`
 - `m8_score_audits`
 - `m8_assessment_papers`
 - `m9_teacher_reviews`
 - `m9_teacher_analytics`
+
+M6 policy 行按各自 canonical payload 与 checksum 验证。observation 的嵌入
+`decision_id` 必须与行主键及父 `m6_tutoring_decisions` 一致；execution 使用
+request first-writer identity；reward 以 execution + reward version 幂等；
+evaluation 以 policy + dataset identity 幂等。v11 M0 七字段随
+`m0_assessment_runs` 一并导入并接受同等 all-or-none/operation/checkpoint 校验。
 
 ## outbox 与源数据限制
 
@@ -116,6 +148,10 @@ PostgreSQL core migration 与 Django migration 分离：
 - `tests/unit/test_postgres_foundation.py`
 - `tests/integration/test_postgres_foundation_live.py`
 - 多个 PostgreSQL repository / import 集成测试
+
+这些测试覆盖 0010/0011 ledger/DDL、fake-PostgreSQL 仓储语义和导入校验；本阶段
+未执行真实 PostgreSQL v10→v11 migration。没有受保护 live 数据库时，不能把
+单元/fake parity 结果写成真实 PostgreSQL migration 已通过。
 
 真实 PostgreSQL 集成测试现在同时依赖环境变量 `COURSE_INSIGHT_TEST_DATABASE_URL`
 和 `COURSE_INSIGHT_TEST_DATABASE_NAME`。任一变量缺失时，destructive live tests

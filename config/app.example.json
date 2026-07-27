@@ -46,5 +46,20 @@
     "max_request_body_bytes": 1048576,
     "login_failure_limit": 5,
     "login_failure_window_seconds": 300
+  },
+  "m6_policy": {
+    "mode": "rules",
+    "policy_id": null,
+    "evaluation_dataset_identity": null,
+    "rollout_percentage": 0.0,
+    "exploration_rate": 0.0,
+    "maximum_exploration_rate": 0.05,
+    "gate_policy_version": "m6-active-gate-v1",
+    "global_kill_switch": false,
+    "allowed_course_ids": [],
+    "allowed_class_ids": [],
+    "minimum_support": 1,
+    "maximum_uncertainty": 0.0,
+    "runtime_directory": "m6_policy"
   }
 }

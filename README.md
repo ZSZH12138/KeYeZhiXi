@@ -10,11 +10,13 @@
 [接口指南](docs/interface_guide.md)。契约 Schema、空示例和来源图位于
 [contracts/](contracts/)。
 
-### 2026-07-25 运维补充
+### 2026-07-27 运维补充
 
 - Web、部署、进程角色与回滚边界见 [deployment.md](docs/deployment.md)；
 - SQLite→PostgreSQL 迁移与源数据限制见 [postgresql_migration.md](docs/postgresql_migration.md)；
-- M0 leased outbox Worker 的投递语义与状态文件见 [outbox_worker.md](docs/outbox_worker.md)。
+- M0 leased outbox Worker 的投递语义与状态文件见 [outbox_worker.md](docs/outbox_worker.md)；
+- M6 策略模式、制品、门禁、回滚和 OPE 边界见
+  [m6_policy_operations.md](docs/m6_policy_operations.md)。
 
 ### 本阶段能力
 
@@ -24,6 +26,8 @@
 - 知识点/先修/误区/题卡/量规/蓝图/Q 矩阵引用校验；
 - 幂等任务规划、固定蓝图组卷、客观规则评分和主观评分编排；
 - 版本化评分审计、教师复核 v2、个体/班级状态和 S0—S5 辅导；
+- M6 私有 `rules`/`shadow`/`active` 运行时、JSON-only LinUCB 制品、奖励/OPE、
+  双后端策略持久化和 M0 恢复冻结；默认仍为零 rollout/零探索的 `rules`；
 - 证据化学生反馈、教师报告与低证据保护；
 - M5 DINA 认知诊断、BKT 知识追踪的契约与空运行；
 - M8 IRT、自适应选题和在线标定契约，M9 模型质量/审核边界；
@@ -108,7 +112,7 @@ python -m course_insight.cli export-schemas
 | [M3](src/course_insight/modules/m3_knowledge_bundle/README.md) | 谢 | 知识、题卡、量规、蓝图、Q 矩阵和标定依据 | M1 `CoursePackage`；教师确认 JSON | `KnowledgeBundle` | M4、M5、M8、M9 |
 | [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务识别、蓝图选择、引用冻结和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
 | [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`CognitiveDiagnosisResult`、`KnowledgeTraceSnapshot`、`LearningModelRun` | M6、M9 |
-| [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 确定性状态机；证据门槛与会话幂等 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7 |
+| [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 状态机；安全候选、版本化私有策略与会话幂等 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult`；私有策略记录不进入公共契约 | M2、M7 |
 | [M7](src/course_insight/modules/m7_local_model/README.md) | 冯 | 量规评分、学生反馈与 DeepSeek API 边界 | M8 scoring task；M6 feedback task；M2 evidence | `RubricScoringResult`、`StudentFeedbackPackage`、`LLMGenerationResult` | M8、M0 |
 | [M8](src/course_insight/modules/m8_assessment_scoring/README.md) | 童 | 组卷、评分、IRT、自适应选题与在线标定 | M4/M3/M5；作答；M7 result；M9 review | `AssessmentPaper`、`ScoringPreparationResult`、`ScoringResultBundle`、`IRTParameterSet`、`CalibrationRunResult`、`AdaptiveSelectionResult` | M0、M2、M5、M6、M9 |
 | [M9](src/course_insight/modules/m9_teacher_analytics/README.md) | 冯 | 教师分析、DeepSeek 叙述、模型质量和审核 | M3/M8/M5；标定 result；复核表单 | `TeacherAnalyticsBundle`、`TeacherReviewDecision`、`LLMGenerationResult`、`ModelQualityReport`、`CalibrationReviewDecision` | M0、M8 |
@@ -380,7 +384,15 @@ class_aggregation_policy: Any)`。
 
 源码：[service.py](src/course_insight/modules/m6_tutoring_fsm/service.py)。构造：
 `M6TutoringControlService(state_machine_definition: Any,
-repository: M6Repository)`。
+repository: M6Repository, policy_runtime: PolicyRuntime|None = None)`。
+
+- `prepare_policy_execution(task_plan: TaskPlan,
+  scoring_result_bundle: ScoringResultBundle,
+  state_update_result: StateUpdateResult,
+  previous_session_state_snapshot: SessionStateSnapshot|None)
+  -> PolicyExecutionRef`：应用层内部 first-writer 冻结入口；返回 M6 私有模型，
+  不进入公共 schema/provenance。直接调用 `decide_next_action(...)` 时仍会惰性执行
+  相同绑定。
 
 - `decide_next_action(task_plan: TaskPlan,
   scoring_result_bundle: ScoringResultBundle,
@@ -388,7 +400,10 @@ repository: M6Repository)`。
   previous_session_state_snapshot: SessionStateSnapshot|None)
   -> TutoringControlResult`：输入来自 M4/M8/M5/本模块；查询给 M2、反馈任务给
   M7。Repository 会恢复最新会话，以 canonical SHA-256 指纹完成重放、重启与
-  并发下的 insert-or-get；错误 `TUTORING_REFERENCE_MISMATCH`、
+  并发下的 insert-or-get。默认 rules 不读取学习制品；shadow 不改变公共动作；
+  active 只有通过安全候选、版本、作用域、支持度、不确定性、OPE、rollout 和
+  kill-switch 门禁才可采用候选。任一失败回退 rules。错误
+  `TUTORING_REFERENCE_MISMATCH`、`TUTORING_POLICY_INTEGRITY_ERROR`、
   `INVALID_STATE_TRANSITION`。
 
 ### M7LocalModelService
@@ -504,8 +519,11 @@ suggestion_rule_engine: Any)`。
 每个拆分操作还冻结知识包、课程包、证据索引和 policy checksum；M5 更新前以
 `state_inputs_frozen` 固定精确 learner/class 前态。长模块调用使用 CAS heartbeat
 续租；M5/M9 对 policy 只读取一次，并对同一份内存字节完成 checksum 校验和严格
-解析，避免校验后文件被替换。v9 升级后的旧 workflow 行只在持久化 TaskPlan 的
-知识包/课程包锚点匹配时执行一次性 CAS 接管，部分迁移状态继续 fail closed。
+解析，避免校验后文件被替换。M6 在 `state_saved` 与 `tutoring_saved` 之间增加
+`policy_frozen`，冻结 `policy_id`、adapter ID/version、artifact SHA-256、
+feature/action/gate version；恢复逐字段精确比较。v9 依赖字段与 v11 M0 freeze
+字段的历史 workflow 接管都受限于全 NULL、合法 checkpoint、已保存状态和 CAS，
+部分迁移状态继续 fail closed。
 失租 owner 的结果会被丢弃，且不能继续推进或写终态。登录限流使用
 actor+IP、actor 与 IP 三个 HMAC 桶，成功登录保留共享 IP 历史。
 
@@ -596,6 +614,11 @@ Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整�
 | `m5_state_updates` | M5 | attempt_id + state_version |
 | `m6_session_states` | M6 | session_id + turn_count |
 | `m6_tutoring_decisions` | M6 | request/input fingerprint、session_id + turn_count |
+| `m6_policy_artifacts` | M6 private | policy_id、artifact SHA-256；immutable manifest |
+| `m6_policy_executions` | M6 private | request fingerprint、policy execution fingerprint |
+| `m6_policy_observations` | M6 private | decision/request/execution identity；logging propensity |
+| `m6_policy_rewards` | M6 private | execution fingerprint + `m6-reward-v1` |
+| `m6_policy_evaluations` | M6 private | policy_id + canonical JSONL dataset identity |
 | `m7_student_feedback` | M7 | feedback_id |
 | `m8_assessment_papers` | M8 | paper_id，并持久化 course/class 执行作用域 |
 | `m8_score_audits` | M8 | audit_id + audit_version；只能追加 |
@@ -646,7 +669,7 @@ M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、Deep
 `contracts/schemas/` 和 `contracts/contract_provenance.json`，并保持生产者—消费者
 边界一致。
 
-## 当前空实现与后续落点
+## 当前能力状态与后续落点
 
 | 模块 | 当前可运行行为 | 真实实现与启用条件 |
 |---|---|---|
@@ -656,10 +679,14 @@ M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、Deep
 | M3 | 只接受教师确认 JSON，不自动抽取知识 | schema validator 后的教师审核工作流 |
 | M4 | 五类确定性规则识别、显式蓝图映射、SHA-256 幂等身份和 SQLite 原子复用，不含意图模型 | 可替换意图 adapter，但保持 `TaskPlan` 和八字段业务身份 |
 | M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
-| M6 | 8 条合法迁移、确定性目标/动作、证据门槛、SHA-256 身份，以及 SQLite 决策重放、会话恢复和并发控制；不做策略学习 | 可在保持公共契约和审计身份不变的前提下，引入经验证的版本化策略适配器 |
+| M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline |
 | M7 | `PlaceholderRubricAdapter` 未配置时抛出 `MODEL_ADAPTER_UNCONFIGURED`；DeepSeek 适配器返回 `empty` | 安全、超时、限流和输出校验完成后在 M7 启用 DeepSeek API |
 | M8 | 固定 anchor/规则评分；IRT 标定与自适应选题为 `empty` | 足量数据下实现 IRT shadow 标定，经 M9 质量/教师审核后启用 |
 | M9 | 阈值统计/规则建议；DeepSeek 叙述 `empty`；质量 `insufficient_data` | 实现模型指标与标定审核；在 M9 启用 DeepSeek 教师叙述 |
+
+M6 私有 OPE/approval 尚未正式接入 M9；当前 M9 公共质量入口只接收 M8
+`CalibrationRunResult`。公共 84 个 schema、`decide_next_action(...)` 四输入签名
+和 contract provenance 均未为 M6 policy learning 改动。
 
 后续实现必须保留 84 个契约、10 个服务和 `AppCoordinator` 的责任边界，
 不得把密钥、日志、真实运行数据或主机路径写入可分发项目文件。

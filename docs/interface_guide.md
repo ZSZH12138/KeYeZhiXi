@@ -11,7 +11,11 @@
 不是新模块。M0 的 Web、配置、日志、Worker 与数据库适配器不是算法占位，
 已经有真实实现。
 
-## 2026-07-25 运维入口
+M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默认关闭在
+`rules`/零 rollout/零探索状态。它们不增加公共契约；本阶段也没有真实教学训练、
+线上 rollout 或 active 生产验证。
+
+## 2026-07-27 运维入口
 
 在保留上述契约边界不变的前提下，当前代码提供以下运维入口：
 
@@ -98,6 +102,36 @@ Repository 恢复最新权威游标；全新会话从 S1/turn 0 开始。相同�
 结果，不重复推进 turn；调用方快照与 Repository 历史冲突时返回
 `TUTORING_REFERENCE_MISMATCH`。
 
+### M6 私有策略边界
+
+公开 `M6TutoringControlService.decide_next_action(...)` 仍精确接收
+`TaskPlan`、`ScoringResultBundle`、`StateUpdateResult` 和可选
+`SessionStateSnapshot` 四个输入，返回 `TutoringControlResult`。新增的
+`prepare_policy_execution(...) -> PolicyExecutionRef` 是应用层/M0 内部入口，
+不进入 84 个 schema 或 contract provenance；直接调用公开方法时会惰性执行相同
+first-writer binding。
+
+| 私有值/接口 | 生产者 | 消费者 | 不变量 |
+|---|---|---|---|
+| `CandidateAction` | `SafetyEnvelope` | rules/LinUCB adapter、最终状态机 | 仅 `m6-action-space-v1` 的 8 条公共状态迁移 |
+| `TutoringPolicyContext` / 23 维 feature | M6 service / `FeatureBuilder` | policy adapter | `m6-features-v1`；仅结构化有限值，不含答案/自由文本/真实身份 |
+| `PolicyArtifactManifest` | 受治理的私有发布流程 | M6 Repository/loader/gate | immutable；canonical JSON artifact、SHA/版本/作用域精确匹配 |
+| `PolicyExecutionRef` | M6 first-writer prepare | M0 freeze、M6 replay | request/input identity 与 policy/adapter/artifact/feature/action/gate version 绑定 |
+| `PolicyObservation` | M6 runtime | M6 Repository、offline dataset | public chosen action、真实 logging propensity、模型分数/不确定性和审计身份 |
+| `PolicyRewardRecord` | M6 reward association | M6 Repository、offline dataset | `m6-reward-v1`；pending/censored/invalid 不伪造 scalar reward |
+| `PolicyEvaluationRecord` | M6 OPE | Repository 与 active gate | IPS/SNIPS/DM/DR、CI、ESS、coverage、slices；insufficient 不得 approved |
+
+`rules` 不做 manifest/artifact/evaluation I/O；`shadow` 的 public/chosen action 与
+propensity 仍属于 rules，模型建议只写 `shadow_action_id`；`active` 也只能从
+`SafetyEnvelope` 候选中选择，并要求 approved manifest、精确 SHA/版本、
+course/class 双重作用域、支持度、不确定性、OPE、rollout 和 kill switch 全部通过。
+任一异常回退 rules。
+
+M6 的 OPE/approval 尚未正式接入 M9。当前公共
+`M9TeacherAnalyticsService.build_model_quality_report(...)` 只接收 M8
+`CalibrationRunResult`；M9 不生产或消费上述 M6 私有值，也不能把 M6 私有
+`approved` 解读成 M9 审核。
+
 `AppCoordinator.run_intelligence_architecture(...) -> ArchitectureScaffoldResult`
 保留为 legacy 智能能力脚手架入口。为保持既有
 `ArchitectureScaffoldResult.is_empty()` 公共语义，M0 的
@@ -131,9 +165,21 @@ learner/class 前态；恢复时按完整作用域与版本/快照 ID 读取，�
 终态。M5/M9 的附加冻结入口对 policy 单次读取，并以同一份字节完成 checksum
 比较和解析；既有公开方法签名保持不变。
 
+submit 在 `state_saved` 后先调用 M6 `prepare_policy_execution(...)`，并在新增
+`policy_frozen` checkpoint 恰好冻结 `policy_id`、`adapter_id`、
+`adapter_version`、`artifact_sha256`、`feature_schema_version`、
+`action_space_version`、`gate_policy_version` 七项。rules artifact 可为 NULL；
+learned binding 必须为 lowercase SHA-256。崩溃在 M6 first-write 与 M0 checkpoint
+之间时，恢复取得同一 binding；`policy_frozen` 或更晚恢复必须七项完全一致。
+
 pre-v9 行只允许一次受限兼容接管：旧不可变 identity 必须一致，新增字段必须全部
 为 NULL，当前知识包/课程包必须与已持久化 TaskPlan 锚点一致。部分填充、冲突或
 缺少必要精确状态引用的行返回稳定冲突并保持原值。
+
+v10→v11 的 policy freeze 兼容同样窄化：只有 submit、七字段全 NULL、
+checkpoint 为 `tutoring_saved|feedback_saved|analytics_saved`、已有保存状态与
+frozen prior-state 标记的旧行才可一次 CAS adoption；`policy_frozen`、review 或
+部分填充行不会被猜测修复。
 
 完整机器可检验映射位于
 [`contracts/contract_provenance.json`](../contracts/contract_provenance.json)，
@@ -146,7 +192,9 @@ pre-v9 行只允许一次受限兼容接管：旧不可变 identity 必须一致
 - PostgreSQL 迁移 CLI、`partial_envelope_rows` 与源数据限制见
   [postgresql_migration.md](postgresql_migration.md)；
 - outbox Worker 的 at-least-once 语义、`app.log` 与审计 JSONL 区别见
-  [outbox_worker.md](outbox_worker.md)。
+  [outbox_worker.md](outbox_worker.md)；
+- M6 配置、artifact、promotion/rollback、kill switch、reward/JSONL/OPE 细节见
+  [m6_policy_operations.md](m6_policy_operations.md)。
 
 ## roles 与 Worker 命令语义
 

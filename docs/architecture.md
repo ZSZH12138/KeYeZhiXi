@@ -25,6 +25,11 @@ M5 不执行 DINA/BKT 参数估计，M8 不执行 IRT 标定或自适应选择�
 DeepSeek。真实 PostgreSQL 适配器已经实现，但若验收环境没有提供受保护的临时
 PostgreSQL，相关 live tests 会明确跳过，不能据此声称已完成真实联调。
 
+M6 已实现私有、版本化的策略运行时和离线评估代码，但默认仍为
+`rules`、零 rollout、零探索。`shadow` 只记录模型建议，`active` 还必须通过
+安全候选和多重门禁；本阶段没有执行真实教学训练、线上 rollout 或生产启用，
+因此不能把“代码可配置”表述成“学习策略已经上线或优于 baseline”。
+
 ## M0—M9 能力归属
 
 ```text
@@ -47,8 +52,11 @@ M1 课程版本与分块 ──► M2 RAG（词法 + pgvector 目标）──┐
 ```
 
 上图表示能力归属和高层协作关系，不是完整的数据契约图或工作流顺序。
-M6 直接产出的 `EvidenceQuery` 和 `FeedbackGenerationTask` 分别进入 M2、M7；
-M9 直接消费 M3/M5/M8 的契约，与 M6 没有直接数据契约边。
+M6 直接产出的 `EvidenceQuery` 和 `FeedbackGenerationTask` 分别进入 M2、M7。
+M6 policy manifest/execution/observation/reward/evaluation 都留在 M6 私有边界；
+M9 直接消费 M3/M5/M8 的公共契约，与 M6 没有直接数据契约边。尤其是当前 M9
+公共 `build_model_quality_report(...)` 只接收 M8 `CalibrationRunResult`，M6
+OPE/approval 尚未正式接入 M9。
 
 | 模块 | 架构责任 | v2 新边界 | 当前行为 |
 |---|---|---|---|
@@ -58,7 +66,7 @@ M9 直接消费 M3/M5/M8 的契约，与 M6 没有直接数据契约边。
 | M3 | 知识包、题库、量规、蓝图、Q 矩阵 | 为 DINA/IRT 提供版本化标定依据 | 保持教师确认 JSON 输入 |
 | M4 | 任务识别、蓝图选择与工作流编排 | 冻结课程包、知识包、蓝图和路由引用 | 确定性路由与持久化幂等 |
 | M5 | 学习观测、认知诊断、知识追踪、状态 | DINA 系契约与 BKT 系契约 | 空运行，不估计参数 |
-| M6 | S0—S5 教学控制 | 消费 M4 任务、M8 评分、M5 状态和可选前版会话 | 确定性策略、证据门槛与 SQLite 幂等会话 |
+| M6 | S0—S5 教学控制 | 消费 M4 任务、M8 评分、M5 状态和可选前版会话；私有 policy learning 不扩张公共契约 | 确定性 baseline；默认 rules；shadow 不改变公共动作；active 门禁失败回退 rules |
 | M7 | 主观评分与学生反馈 | DeepSeek 唯一 LLM 适配器 | 返回空生成结果，零网络调用 |
 | M8 | 测评、评分、IRT、自适应选题与在线标定 | IRT 参数、能力估计、标定与选题契约 | 空参数集与空选题 |
 | M9 | 教师分析、质量门槛与复核 | DeepSeek 教师叙述、`ModelQualityReport` | 空生成，质量为 `insufficient_data` |
@@ -73,17 +81,21 @@ M9 直接消费 M3/M5/M8 的契约，与 M6 没有直接数据契约边。
 | `src/course_insight/infrastructure/` | 配置、SQLite/PostgreSQL、JSON/日志、导入器与 DeepSeek 空适配器 |
 | `contracts/` | 84 份 Schema、1 份中性空示例与 `contract_provenance.json` |
 | `data/raw_course/` | 本地授权原始资料占位；真实资料不进入可分发产物 |
-| `runtime/` | 数据库、索引、快照和日志；不进入可分发产物 |
+| `runtime/` | 数据库、索引、快照、日志和 M6 JSON-only policy artifact；不进入可分发产物 |
 
 ## 运维入口
 
-截至 `2026-07-25`，当前代码中的运维入口包括：
+截至 `2026-07-27`，当前代码中的运维入口包括：
 
 - 根 `manage.py`：统一 Django 命令入口；
 - `python manage.py sync_roles --check|--dry-run|--apply`：同步 `roles.csv`；
 - `python manage.py run_outbox_worker [--once]`：运行 M0 leased outbox Worker；
 - `python scripts/migrate_sqlite_to_postgres.py ...`：显式 SQLite→PostgreSQL 导入；
 - `python -m pytest -q`：统一测试入口。
+
+M6 没有训练、manifest 注册或 promotion 的公共 CLI/管理页。现有配置、artifact
+校验、promotion/rollback/kill-switch 和 OPE 运维边界见
+[m6_policy_operations.md](m6_policy_operations.md)。
 
 真实 PostgreSQL 集成测试必须同时提供
 `COURSE_INSIGHT_TEST_DATABASE_URL` 与 `COURSE_INSIGHT_TEST_DATABASE_NAME`；
@@ -110,6 +122,12 @@ heartbeat 延长 lease；失租 worker 的返回值会被丢弃，且不能再�
 终态。M5/M9 的冻结 policy 入口只读取文件一次，checksum 比较和严格解析消费同一
 份字节，关闭 check-then-use 竞态。
 
+submit 在 `state_saved` 与 `tutoring_saved` 之间增加 `policy_frozen`，只保存
+M6 私有执行身份的七个字段：`policy_id`、`adapter_id`、`adapter_version`、
+`artifact_sha256`、`feature_schema_version`、`action_space_version` 和
+`gate_policy_version`。M6 以既有 request fingerprint first-write binding；
+崩溃恢复重新 prepare 并逐字段精确比较，不把公共领域 payload 放入 M0 metadata。
+
 从 v8 升级的 workflow 行采用窄化的惰性接管：只有旧 replay identity 完全一致、
 全部新增依赖/恢复字段均为空、且持久化 TaskPlan 的知识包 ID 与课程包 ID 匹配当前
 受治理输入时，SQLite/PostgreSQL 才以 CAS 一次性补齐依赖。`state_saved` 之后还
@@ -120,6 +138,17 @@ heartbeat 延长 lease；失租 worker 的返回值会被丢弃，且不能再�
 `CoursePackage`、`EvidenceIndexRef`、`KnowledgeBundle` 和两份 policy。所有引用
 必须是 runtime 内相对路径；加载时会重验契约、checksum、重建的词法索引身份以及
 `StatePolicy`/`TeacherThresholdPolicy` 内容，任一不一致即 fail closed。
+
+M6 learned policy 使用另一条私有制品链：Repository 按 `policy_id` 选择 immutable
+`PolicyArtifactManifest`，其 `artifact_reference` 再相对于
+`m6_policy.runtime_directory` 解析。后者必须位于 `runtime_dir` 之下；只允许
+canonical UTF-8 JSON、lowercase SHA-256、有限 23 维 LinUCB 参数，以及完整的
+`m6-features-v1`/`m6-action-space-v1` 版本匹配。它不是 course runtime manifest
+的一部分。
+
+SQLite/PostgreSQL 当前 bundled schema 为 v11。M6 五张私有 policy 表属于原样
+保留的 v10/`0010_m6_policy_learning.sql`；M0 七字段 freeze 安全追加在
+v11/`0011_m0_policy_freeze.sql`，没有改写 v10。
 
 ## 日志与投递
 
@@ -137,6 +166,12 @@ heartbeat 延长 lease；失租 worker 的返回值会被丢弃，且不能再�
 - DeepSeek 的密钥只能在运行时由 `DEEPSEEK_API_KEY` 提供，契约、审计和日志不存密钥或完整提示词。
 - DINA/BKT/IRT 和在线标定的每次运行都必须绑定数据水位、模型/参数版本与质量报告。
 - 新标定参数先以 shadow 版本产生，经 M9 质量门槛与教师审核后才能被 M8 启用。
+- M6 `m6-features-v1` 与 `m6-action-space-v1` 只允许在确定性
+  `SafetyEnvelope` 候选内排序；rules/shadow/fallback 的公共 logging policy 为
+  one-hot，学习探索上限为 0.05 且补救场景禁用。
+- M6 active 必须同时满足 approved manifest、精确版本/SHA、作用域、至少两个
+  候选、支持度、不确定性、离线评估、rollout 和 kill switch 门禁；任一缺失回退
+  rules。
 - 当前智能空实现不读取 DeepSeek 密钥、不访问模型网络、不连接 pgvector，也不
   伪造 DINA/BKT/IRT 或模型质量指标；这不否定 M0 PostgreSQL 平台适配器的存在。
 - 量规、试卷、审计和结果总分必须守恒；教师复核追加新版本，不覆盖旧版本。
