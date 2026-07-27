@@ -1091,6 +1091,38 @@ def test_policy_records_round_trip_across_repository_restart(
     )
 
 
+def test_frozen_active_runtime_snapshot_round_trips_across_restart(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+    execution = PolicyExecutionRef(
+        request_fingerprint="f" * 64,
+        input_fingerprint="1" * 64,
+        mode="active",
+        policy_id="policy_linucb_v1",
+        adapter_id="linucb",
+        adapter_version="1",
+        artifact_sha256="c" * 64,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-actions-v1",
+        gate_policy_version="m6-gate-v1",
+        exploration_rate=0.01,
+        active_gate_allowed=False,
+        active_gate_reasons=("support_too_low",),
+    )
+
+    assert repository.commit_policy_execution(execution) == execution
+
+    restarted = _repository(database_path)
+    assert (
+        restarted.get_policy_execution_by_request(
+            execution.request_fingerprint
+        )
+        == execution
+    )
+
+
 def test_policy_execution_concurrency_keeps_request_first_writer(
     tmp_path: Path,
 ) -> None:

@@ -213,7 +213,7 @@ payload。
 
 ## 验证与未验证边界
 
-最终回归为 900 passed、13 个需要外部 PostgreSQL 的测试 skipped；coverage 总计
+最终回归为 905 passed、13 个需要外部 PostgreSQL 的测试 skipped；coverage 总计
 86%。这些结果验证了本地/假 PostgreSQL 语义与安全回归，不等于真实 PostgreSQL
 live migration 已通过。本阶段没有训练、批准、部署或 rollout 学习策略，没有真实
 教学数据结论，也不声称学习策略优于 baseline 或 active 已可生产启用。

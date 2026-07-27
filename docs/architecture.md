@@ -127,6 +127,9 @@ M6 私有执行身份的七个字段：`policy_id`、`adapter_id`、`adapter_ver
 `artifact_sha256`、`feature_schema_version`、`action_space_version` 和
 `gate_policy_version`。M6 以既有 request fingerprint first-write binding；
 崩溃恢复重新 prepare 并逐字段精确比较，不把公共领域 payload 放入 M0 metadata。
+M6 自己的私有 execution JSON 另存当次探索率和 active gate 结论，使尚未提交决定
+的 learned binding 能在当前 mode/policy 改变后重新解析原 immutable artifact；
+该恢复快照不扩展 M0 七字段或公共契约，全局 kill switch 仍可强制 baseline。
 
 从 v8 升级的 workflow 行采用窄化的惰性接管：只有旧 replay identity 完全一致、
 全部新增依赖/恢复字段均为空、且持久化 TaskPlan 的知识包 ID 与课程包 ID 匹配当前

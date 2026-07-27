@@ -287,6 +287,9 @@ class PolicyExecutionRef(_CanonicalIdentity):
     action_space_version: str
     gate_policy_version: str
     input_fingerprint: str | None = None
+    exploration_rate: float | None = None
+    active_gate_allowed: bool | None = None
+    active_gate_reasons: object = None
 
     def __post_init__(self) -> None:
         _require_nonblank(self.request_fingerprint, "request_fingerprint")
@@ -304,6 +307,36 @@ class PolicyExecutionRef(_CanonicalIdentity):
             _require_sha256(self.artifact_sha256, "artifact_sha256")
         if self.input_fingerprint is not None:
             _require_sha256(self.input_fingerprint, "input_fingerprint")
+        if self.exploration_rate is not None:
+            _require_probability(self.exploration_rate, "exploration_rate")
+            object.__setattr__(
+                self,
+                "exploration_rate",
+                float(self.exploration_rate),
+            )
+        reasons = _normalize_string_sequence(
+            () if self.active_gate_reasons is None else self.active_gate_reasons,
+            "active_gate_reasons",
+        )
+        if self.active_gate_allowed is not None:
+            _require_bool(self.active_gate_allowed, "active_gate_allowed")
+            if self.mode != "active":
+                raise ValueError(
+                    "active gate snapshot requires active execution mode"
+                )
+            if self.active_gate_allowed and reasons:
+                raise ValueError(
+                    "allowed active gate snapshot must not have reasons"
+                )
+            if not self.active_gate_allowed and not reasons:
+                raise ValueError(
+                    "rejected active gate snapshot requires reasons"
+                )
+        elif reasons:
+            raise ValueError(
+                "active gate reasons require an active gate snapshot"
+            )
+        object.__setattr__(self, "active_gate_reasons", reasons)
 
     @property
     def policy_execution_fingerprint(self) -> str:
@@ -340,6 +373,15 @@ class PolicyExecutionRef(_CanonicalIdentity):
         }
         if self.input_fingerprint is not None:
             payload["input_fingerprint"] = self.input_fingerprint
+        if self.exploration_rate is not None:
+            payload["exploration_rate"] = self.exploration_rate
+        if self.active_gate_allowed is not None:
+            payload.update(
+                {
+                    "active_gate_allowed": self.active_gate_allowed,
+                    "active_gate_reasons": list(self.active_gate_reasons),
+                }
+            )
         return payload
 
 

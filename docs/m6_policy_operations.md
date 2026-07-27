@@ -183,7 +183,10 @@ rollout 证据时，仍不能宣称 active 已可生产启用或策略优于 bas
 回滚到旧学习版本时，只能选择先前已验证的 immutable `policy_id` 和与之精确匹配
 的 `evaluation_dataset_identity`，重新走 shadow 和 gate；不能覆盖同一 policy
 记录。已经提交的决定按原结果重放，M6 first-writer execution 和 M0 frozen identity
-不会被回滚配置重写。运行时制品与已冻结 execution 不匹配时会回退 rules。
+不会被回滚配置重写。尚未提交决定的 learned execution 会按其冻结的 policy/
+adapter/artifact 身份重新解析 immutable 制品，并复用 first-writer 保存的探索率和
+active gate 结论；当前配置切换到 rules 或其他 policy 不会替换它。精确制品缺失、
+损坏或校验不一致时仍回退 rules；当前 `global_kill_switch=true` 始终具有更高优先级。
 
 ## M0 七字段冻结与恢复
 
@@ -210,6 +213,11 @@ lowercase SHA-256。若 M6 first-writer 已提交但 M0 尚未保存 checkpoint�
 标记时允许一次 CAS adoption。部分字段、`policy_frozen` 行或 review operation
 不得猜测修复。
 
+M0 仍恰好只保存上述七个身份字段。为保证 M6 在“execution 已 first-write、决定尚未
+提交”时可确定性恢复，M6 私有 execution JSON 还保存当次 `exploration_rate` 和
+active gate 的允许结论/原因；这些字段不进入 M0、公共契约或 execution fingerprint
+的既定七项 preimage。
+
 ## Reward、JSONL 与 OPE
 
 `m6-reward-v1` 只对 `observed` outcome 计算：
@@ -220,7 +228,9 @@ transfer_success - 0.05 * hint_count - 0.10 * loop_count
 
 没有后续证据时必须使用 `pending` 或 `censored`，不能伪造零奖励；带 safety flag
 的记录为 `invalid`，不能进入普通 scalar-reward evaluation。outcome event ID 和
-watermark 只接受无路径、无邮箱、非 secret-like 的结构化审计标识。
+watermark 只接受无路径、无邮箱、非 secret-like 的结构化审计标识。普通
+`observed` 记录即使没有额外审计元数据，也必须保留 `transfer_success`、
+`additional_hint_count` 和 `loop_count` 三个原始公式分量。
 
 Canonical JSONL 的字段 allowlist 为：
 

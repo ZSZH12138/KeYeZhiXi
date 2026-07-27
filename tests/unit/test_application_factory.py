@@ -37,8 +37,13 @@ from course_insight.infrastructure.config import (
 )
 from course_insight.infrastructure.config.models import M6PolicySettings
 from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    CandidateAction,
     PolicyArtifactManifest,
     PolicyEvaluationRecord,
+    TutoringPolicyContext,
+)
+from course_insight.modules.m6_tutoring_fsm.decision_policy import (
+    DecisionSignals,
 )
 from course_insight.infrastructure.postgresql.m0_repository import (
     PostgresM0Repository,
@@ -282,6 +287,9 @@ def test_factory_rules_mode_never_reads_policy_repository_or_artifacts(
     )
 
     assert container.m6_service._policy_runtime.mode == "rules"  # noqa: SLF001
+    assert (  # noqa: SLF001
+        container.m6_service._policy_runtime._execution_loader is not None
+    )
     assert repository.manifest_reads == 0
     assert repository.evaluation_reads == 0
 
@@ -314,7 +322,11 @@ def test_factory_constructs_real_active_linucb_runtime_from_exact_records(
         "alpha": 0.1,
         "actions": {
             action_id: {
-                "theta": [0.0] * dimension,
+                "theta": (
+                    [0.0, 1.0, *([0.0] * (dimension - 2))]
+                    if action_id == "m6.transition.s1_to_s2.v1"
+                    else [0.0] * dimension
+                ),
                 "inverse_covariance": identity,
             }
             for action_id in action_ids
@@ -391,6 +403,70 @@ def test_factory_constructs_real_active_linucb_runtime_from_exact_records(
     assert runtime.mode == "active"
     assert runtime._learned_adapter.__class__.__name__ == "LinUCBPolicyAdapter"  # noqa: SLF001
     assert repository.manifest_reads == 1
+    assert repository.evaluation_reads == 1
+
+    context = TutoringPolicyContext(
+        request_fingerprint="a" * 64,
+        current_state="S1",
+        task_type="practice",
+        turn_count=1,
+        score_ratio=0.5,
+        target_concept_count=1,
+        signals=DecisionSignals(
+            needs_teacher_review=False,
+            has_diagnosed_misconception=False,
+            has_active_misconception=False,
+            has_prerequisite_gap=False,
+            has_new_evidence=True,
+            minimum_recent_correction_rate=0.9,
+            minimum_mastery_confidence=0.8,
+            maximum_hint_dependency=0.0,
+        ),
+        learner_evidence_count=1,
+        course_id="course-1",
+        class_id="class-1",
+    )
+    candidates = (
+        CandidateAction(
+            candidate_id="m6.transition.s1_to_s3.v1",
+            next_state="S3",
+            action_type="guided_question",
+            prompt_template_id="m6.s3.guided_question.v1",
+            exploration_allowed=True,
+        ),
+        CandidateAction(
+            candidate_id="m6.transition.s1_to_s2.v1",
+            next_state="S2",
+            action_type="minimal_hint",
+            prompt_template_id="m6.s2.minimal_hint.v1",
+            exploration_allowed=True,
+        ),
+    )
+    execution = runtime.prepare_execution(
+        context,
+        candidates,
+        input_fingerprint="1" * 64,
+    )
+    rules_container = build_application(
+        _settings(
+            tmp_path,
+            m6_policy=M6PolicySettings(
+                mode="rules",
+                runtime_directory=policy_root,
+            ),
+        ),
+        repositories=RepositoryOverrides(m6=repository),
+    )
+    recovered = rules_container.m6_service._policy_runtime.select(  # noqa: SLF001
+        execution,
+        context,
+        candidates,
+        created_at="2026-07-27T02:00:00+00:00",
+    )
+
+    assert execution.active_gate_allowed is True
+    assert recovered.public_candidate.next_state == "S2"
+    assert repository.manifest_reads == 2
     assert repository.evaluation_reads == 1
 
 

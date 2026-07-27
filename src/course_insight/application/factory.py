@@ -98,6 +98,7 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
     EVALUATION_METRICS,
     PolicyArtifactManifest,
     PolicyEvaluationRecord,
+    PolicyExecutionRef,
 )
 from course_insight.modules.m6_tutoring_fsm.safety_envelope import SafetyEnvelope
 from course_insight.modules.m6_tutoring_fsm.service import (
@@ -558,16 +559,21 @@ def _build_m6_policy_runtime(
     repository: object,
 ) -> PolicyRuntime:
     configured = settings.m6_policy
+    execution_loader = _frozen_execution_loader(settings, repository)
     if configured.mode == "rules":
         return PolicyRuntime(
             mode="rules",
+            execution_loader=execution_loader,
             gate_policy_version=configured.gate_policy_version,
+            emergency_kill_switch=configured.global_kill_switch,
         )
     manifest = _load_policy_manifest(repository, configured.policy_id)
     if manifest is None:
         return PolicyRuntime(
             mode=configured.mode,
+            execution_loader=execution_loader,
             gate_policy_version=configured.gate_policy_version,
+            emergency_kill_switch=configured.global_kill_switch,
         )
     try:
         loaded = load_policy_artifact_for_manifest(
@@ -582,7 +588,9 @@ def _build_m6_policy_runtime(
     except (OSError, TypeError, ValueError):
         return PolicyRuntime(
             mode=configured.mode,
+            execution_loader=execution_loader,
             gate_policy_version=configured.gate_policy_version,
+            emergency_kill_switch=configured.global_kill_switch,
         )
     evaluation = _load_policy_evaluation(
         repository,
@@ -614,10 +622,50 @@ def _build_m6_policy_runtime(
         mode=configured.mode,
         learned_adapter=adapter,
         artifact_loader=_fixed_artifact_loader(loaded),
+        execution_loader=execution_loader,
         active_gate=gate,
         gate_inputs=gate_inputs,
         gate_policy_version=configured.gate_policy_version,
+        emergency_kill_switch=configured.global_kill_switch,
     )
+
+
+def _frozen_execution_loader(
+    settings: PlatformSettings,
+    repository: object,
+) -> Callable[
+    [PolicyExecutionRef, tuple[str, ...]],
+    tuple[LoadedPolicyArtifact, LinUCBPolicyAdapter],
+]:
+    configured = settings.m6_policy
+
+    def load(
+        execution: PolicyExecutionRef,
+        candidate_ids: tuple[str, ...],
+    ) -> tuple[LoadedPolicyArtifact, LinUCBPolicyAdapter]:
+        if not candidate_ids:
+            raise ValueError("frozen execution requires safe candidates")
+        if execution.exploration_rate is None:
+            raise ValueError(
+                "frozen learned execution has no exploration rate"
+            )
+        manifest = _load_policy_manifest(repository, execution.policy_id)
+        if manifest is None:
+            raise ValueError("frozen policy manifest is unavailable")
+        loaded = load_policy_artifact_for_manifest(
+            configured.runtime_directory,
+            manifest,
+            expected_action_ids=SafetyEnvelope.all_candidate_ids(),
+        )
+        return (
+            loaded,
+            LinUCBPolicyAdapter(
+                loaded,
+                exploration_rate=execution.exploration_rate,
+            ),
+        )
+
+    return load
 
 
 def _load_policy_manifest(

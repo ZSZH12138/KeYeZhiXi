@@ -30,6 +30,10 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
 
 
 ArtifactLoader = Callable[[tuple[str, ...]], LoadedPolicyArtifact]
+ExecutionLoader = Callable[
+    [PolicyExecutionRef, tuple[str, ...]],
+    tuple[LoadedPolicyArtifact, PolicyAdapter],
+]
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,9 +64,11 @@ class PolicyRuntime:
         mode: str = "rules",
         learned_adapter: PolicyAdapter | None = None,
         artifact_loader: ArtifactLoader | None = None,
+        execution_loader: ExecutionLoader | None = None,
         active_gate: ActivePolicyGate | None = None,
         gate_inputs: PolicyRuntimeGateInputs | None = None,
         gate_policy_version: str = "m6-active-gate-v1",
+        emergency_kill_switch: bool = False,
     ) -> None:
         if mode not in POLICY_MODES:
             raise ValueError("policy runtime mode is not supported")
@@ -71,11 +77,15 @@ class PolicyRuntime:
         self._feature_builder = FeatureBuilder()
         self._learned_adapter = learned_adapter
         self._artifact_loader = artifact_loader
+        self._execution_loader = execution_loader
         self._active_gate = active_gate
         self._gate_inputs = gate_inputs
         if not isinstance(gate_policy_version, str) or not gate_policy_version.strip():
             raise ValueError("gate_policy_version must not be blank")
+        if type(emergency_kill_switch) is not bool:
+            raise ValueError("emergency_kill_switch must be a bool")
         self._gate_policy_version = gate_policy_version
+        self._emergency_kill_switch = emergency_kill_switch
 
     @property
     def mode(self) -> str:
@@ -107,6 +117,35 @@ class PolicyRuntime:
             self._feature_builder.build(context)
             loaded, adapter = self._load_learned(ordered)
             manifest = loaded.manifest
+            exploration_rate = getattr(adapter, "exploration_rate", None)
+            if exploration_rate is not None:
+                if (
+                    type(exploration_rate) not in {int, float}
+                    or not 0.0 <= exploration_rate <= 1.0
+                ):
+                    raise ValueError(
+                        "learned adapter exploration rate is invalid"
+                    )
+                exploration_rate = float(exploration_rate)
+            gate_allowed: bool | None = None
+            gate_reasons: tuple[str, ...] = ()
+            if self._mode == "active":
+                preview = adapter.select(context, ordered)
+                if (
+                    not isinstance(preview, PolicyDecision)
+                    or preview.prediction is None
+                ):
+                    raise ValueError(
+                        "active policy preview has no uncertainty"
+                    )
+                gate = self._evaluate_active_gate(
+                    loaded=loaded,
+                    context=context,
+                    candidate_count=len(ordered),
+                    uncertainty=preview.prediction.uncertainty,
+                )
+                gate_allowed = gate.allowed
+                gate_reasons = tuple(gate.reasons)
             return PolicyExecutionRef(
                 request_fingerprint=context.request_fingerprint,
                 mode=self._mode,
@@ -118,6 +157,9 @@ class PolicyRuntime:
                 action_space_version=manifest.action_space_version,
                 gate_policy_version=manifest.gate_policy_version,
                 input_fingerprint=input_fingerprint,
+                exploration_rate=exploration_rate,
+                active_gate_allowed=gate_allowed,
+                active_gate_reasons=gate_reasons,
             )
         except Exception:
             return rules_policy_execution(
@@ -151,11 +193,22 @@ class PolicyRuntime:
                 decision_source="rules",
                 created_at=created_at,
             )
+        if execution.mode == "active" and self._emergency_kill_switch:
+            return self._fallback(
+                execution,
+                context,
+                ordered,
+                baseline,
+                "global_kill_switch_enabled",
+                created_at=created_at,
+            )
 
         try:
             self._feature_builder.build(context)
-            loaded, adapter = self._load_learned(ordered)
-            _assert_execution_matches_loaded(execution, loaded, adapter)
+            loaded, adapter = self._load_learned(
+                ordered,
+                execution=execution,
+            )
             learned = _validated_learned_decision(
                 adapter.select(context, ordered),
                 execution,
@@ -174,13 +227,19 @@ class PolicyRuntime:
                     decision_source="shadow_baseline",
                     created_at=created_at,
                 )
-            gate = self._evaluate_active_gate(
-                loaded=loaded,
-                context=context,
-                candidate_count=len(ordered),
-                uncertainty=learned.prediction.uncertainty,
-            )
-            if not gate.allowed:
+            if execution.active_gate_allowed is None:
+                gate = self._evaluate_active_gate(
+                    loaded=loaded,
+                    context=context,
+                    candidate_count=len(ordered),
+                    uncertainty=learned.prediction.uncertainty,
+                )
+                gate_allowed = gate.allowed
+                gate_reasons = tuple(gate.reasons)
+            else:
+                gate_allowed = execution.active_gate_allowed
+                gate_reasons = tuple(execution.active_gate_reasons)
+            if not gate_allowed:
                 return self._fallback(
                     execution,
                     context,
@@ -189,7 +248,7 @@ class PolicyRuntime:
                     "active_gate_rejected",
                     created_at=created_at,
                     model_decision=learned,
-                    reason_codes=tuple(gate.reasons),
+                    reason_codes=gate_reasons,
                 )
             return _selection(
                 execution=execution,
@@ -215,20 +274,27 @@ class PolicyRuntime:
     def _load_learned(
         self,
         candidates: tuple[CandidateAction, ...],
+        *,
+        execution: PolicyExecutionRef | None = None,
     ) -> tuple[LoadedPolicyArtifact, PolicyAdapter]:
-        if self._artifact_loader is None or self._learned_adapter is None:
-            raise ValueError("learned runtime components are unavailable")
         candidate_ids = tuple(candidate.candidate_id for candidate in candidates)
-        loaded = self._artifact_loader(candidate_ids)
-        if not isinstance(loaded, LoadedPolicyArtifact):
-            raise ValueError("artifact loader returned an invalid value")
-        adapter = self._learned_adapter
-        if (
-            adapter.adapter_id != loaded.manifest.adapter_id
-            or adapter.adapter_version != loaded.manifest.adapter_version
-            or getattr(adapter, "policy_id", None) != loaded.manifest.policy_id
-        ):
-            raise ValueError("policy adapter does not match its manifest")
+        if self._artifact_loader is not None and self._learned_adapter is not None:
+            loaded = self._artifact_loader(candidate_ids)
+            adapter = self._learned_adapter
+            _validate_loaded_components(loaded, adapter)
+            if execution is None:
+                return loaded, adapter
+            try:
+                _assert_execution_matches_loaded(execution, loaded, adapter)
+            except ValueError:
+                pass
+            else:
+                return loaded, adapter
+        if execution is None or self._execution_loader is None:
+            raise ValueError("learned runtime components are unavailable")
+        loaded, adapter = self._execution_loader(execution, candidate_ids)
+        _validate_loaded_components(loaded, adapter)
+        _assert_execution_matches_loaded(execution, loaded, adapter)
         return loaded, adapter
 
     def _evaluate_active_gate(
@@ -290,6 +356,20 @@ class PolicyRuntime:
             reason_codes=(reason, *reason_codes),
             created_at=created_at,
         )
+
+
+def _validate_loaded_components(
+    loaded: LoadedPolicyArtifact,
+    adapter: PolicyAdapter,
+) -> None:
+    if not isinstance(loaded, LoadedPolicyArtifact):
+        raise ValueError("artifact loader returned an invalid value")
+    if (
+        adapter.adapter_id != loaded.manifest.adapter_id
+        or adapter.adapter_version != loaded.manifest.adapter_version
+        or getattr(adapter, "policy_id", None) != loaded.manifest.policy_id
+    ):
+        raise ValueError("policy adapter does not match its manifest")
 
 
 def rules_policy_execution(
@@ -381,6 +461,11 @@ def _assert_execution_matches_loaded(
         or execution.feature_schema_version != manifest.feature_schema_version
         or execution.action_space_version != manifest.action_space_version
         or execution.gate_policy_version != manifest.gate_policy_version
+        or (
+            execution.exploration_rate is not None
+            and execution.exploration_rate
+            != getattr(adapter, "exploration_rate", None)
+        )
     ):
         raise ValueError("prepared policy execution no longer matches runtime")
 

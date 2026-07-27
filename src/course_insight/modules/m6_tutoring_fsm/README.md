@@ -119,6 +119,11 @@ insert-or-get/约束。相同请求、重启和并发只产生一个 first-write
 权威决定；同 ID 不同 payload、陈旧游标或 observation/decision 身份不一致会 fail
 closed。
 
+learned execution 还在 M6 私有 JSON 中保存本次探索率和 active gate 结论。恢复时
+按 execution 的 policy/adapter/artifact 身份重新解析 immutable 制品，不让当前
+mode、policy 或探索率替换 first-writer 绑定；当前全局 kill switch 仍可立即强制
+baseline。M0 不复制这些运行快照，仍只保存下述七个身份字段。
+
 独立 `save_session_state()` 的首条必须是 turn 0，后续必须连续扩展动作历史并遵守
 合法状态迁移。空 Repository 仍可在 `commit_decision()` 同一事务保存调用方提供且
 已校验的上一快照，再恰好推进一轮。
@@ -172,7 +177,8 @@ transfer_success - 0.05 * hint_count - 0.10 * loop_count
 ```
 
 无后续证据时保留 `pending`/`censored`；safety-invalid 记录没有 ordinary scalar
-reward，不能进入普通评估。JSONL 使用显式字段 allowlist，并以至少 32 bytes
+reward，不能进入普通评估。普通 observed reward 始终保留 transfer、hint 和 loop
+三个原始公式分量。JSONL 使用显式字段 allowlist，并以至少 32 bytes
 运行时 key 对 decision/session/group 做 HMAC-SHA256；不导出原始身份或 shadow
 action。group/session 不跨 train/evaluation，evaluation 必须位于严格更晚的完整
 group 时间边界。

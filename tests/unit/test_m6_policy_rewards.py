@@ -74,6 +74,17 @@ def test_reward_v1_uses_the_hand_checked_transfer_hint_and_loop_formula() -> Non
     assert reward.reward == pytest.approx(0.45)
 
 
+def test_plain_observed_reward_preserves_its_raw_formula_components() -> None:
+    """Basic observed outcomes remain independently auditable."""
+
+    reward = reward_from_outcome(_outcome())
+
+    assert reward.transfer_success == 0.8
+    assert reward.additional_hint_count == 3
+    assert reward.loop_count == 2
+    assert reward.has_raw_outcome is True
+
+
 def test_reward_record_preserves_every_evidenced_raw_outcome_component() -> None:
     """Catch reward persistence keeping only a scalar and losing audit evidence."""
 

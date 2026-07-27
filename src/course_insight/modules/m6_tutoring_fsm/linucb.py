@@ -156,6 +156,12 @@ class LinUCBPolicyAdapter:
         ):
             raise ValueError("artifact dimension does not match feature schema")
 
+    @property
+    def exploration_rate(self) -> float:
+        """Return the immutable exploration rate bound to this adapter."""
+
+        return self._exploration_rate
+
     def select(
         self,
         context: TutoringPolicyContext,

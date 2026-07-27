@@ -126,8 +126,14 @@ class _SelectingAdapter:
     adapter_version = "v1"
     policy_id = "learned-policy-v1"
 
-    def __init__(self, selected_index: int = 1) -> None:
+    def __init__(
+        self,
+        selected_index: int = 1,
+        *,
+        exploration_rate: float | None = None,
+    ) -> None:
         self._selected_index = selected_index
+        self.exploration_rate = exploration_rate
 
     def select(
         self,
@@ -426,6 +432,117 @@ def test_active_adopts_only_a_gate_approved_safe_candidate() -> None:
         candidate.candidate_id for candidate in candidates
     }
     assert selection.policy_decision.fallback_reason is None
+
+
+def test_frozen_active_execution_survives_current_runtime_policy_change() -> None:
+    """Recovery resolves the frozen policy instead of using current mode."""
+
+    prepared_runtime = _runtime(mode="active")
+    context = _context()
+    candidates = _candidates()
+    execution = prepared_runtime.prepare_execution(
+        context,
+        candidates,
+        input_fingerprint=INPUT_FINGERPRINT,
+    )
+    recovered_runtime = PolicyRuntime(
+        mode="rules",
+        execution_loader=lambda frozen, candidate_ids: (
+            _loaded_artifact(candidate_ids),
+            _SelectingAdapter(),
+        ),
+    )
+
+    selection = recovered_runtime.select(
+        execution,
+        context,
+        candidates,
+        created_at=CREATED_AT,
+    )
+
+    assert execution.mode == "active"
+    assert execution.active_gate_allowed is True
+    assert selection.public_candidate is candidates[1]
+    assert selection.policy_decision.fallback_reason is None
+
+
+def test_current_kill_switch_overrides_a_frozen_active_approval() -> None:
+    """Emergency rollback remains stronger than recovery reproducibility."""
+
+    prepared_runtime = _runtime(mode="active")
+    context = _context()
+    candidates = _candidates()
+    execution = prepared_runtime.prepare_execution(
+        context,
+        candidates,
+        input_fingerprint=INPUT_FINGERPRINT,
+    )
+    recovered_runtime = PolicyRuntime(
+        mode="rules",
+        execution_loader=lambda frozen, candidate_ids: (
+            _loaded_artifact(candidate_ids),
+            _SelectingAdapter(),
+        ),
+        emergency_kill_switch=True,
+    )
+
+    selection = recovered_runtime.select(
+        execution,
+        context,
+        candidates,
+        created_at=CREATED_AT,
+    )
+
+    assert selection.public_candidate is candidates[0]
+    assert selection.policy_decision.fallback_reason == (
+        "global_kill_switch_enabled"
+    )
+
+
+def test_frozen_exploration_rate_rejects_same_policy_current_adapter() -> None:
+    """A same-ID adapter with changed exploration cannot replace the binding."""
+
+    context = _context()
+    candidates = _candidates()
+    prepared_runtime = _runtime(
+        mode="active",
+        adapter=_SelectingAdapter(
+            selected_index=1,
+            exploration_rate=0.01,
+        ),
+    )
+    execution = prepared_runtime.prepare_execution(
+        context,
+        candidates,
+        input_fingerprint=INPUT_FINGERPRINT,
+    )
+    current_runtime = PolicyRuntime(
+        mode="active",
+        learned_adapter=_SelectingAdapter(
+            selected_index=0,
+            exploration_rate=0.02,
+        ),
+        artifact_loader=_loaded_artifact,
+        execution_loader=lambda frozen, candidate_ids: (
+            _loaded_artifact(candidate_ids),
+            _SelectingAdapter(
+                selected_index=1,
+                exploration_rate=frozen.exploration_rate,
+            ),
+        ),
+        active_gate=_gate(),
+        gate_inputs=_gate_inputs(),
+    )
+
+    selection = current_runtime.select(
+        execution,
+        context,
+        candidates,
+        created_at=CREATED_AT,
+    )
+
+    assert execution.exploration_rate == 0.01
+    assert selection.public_candidate is candidates[1]
 
 
 @pytest.mark.parametrize("mode", ["shadow", "active"])

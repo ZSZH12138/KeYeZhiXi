@@ -606,7 +606,9 @@ Worker 回滚通常是停止独立 Worker 进程。由于 outbox 是 at-least-on
 最保守的回滚是设置 `m6_policy.mode=rules`、rollout/exploration 为 0，并设置
 `global_kill_switch=true` 后正常重启。不要删除或覆盖 manifest、artifact、
 evaluation、execution、observation、reward 或 M0 freeze 字段。已提交决定继续
-按原结果重放；旧 execution 与当前 runtime 不匹配时回退 rules。
+按原结果重放；尚未提交决定的旧 learned execution 会按冻结身份、探索率和 gate
+结论重新解析原 immutable artifact，不能被新的 mode/policy 替换。精确制品缺失或
+校验不一致时回退 rules；`global_kill_switch=true` 始终覆盖冻结批准。
 
 若回到旧 learned policy，只能选先前验证过的 immutable `policy_id` 和精确
 `evaluation_dataset_identity`，重新从 shadow/gate 开始；仓库没有覆盖同一
