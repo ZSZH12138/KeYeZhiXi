@@ -10,6 +10,7 @@ from typing import Any
 from course_insight.modules.m6_tutoring_fsm.policy_types import (
     PolicyArtifactManifest,
     PolicyGateResult,
+    TutoringPolicyContext,
 )
 
 
@@ -55,6 +56,7 @@ class ActivePolicyGate:
         offline_evaluation_approved: bool | None,
         scope: str | None,
         request_fingerprint: str | None,
+        context: TutoringPolicyContext,
     ) -> PolicyGateResult:
         """Fail closed without short-circuiting any applicable gate condition."""
 
@@ -81,6 +83,21 @@ class ActivePolicyGate:
             reasons.append("offline_evaluation_not_approved")
         if not isinstance(scope, str) or scope not in manifest.allowed_scopes:
             reasons.append("scope_not_allowed")
+        if not isinstance(context, TutoringPolicyContext):
+            reasons.append("policy_context_invalid")
+        else:
+            signals = context.signals
+            if any(
+                (
+                    signals.needs_teacher_review,
+                    signals.has_diagnosed_misconception,
+                    signals.has_active_misconception,
+                    signals.has_prerequisite_gap,
+                )
+            ):
+                reasons.append("remediation_required")
+            if request_fingerprint != context.request_fingerprint:
+                reasons.append("policy_context_mismatch")
         if self._config.kill_switch:
             reasons.append("kill_switch_enabled")
         if not _in_rollout(request_fingerprint, self._config.rollout_percentage):

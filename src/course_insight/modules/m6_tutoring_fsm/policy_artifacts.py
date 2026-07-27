@@ -25,7 +25,7 @@ def load_policy_artifact(
     root: str | Path,
     manifest_reference: str,
     *,
-    expected_action_ids: tuple[str, ...] | None = None,
+    expected_action_ids: tuple[str, ...],
 ) -> LoadedPolicyArtifact:
     """Load a canonical manifest and its canonical JSON artifact below ``root``."""
 
@@ -44,8 +44,7 @@ def load_policy_artifact(
     if actual_digest != manifest.artifact_sha256:
         raise ValueError("artifact digest does not match manifest")
     _validate_artifact_matches_manifest(artifact_data, manifest)
-    if expected_action_ids is not None:
-        _validate_expected_actions(artifact_data["actions"], expected_action_ids)
+    _validate_expected_actions(artifact_data["actions"], expected_action_ids)
     return LoadedPolicyArtifact(manifest=manifest, payload=artifact_data)
 
 
