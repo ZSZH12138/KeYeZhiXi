@@ -51,7 +51,12 @@ _TABLE_ORDER = (
     "m5_class_states",
     "m5_state_updates",
     "m6_session_states",
+    "m6_policy_artifacts",
+    "m6_policy_executions",
     "m6_tutoring_decisions",
+    "m6_policy_observations",
+    "m6_policy_rewards",
+    "m6_policy_evaluations",
     "m7_student_feedback",
     "m8_assessment_papers",
     "m8_score_audits",
@@ -87,8 +92,25 @@ _SOURCE_SELECTS = {
     "m6_session_states": """
         SELECT * FROM m6_session_states ORDER BY session_id, turn_count
     """,
+    "m6_policy_artifacts": """
+        SELECT * FROM m6_policy_artifacts ORDER BY policy_id
+    """,
+    "m6_policy_executions": """
+        SELECT * FROM m6_policy_executions ORDER BY request_fingerprint
+    """,
     "m6_tutoring_decisions": """
         SELECT * FROM m6_tutoring_decisions ORDER BY decision_id
+    """,
+    "m6_policy_observations": """
+        SELECT * FROM m6_policy_observations ORDER BY decision_id
+    """,
+    "m6_policy_rewards": """
+        SELECT * FROM m6_policy_rewards
+        ORDER BY policy_execution_fingerprint, reward_version
+    """,
+    "m6_policy_evaluations": """
+        SELECT * FROM m6_policy_evaluations
+        ORDER BY policy_id, dataset_identity
     """,
     "m7_student_feedback": """
         SELECT * FROM m7_student_feedback ORDER BY feedback_id
@@ -123,7 +145,12 @@ _IDENTITY_COLUMNS = {
     "m5_class_states": ("course_id", "class_id", "snapshot_id"),
     "m5_state_updates": ("attempt_id", "state_version"),
     "m6_session_states": ("session_id", "turn_count"),
+    "m6_policy_artifacts": ("policy_id",),
+    "m6_policy_executions": ("request_fingerprint",),
     "m6_tutoring_decisions": ("decision_id",),
+    "m6_policy_observations": ("decision_id",),
+    "m6_policy_rewards": ("reward_identity",),
+    "m6_policy_evaluations": ("evaluation_identity",),
     "m7_student_feedback": ("feedback_id",),
     "m8_assessment_papers": ("paper_id",),
     "m8_score_audits": ("audit_id", "audit_version"),

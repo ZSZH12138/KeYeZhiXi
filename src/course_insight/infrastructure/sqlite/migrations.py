@@ -30,7 +30,7 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     migrate_workflow_v8_to_v9,
 )
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
@@ -43,6 +43,7 @@ _ASSESSMENT_WORKFLOW_REVIEW_GUARD_MIGRATION_NAME = (
 _ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME = (
     "m0_assessment_workflow_recovery_freeze"
 )
+_M6_POLICY_LEARNING_MIGRATION_NAME = "m6_policy_learning"
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -240,6 +241,146 @@ _M6_DECISION_FOREIGN_KEY = (
         "NO ACTION",
         "NO ACTION",
         "NONE",
+    ),
+)
+_M6_POLICY_TABLES = (
+    (
+        "m6_policy_artifacts",
+        """
+        CREATE TABLE IF NOT EXISTS m6_policy_artifacts (
+            policy_id TEXT PRIMARY KEY CHECK (length(policy_id) > 0),
+            artifact_sha256 TEXT NOT NULL UNIQUE CHECK (
+                length(artifact_sha256) = 64
+                AND artifact_sha256 NOT GLOB '*[^0-9a-f]*'
+            ),
+            payload TEXT NOT NULL CHECK (
+                CASE WHEN json_valid(payload)
+                    THEN json(payload) = payload
+                    ELSE 0
+                END
+            ),
+            payload_checksum TEXT NOT NULL CHECK (
+                length(payload_checksum) = 64
+                AND payload_checksum NOT GLOB '*[^0-9a-f]*'
+            )
+        )
+        """,
+    ),
+    (
+        "m6_policy_executions",
+        """
+        CREATE TABLE IF NOT EXISTS m6_policy_executions (
+            request_fingerprint TEXT PRIMARY KEY CHECK (
+                length(request_fingerprint) = 64
+                AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            policy_execution_fingerprint TEXT NOT NULL UNIQUE CHECK (
+                length(policy_execution_fingerprint) = 64
+                AND policy_execution_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            payload TEXT NOT NULL CHECK (
+                CASE WHEN json_valid(payload)
+                    THEN json(payload) = payload
+                    ELSE 0
+                END
+            ),
+            payload_checksum TEXT NOT NULL CHECK (
+                length(payload_checksum) = 64
+                AND payload_checksum NOT GLOB '*[^0-9a-f]*'
+            )
+        )
+        """,
+    ),
+    (
+        "m6_policy_observations",
+        """
+        CREATE TABLE IF NOT EXISTS m6_policy_observations (
+            decision_id TEXT PRIMARY KEY CHECK (length(decision_id) > 0),
+            request_fingerprint TEXT NOT NULL UNIQUE CHECK (
+                length(request_fingerprint) = 64
+                AND request_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            policy_execution_fingerprint TEXT NOT NULL UNIQUE CHECK (
+                length(policy_execution_fingerprint) = 64
+                AND policy_execution_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            payload TEXT NOT NULL CHECK (
+                CASE WHEN json_valid(payload)
+                    THEN json(payload) = payload
+                    ELSE 0
+                END
+            ),
+            payload_checksum TEXT NOT NULL CHECK (
+                length(payload_checksum) = 64
+                AND payload_checksum NOT GLOB '*[^0-9a-f]*'
+            ),
+            FOREIGN KEY (decision_id)
+                REFERENCES m6_tutoring_decisions(decision_id),
+            FOREIGN KEY (request_fingerprint)
+                REFERENCES m6_policy_executions(request_fingerprint),
+            FOREIGN KEY (policy_execution_fingerprint)
+                REFERENCES m6_policy_executions(
+                    policy_execution_fingerprint
+                )
+        )
+        """,
+    ),
+    (
+        "m6_policy_rewards",
+        """
+        CREATE TABLE IF NOT EXISTS m6_policy_rewards (
+            reward_identity TEXT PRIMARY KEY CHECK (
+                length(reward_identity) = 64
+                AND reward_identity NOT GLOB '*[^0-9a-f]*'
+            ),
+            policy_execution_fingerprint TEXT NOT NULL CHECK (
+                length(policy_execution_fingerprint) = 64
+                AND policy_execution_fingerprint NOT GLOB '*[^0-9a-f]*'
+            ),
+            reward_version TEXT NOT NULL CHECK (length(reward_version) > 0),
+            payload TEXT NOT NULL CHECK (
+                CASE WHEN json_valid(payload)
+                    THEN json(payload) = payload
+                    ELSE 0
+                END
+            ),
+            payload_checksum TEXT NOT NULL CHECK (
+                length(payload_checksum) = 64
+                AND payload_checksum NOT GLOB '*[^0-9a-f]*'
+            ),
+            UNIQUE (policy_execution_fingerprint, reward_version),
+            FOREIGN KEY (policy_execution_fingerprint)
+                REFERENCES m6_policy_executions(
+                    policy_execution_fingerprint
+                )
+        )
+        """,
+    ),
+    (
+        "m6_policy_evaluations",
+        """
+        CREATE TABLE IF NOT EXISTS m6_policy_evaluations (
+            evaluation_identity TEXT PRIMARY KEY CHECK (
+                length(evaluation_identity) = 64
+                AND evaluation_identity NOT GLOB '*[^0-9a-f]*'
+            ),
+            policy_id TEXT NOT NULL CHECK (length(policy_id) > 0),
+            dataset_identity TEXT NOT NULL CHECK (
+                length(dataset_identity) > 0
+            ),
+            payload TEXT NOT NULL CHECK (
+                CASE WHEN json_valid(payload)
+                    THEN json(payload) = payload
+                    ELSE 0
+                END
+            ),
+            payload_checksum TEXT NOT NULL CHECK (
+                length(payload_checksum) = 64
+                AND payload_checksum NOT GLOB '*[^0-9a-f]*'
+            ),
+            UNIQUE (policy_id, dataset_identity)
+        )
+        """,
     ),
 )
 def current_schema_version(connection: sqlite3.Connection) -> int:
@@ -470,6 +611,21 @@ def _validate_m6_decision_schema(connection: sqlite3.Connection) -> None:
         raise RuntimeError("M6 decision data violates foreign keys")
 
 
+def _validate_m6_policy_schema(connection: sqlite3.Connection) -> None:
+    for table_name, expected_sql in _M6_POLICY_TABLES:
+        if _normalized_table_schema_sql(
+            connection,
+            table_name,
+        ) != _normalize_create_table_sql(expected_sql):
+            raise RuntimeError(f"{table_name} schema is incompatible")
+    for table_name, _ in _M6_POLICY_TABLES:
+        if connection.execute(
+            "SELECT 1 FROM pragma_foreign_key_check(?)",
+            (table_name,),
+        ).fetchone() is not None:
+            raise RuntimeError(f"{table_name} data violates foreign keys")
+
+
 def _migrate_m5_learner_scope(connection: sqlite3.Connection) -> None:
     """Replace the legacy learner-only uniqueness key without losing rows."""
 
@@ -696,8 +852,18 @@ def migrate(connection: sqlite3.Connection) -> None:
         else:
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=SCHEMA_VERSION,
+                schema_version=9,
             )
+        if 10 not in applied_versions:
+            for _, statement in _M6_POLICY_TABLES:
+                connection.execute(statement)
+            _validate_m6_policy_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (10, _M6_POLICY_LEARNING_MIGRATION_NAME),
+            )
+        else:
+            _validate_m6_policy_schema(connection)
         validate_outbox_schema(connection, schema_version=SCHEMA_VERSION)
         connection.execute("COMMIT")
     except Exception:

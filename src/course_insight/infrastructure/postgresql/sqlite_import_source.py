@@ -23,6 +23,13 @@ from course_insight.modules.m6_tutoring_fsm.identity import EvidenceIdentity
 from course_insight.modules.m6_tutoring_fsm.repository import (
     TutoringDecisionRecord,
 )
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyArtifactManifest,
+    PolicyEvaluationRecord,
+    PolicyExecutionRef,
+    PolicyObservation,
+    PolicyRewardRecord,
+)
 
 from course_insight.infrastructure.postgresql.sqlite_import import (
     PreparedImportRow,
@@ -35,6 +42,14 @@ from course_insight.infrastructure.postgresql.sqlite_import import (
 from course_insight.infrastructure.postgresql.sqlite_import_destination import (
     _COLUMNS as _TARGET_COLUMNS,
 )
+
+_POLICY_RECORD_TYPES = {
+    "m6_policy_artifacts": PolicyArtifactManifest,
+    "m6_policy_executions": PolicyExecutionRef,
+    "m6_policy_observations": PolicyObservation,
+    "m6_policy_rewards": PolicyRewardRecord,
+    "m6_policy_evaluations": PolicyEvaluationRecord,
+}
 
 
 def read_and_validate_source(
@@ -105,10 +120,14 @@ def _validate_source_schema(connection: sqlite3.Connection) -> None:
                 f"PRAGMA table_info('{table}')"
             ).fetchall()
         )
-        expected_columns = tuple(
-            column
-            for column in _TARGET_COLUMNS[table]
-            if column not in {"payload_checksum", "schema_version"}
+        expected_columns = (
+            _TARGET_COLUMNS[table]
+            if table in _POLICY_RECORD_TYPES
+            else tuple(
+                column
+                for column in _TARGET_COLUMNS[table]
+                if column not in {"payload_checksum", "schema_version"}
+            )
         )
         if actual_columns != expected_columns:
             raise ValueError("source table shape is incompatible")
@@ -125,6 +144,8 @@ def _prepare_row(table: str, row: sqlite3.Row) -> PreparedImportRow:
         return _prepare_assessment_run(row)
     if table == "m6_tutoring_decisions":
         return _prepare_tutoring_decision(row)
+    if table in _POLICY_RECORD_TYPES:
+        return _prepare_policy_record(table, row)
     contract_type = _CONTRACT_TABLES[table]
     payload = _canonical_json_object(row["payload"])
     contract = contract_type.model_validate(payload)
@@ -387,6 +408,91 @@ def _prepare_tutoring_decision(row: sqlite3.Row) -> PreparedImportRow:
         checksum=result.content_checksum(),
         contract_validated=True,
     )
+
+
+def _prepare_policy_record(
+    table: str,
+    row: sqlite3.Row,
+) -> PreparedImportRow:
+    payload = _canonical_json_object(row["payload"])
+    record_type = _POLICY_RECORD_TYPES[table]
+    values = dict(payload)
+    if record_type is PolicyArtifactManifest:
+        allowed_scopes = values.get("allowed_scopes")
+        if type(allowed_scopes) is not list:
+            raise ValueError("policy allowed scopes are invalid")
+        values["allowed_scopes"] = tuple(allowed_scopes)
+    elif record_type is PolicyObservation:
+        candidate_ids = values.get("candidate_ids")
+        if type(candidate_ids) is not list:
+            raise ValueError("policy candidate IDs are invalid")
+        values["candidate_ids"] = tuple(candidate_ids)
+    record = record_type(**values)
+    checksum = _required_sha256(row, "payload_checksum")
+    if record.identity != checksum:
+        raise ValueError("policy payload checksum is invalid")
+    _validate_policy_identity(table, row, record)
+    columns = tuple(row.keys())
+    row_values = {
+        column: (
+            dumps_json(record.canonical_payload())
+            if column == "payload"
+            else row[column]
+        )
+        for column in columns
+    }
+    return _build_prepared(
+        table,
+        columns,
+        row_values,
+        version=_policy_version(record),
+        checksum=checksum,
+        contract_validated=True,
+    )
+
+
+def _validate_policy_identity(table: str, row: sqlite3.Row, record: Any) -> None:
+    if table == "m6_policy_artifacts":
+        checks = (
+            ("policy_id", record.policy_id),
+            ("artifact_sha256", record.artifact_sha256),
+        )
+    elif table == "m6_policy_executions":
+        checks = (
+            ("request_fingerprint", record.request_fingerprint),
+            ("policy_execution_fingerprint", record.identity),
+        )
+    elif table == "m6_policy_observations":
+        checks = (
+            ("request_fingerprint", record.request_fingerprint),
+            ("policy_execution_fingerprint", record.policy_execution_fingerprint),
+        )
+    elif table == "m6_policy_rewards":
+        checks = (
+            ("reward_identity", record.identity),
+            ("policy_execution_fingerprint", record.policy_execution_fingerprint),
+            ("reward_version", record.reward_version),
+        )
+    else:
+        checks = (
+            ("evaluation_identity", record.identity),
+            ("policy_id", record.policy_id),
+            ("dataset_identity", record.dataset_identity),
+        )
+    if any(row[column] != expected for column, expected in checks):
+        raise ValueError("policy identity does not match its row")
+
+
+def _policy_version(record: Any) -> tuple[object, ...]:
+    if isinstance(record, PolicyArtifactManifest):
+        return (record.adapter_version, record.status)
+    if isinstance(record, PolicyExecutionRef):
+        return (record.adapter_version, record.mode)
+    if isinstance(record, PolicyObservation):
+        return (record.feature_schema_version,)
+    if isinstance(record, PolicyRewardRecord):
+        return (record.reward_version, record.status)
+    return (record.status, record.approved)
 
 
 def _validate_contract_identity(

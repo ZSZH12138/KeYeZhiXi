@@ -141,6 +141,17 @@ def test_dry_run_validates_without_writing_and_writes_safe_report(
     assert m4["source_count"] == 1
     assert len(m4["identity_digest"]) == 64
     assert decoded["partial_envelope_rows"] == 0
+    assert {
+        table["table"]
+        for table in decoded["tables"]
+        if table["table"].startswith("m6_policy_")
+    } == {
+        "m6_policy_artifacts",
+        "m6_policy_executions",
+        "m6_policy_observations",
+        "m6_policy_rewards",
+        "m6_policy_evaluations",
+    }
 
 
 def test_apply_is_batched_verified_and_idempotent(tmp_path: Path) -> None:
@@ -159,6 +170,67 @@ def test_apply_is_batched_verified_and_idempotent(tmp_path: Path) -> None:
     assert len(destination.rows) == 2
     assert destination.apply_calls == 4
     assert destination.verify_calls == 0
+
+
+def test_policy_rows_are_validated_and_imported_in_dependency_order(
+    tmp_path: Path,
+) -> None:
+    from tests.integration.test_m6_persistence import (
+        _inputs,
+        _policy_artifact,
+        _policy_execution,
+        _repository,
+        _service,
+    )
+    from course_insight.modules.m6_tutoring_fsm.policy_types import (
+        PolicyEvaluationRecord,
+        PolicyRewardRecord,
+    )
+
+    source = tmp_path / "policy-source.sqlite3"
+    repository = _repository(source)
+    artifact = _policy_artifact()
+    execution = _policy_execution(request_fingerprint="f" * 64)
+    reward = PolicyRewardRecord(
+        policy_execution_fingerprint=execution.policy_execution_fingerprint,
+        outcome_identity="outcome_import",
+        status="observed",
+        reward=0.9,
+    )
+    evaluation = PolicyEvaluationRecord(
+        policy_id=artifact.policy_id,
+        dataset_identity="dataset_import",
+        status="sufficient_data",
+        approved=True,
+        effective_sample_size=20.0,
+        action_coverage=1.0,
+    )
+    repository.save_policy_artifact(artifact)
+    repository.commit_policy_execution(execution)
+    repository.save_policy_reward(reward)
+    repository.save_policy_evaluation(evaluation)
+    _service(repository).decide_next_action(*_inputs(), None)
+    destination = _MemoryDestination()
+
+    report = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=destination,
+    ).run(mode="apply", batch_size=10)
+
+    counts = {table.table: table.source_count for table in report.tables}
+    assert counts["m6_policy_artifacts"] == 1
+    assert counts["m6_policy_executions"] == 2
+    assert counts["m6_policy_observations"] == 1
+    assert counts["m6_policy_rewards"] == 1
+    assert counts["m6_policy_evaluations"] == 1
+    applied_order = [
+        table
+        for table, _ in destination.rows
+        if table.startswith("m6_policy_")
+    ]
+    assert applied_order.index("m6_policy_executions") < applied_order.index(
+        "m6_policy_observations"
+    )
 
 
 def test_failed_batch_rolls_back_and_report_redacts_exception(
@@ -215,7 +287,12 @@ def test_apply_uses_snapshot_checksum_from_reader_not_pre_read_file_hash(
                 "m5_class_states",
                 "m5_state_updates",
                 "m6_session_states",
+                "m6_policy_artifacts",
+                "m6_policy_executions",
                 "m6_tutoring_decisions",
+                "m6_policy_observations",
+                "m6_policy_rewards",
+                "m6_policy_evaluations",
                 "m7_student_feedback",
                 "m8_assessment_papers",
                 "m8_score_audits",

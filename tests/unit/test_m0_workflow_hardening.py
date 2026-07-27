@@ -302,8 +302,8 @@ def test_sqlite_v9_migration_preserves_v8_rows_as_explicit_legacy(
             WHERE operation_id = 'legacy-v8'
             """
         ).fetchone()
-        assert SCHEMA_VERSION == 9
-        assert current_schema_version(connection) == 9
+        assert SCHEMA_VERSION == 10
+        assert current_schema_version(connection) == 10
         assert tuple(row) == (None, None, None, None, None)
 
 

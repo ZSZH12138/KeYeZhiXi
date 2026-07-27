@@ -566,6 +566,7 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
         "0007_m9_teacher_analytics.sql",
         "0008_m0_review_workflow.sql",
         "0009_m0_workflow_recovery_freeze.sql",
+        "0010_m6_policy_learning.sql",
     )
     all_sql = "\n".join(migration.sql for migration in migrations)
     for table_name in CORE_TABLES:
@@ -598,6 +599,8 @@ def test_contract_payload_tables_store_checksum_and_schema_version() -> None:
         assert sql.count("payload_checksum CHAR(64) NOT NULL") == count
         assert sql.count("schema_version TEXT NOT NULL") == count
     assert "payload_checksum CHAR(64) NOT NULL" not in migration_sql[1]
+    assert migration_sql[10].count("payload_checksum CHAR(64) NOT NULL") == 5
+    assert "schema_version TEXT NOT NULL" not in migration_sql[10]
     assert "record TEXT NOT NULL" in migration_sql[1]
     assert "payload JSONB NOT NULL" in migration_sql[1]
 

@@ -33,6 +33,13 @@ from course_insight.modules.m6_tutoring_fsm.identity import (
 from course_insight.modules.m6_tutoring_fsm.repository import (
     TutoringDecisionRecord,
 )
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyArtifactManifest,
+    PolicyEvaluationRecord,
+    PolicyExecutionRef,
+    PolicyObservation,
+    PolicyRewardRecord,
+)
 
 
 NOW = datetime(2026, 7, 25, 9, 0, tzinfo=timezone.utc)
@@ -162,6 +169,23 @@ def _record(
     )
 
 
+def _policy_execution(
+    request_fingerprint: str = "a" * 64,
+    *,
+    policy_id: str = "policy_rules_v1",
+) -> PolicyExecutionRef:
+    return PolicyExecutionRef(
+        request_fingerprint=request_fingerprint,
+        mode="rules",
+        policy_id=policy_id,
+        adapter_id="rules",
+        adapter_version="1",
+        artifact_sha256=None,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-actions-v1",
+    )
+
+
 class _Result:
     def __init__(self, row: dict[str, Any] | None = None) -> None:
         self._row = deepcopy(row)
@@ -177,6 +201,11 @@ class _FakeM6Database:
         self.decisions_by_request: dict[str, dict[str, Any]] = {}
         self.decisions_by_input: dict[str, dict[str, Any]] = {}
         self.decisions_by_turn: dict[tuple[str, int], dict[str, Any]] = {}
+        self.policy_executions: dict[str, dict[str, Any]] = {}
+        self.policy_observations: dict[str, dict[str, Any]] = {}
+        self.policy_artifacts: dict[str, dict[str, Any]] = {}
+        self.policy_rewards: dict[tuple[str, str], dict[str, Any]] = {}
+        self.policy_evaluations: dict[tuple[str, str], dict[str, Any]] = {}
         self.connection_count = 0
         self.transaction_count = 0
         self.advisory_lock_count = 0
@@ -198,6 +227,11 @@ class _Transaction:
             deepcopy(self._database.decisions_by_request),
             deepcopy(self._database.decisions_by_input),
             deepcopy(self._database.decisions_by_turn),
+            deepcopy(self._database.policy_executions),
+            deepcopy(self._database.policy_observations),
+            deepcopy(self._database.policy_artifacts),
+            deepcopy(self._database.policy_rewards),
+            deepcopy(self._database.policy_evaluations),
         )
 
     def __exit__(
@@ -212,6 +246,11 @@ class _Transaction:
                 self._database.decisions_by_request,
                 self._database.decisions_by_input,
                 self._database.decisions_by_turn,
+                self._database.policy_executions,
+                self._database.policy_observations,
+                self._database.policy_artifacts,
+                self._database.policy_rewards,
+                self._database.policy_evaluations,
             ) = self._backup
         self._database.lock.release()
 
@@ -314,6 +353,99 @@ class _FakeConnection:
                 (str(session_id), int(turn_count))
             ] = row
             return _Result()
+        if normalized.startswith("INSERT INTO m6_policy_executions"):
+            request_fingerprint, execution_fingerprint, payload, checksum = parameters
+            assert isinstance(payload, Jsonb)
+            self._database.jsonb_bind_count += 1
+            self._database.policy_executions[str(request_fingerprint)] = {
+                "request_fingerprint": str(request_fingerprint),
+                "policy_execution_fingerprint": str(execution_fingerprint),
+                "payload": deepcopy(payload.obj),
+                "payload_checksum": str(checksum),
+            }
+            return _Result()
+        if (
+            "FROM m6_policy_executions" in normalized
+            and "request_fingerprint = %s" in normalized
+        ):
+            return _Result(
+                self._database.policy_executions.get(str(parameters[0]))
+            )
+        if normalized.startswith("INSERT INTO m6_policy_observations"):
+            (
+                decision_id,
+                request_fingerprint,
+                execution_fingerprint,
+                payload,
+                checksum,
+            ) = parameters
+            assert isinstance(payload, Jsonb)
+            self._database.jsonb_bind_count += 1
+            self._database.policy_observations[str(decision_id)] = {
+                "decision_id": str(decision_id),
+                "request_fingerprint": str(request_fingerprint),
+                "policy_execution_fingerprint": str(execution_fingerprint),
+                "payload": deepcopy(payload.obj),
+                "payload_checksum": str(checksum),
+            }
+            return _Result()
+        if (
+            "FROM m6_policy_observations" in normalized
+            and "decision_id = %s" in normalized
+        ):
+            return _Result(
+                self._database.policy_observations.get(str(parameters[0]))
+            )
+        if normalized.startswith("INSERT INTO m6_policy_artifacts"):
+            policy_id, artifact_sha256, payload, checksum = parameters
+            assert isinstance(payload, Jsonb)
+            self._database.policy_artifacts[str(policy_id)] = {
+                "policy_id": str(policy_id),
+                "artifact_sha256": str(artifact_sha256),
+                "payload": deepcopy(payload.obj),
+                "payload_checksum": str(checksum),
+            }
+            return _Result()
+        if "FROM m6_policy_artifacts" in normalized:
+            return _Result(
+                self._database.policy_artifacts.get(str(parameters[0]))
+            )
+        if normalized.startswith("INSERT INTO m6_policy_rewards"):
+            identity, execution_id, version, payload, checksum = parameters
+            assert isinstance(payload, Jsonb)
+            key = (str(execution_id), str(version))
+            self._database.policy_rewards[key] = {
+                "reward_identity": str(identity),
+                "policy_execution_fingerprint": str(execution_id),
+                "reward_version": str(version),
+                "payload": deepcopy(payload.obj),
+                "payload_checksum": str(checksum),
+            }
+            return _Result()
+        if "FROM m6_policy_rewards" in normalized:
+            return _Result(
+                self._database.policy_rewards.get(
+                    (str(parameters[0]), str(parameters[1]))
+                )
+            )
+        if normalized.startswith("INSERT INTO m6_policy_evaluations"):
+            identity, policy_id, dataset_id, payload, checksum = parameters
+            assert isinstance(payload, Jsonb)
+            key = (str(policy_id), str(dataset_id))
+            self._database.policy_evaluations[key] = {
+                "evaluation_identity": str(identity),
+                "policy_id": str(policy_id),
+                "dataset_identity": str(dataset_id),
+                "payload": deepcopy(payload.obj),
+                "payload_checksum": str(checksum),
+            }
+            return _Result()
+        if "FROM m6_policy_evaluations" in normalized:
+            return _Result(
+                self._database.policy_evaluations.get(
+                    (str(parameters[0]), str(parameters[1]))
+                )
+            )
         if (
             "FROM m6_tutoring_decisions" in normalized
             and "WHERE request_fingerprint = %s" in normalized
@@ -634,3 +766,101 @@ def test_stable_connection_error_is_not_rewritten_or_chained() -> None:
 
     assert str(raised.value) == "PostgreSQL connection is unavailable"
     assert raised.value.__cause__ is None
+
+
+def test_policy_execution_uses_jsonb_and_request_first_writer() -> None:
+    module = _repository_module()
+    database = _FakeM6Database()
+    repository = module.PostgresM6Repository(_FakePool(database))
+    first = _policy_execution(policy_id="policy_first")
+    competitor = _policy_execution(policy_id="policy_competitor")
+
+    assert repository.commit_policy_execution(first) == first
+    assert repository.commit_policy_execution(competitor) == first
+    assert repository.get_policy_execution_by_request(
+        first.request_fingerprint
+    ) == first
+    assert database.jsonb_bind_count == 1
+
+
+def test_decision_and_policy_observation_share_one_transaction() -> None:
+    module = _repository_module()
+    database = _FakeM6Database()
+    repository = module.PostgresM6Repository(_FakePool(database))
+    seed = _snapshot()
+    execution = _policy_execution()
+    observation = PolicyObservation(
+        policy_execution_fingerprint=execution.policy_execution_fingerprint,
+        request_fingerprint=execution.request_fingerprint,
+        feature_schema_version=execution.feature_schema_version,
+        candidate_ids=("candidate_a",),
+        selected_candidate_id="candidate_a",
+        propensity=1.0,
+    )
+    candidate = replace(
+        _record(seed),
+        policy_execution_ref=execution,
+        policy_observation=observation,
+    )
+    repository.commit_policy_execution(execution)
+    before_transactions = database.transaction_count
+
+    stored = repository.commit_decision(candidate, seed)
+
+    assert stored == candidate
+    assert database.transaction_count == before_transactions + 1
+    assert database.policy_observations[candidate.decision_id][
+        "payload_checksum"
+    ] == observation.identity
+
+
+def test_artifact_reward_and_evaluation_round_trip_with_checksums() -> None:
+    module = _repository_module()
+    database = _FakeM6Database()
+    repository = module.PostgresM6Repository(_FakePool(database))
+    artifact = PolicyArtifactManifest(
+        policy_id="policy_linucb_v1",
+        adapter_id="linucb",
+        adapter_version="1",
+        artifact_sha256="c" * 64,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-actions-v1",
+        gate_policy_version="m6-gate-v1",
+        status="approved",
+        artifact_reference="policies/linucb-v1.json",
+        allowed_scopes=("school-a",),
+    )
+    execution = _policy_execution()
+    reward = PolicyRewardRecord(
+        policy_execution_fingerprint=execution.policy_execution_fingerprint,
+        outcome_identity="outcome_1",
+        status="observed",
+        reward=0.8,
+    )
+    evaluation = PolicyEvaluationRecord(
+        policy_id=artifact.policy_id,
+        dataset_identity="dataset_1",
+        status="sufficient_data",
+        approved=True,
+        effective_sample_size=25.0,
+        action_coverage=0.75,
+    )
+    repository.commit_policy_execution(execution)
+
+    assert repository.save_policy_artifact(artifact) == artifact
+    assert repository.save_policy_reward(reward) == reward
+    assert repository.save_policy_evaluation(evaluation) == evaluation
+    assert repository.get_policy_artifact(artifact.policy_id) == artifact
+    assert repository.get_policy_reward(
+        execution.policy_execution_fingerprint
+    ) == reward
+    assert repository.get_policy_evaluation(
+        evaluation.policy_id,
+        evaluation.dataset_identity,
+    ) == evaluation
+
+    database.policy_rewards[
+        (execution.policy_execution_fingerprint, reward.reward_version)
+    ]["payload_checksum"] = "0" * 64
+    with pytest.raises(module.PostgresOperationError):
+        repository.get_policy_reward(execution.policy_execution_fingerprint)

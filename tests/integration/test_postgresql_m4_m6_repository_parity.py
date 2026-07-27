@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Iterator
 from uuid import uuid4
@@ -37,6 +38,10 @@ from course_insight.modules.m6_tutoring_fsm.identity import (
 )
 from course_insight.modules.m6_tutoring_fsm.repository import (
     TutoringDecisionRecord,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyExecutionRef,
+    PolicyObservation,
 )
 from tests.integration._postgres_live import require_live_test_database_url
 
@@ -251,8 +256,33 @@ def test_real_postgres_m6_atomic_concurrency_conflict_and_recovery(
         updated_at=NOW,
     )
     candidate = _m6_record(token, seed)
+    execution = PolicyExecutionRef(
+        request_fingerprint=candidate.request_fingerprint,
+        mode="rules",
+        policy_id="policy_rules_v1",
+        adapter_id="rules",
+        adapter_version="1",
+        artifact_sha256=None,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-actions-v1",
+    )
+    observation = PolicyObservation(
+        policy_execution_fingerprint=execution.policy_execution_fingerprint,
+        request_fingerprint=execution.request_fingerprint,
+        feature_schema_version=execution.feature_schema_version,
+        candidate_ids=("candidate_rules",),
+        selected_candidate_id="candidate_rules",
+        propensity=1.0,
+    )
+    candidate = replace(
+        candidate,
+        policy_execution_ref=execution,
+        policy_observation=observation,
+    )
     repository = PostgresM6Repository(postgres_pool)
     try:
+        assert repository.commit_policy_execution(execution) == execution
+
         def commit(_: int) -> TutoringDecisionRecord:
             return repository.commit_decision(
                 candidate.isolated_copy(),
@@ -299,6 +329,16 @@ def test_real_postgres_m6_atomic_concurrency_conflict_and_recovery(
                 """,
                 (session_id,),
             ).fetchone()
+            policy_row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS row_count,
+                    MIN(pg_typeof(payload)::text) AS payload_type
+                FROM m6_policy_observations
+                WHERE decision_id = %s
+                """,
+                (candidate.decision_id,),
+            ).fetchone()
         assert snapshot_row is not None
         assert int(snapshot_row["row_count"]) == 2
         assert snapshot_row["payload_type"] == "jsonb"
@@ -309,12 +349,24 @@ def test_real_postgres_m6_atomic_concurrency_conflict_and_recovery(
             candidate.result.content_checksum()
         )
         assert decision_row["schema_version"] == candidate.result.schema_version
+        assert policy_row == {"row_count": 1, "payload_type": "jsonb"}
     finally:
         with postgres_pool.connection() as connection:
             with connection.transaction():
                 connection.execute(
+                    "DELETE FROM m6_policy_observations WHERE decision_id = %s",
+                    (candidate.decision_id,),
+                )
+                connection.execute(
                     "DELETE FROM m6_tutoring_decisions WHERE session_id = %s",
                     (session_id,),
+                )
+                connection.execute(
+                    """
+                    DELETE FROM m6_policy_executions
+                    WHERE request_fingerprint = %s
+                    """,
+                    (candidate.request_fingerprint,),
                 )
                 connection.execute(
                     "DELETE FROM m6_session_states WHERE session_id = %s",

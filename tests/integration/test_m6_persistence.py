@@ -43,6 +43,13 @@ from course_insight.infrastructure.sqlite.outbox_migration import (
 from course_insight.modules.m6_tutoring_fsm.service import (
     M6TutoringControlService,
 )
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyArtifactManifest,
+    PolicyEvaluationRecord,
+    PolicyExecutionRef,
+    PolicyObservation,
+    PolicyRewardRecord,
+)
 from course_insight.modules.m6_tutoring_fsm.state_machine import (
     DEFAULT_STATE_MACHINE,
 )
@@ -270,6 +277,38 @@ def _only_request_fingerprint(database_path: Path) -> str:
     return str(rows[0][0])
 
 
+def _policy_execution(
+    request_fingerprint: str = "a" * 64,
+    *,
+    policy_id: str = "policy_rules_v1",
+) -> PolicyExecutionRef:
+    return PolicyExecutionRef(
+        request_fingerprint=request_fingerprint,
+        mode="rules",
+        policy_id=policy_id,
+        adapter_id="rules",
+        adapter_version="1",
+        artifact_sha256=None,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-actions-v1",
+    )
+
+
+def _policy_artifact() -> PolicyArtifactManifest:
+    return PolicyArtifactManifest(
+        policy_id="policy_linucb_v1",
+        adapter_id="linucb",
+        adapter_version="1",
+        artifact_sha256="c" * 64,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-actions-v1",
+        gate_policy_version="m6-gate-v1",
+        status="approved",
+        artifact_reference="policies/linucb-v1.json",
+        allowed_scopes=("school-a",),
+    )
+
+
 def test_migration_v3_creates_m6_decision_table_with_required_keys(
     tmp_path: Path,
 ) -> None:
@@ -278,7 +317,7 @@ def test_migration_v3_creates_m6_decision_table_with_required_keys(
         migrate(connection)
         migrate(connection)
 
-        assert SCHEMA_VERSION == 9
+        assert SCHEMA_VERSION == 10
         assert current_schema_version(connection) == SCHEMA_VERSION
         versions = [
             int(row[0])
@@ -340,6 +379,24 @@ def test_migration_v3_creates_m6_decision_table_with_required_keys(
             frozenset({"input_fingerprint"}),
             frozenset({"session_id", "turn_count"}),
         } <= unique_columns
+
+        policy_tables = {
+            str(row[0])
+            for row in connection.execute(
+                """
+                SELECT name
+                FROM sqlite_master
+                WHERE type = 'table' AND name LIKE 'm6_policy_%'
+                """
+            ).fetchall()
+        }
+        assert policy_tables == {
+            "m6_policy_artifacts",
+            "m6_policy_executions",
+            "m6_policy_observations",
+            "m6_policy_rewards",
+            "m6_policy_evaluations",
+        }
 
 
 def test_migration_rejects_incompatible_existing_m6_decision_table(
@@ -971,3 +1028,180 @@ def test_twenty_competing_requests_from_one_cursor_allow_only_one_input(
     assert len({result.content_checksum() for result in accepted_results}) == 1
     assert _database_counts(database_path) == (2, 1)
     assert _stored_turns(database_path) == [0, 1]
+
+
+def test_policy_records_round_trip_across_repository_restart(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+    artifact = _policy_artifact()
+    execution = _policy_execution()
+    reward = PolicyRewardRecord(
+        policy_execution_fingerprint=execution.policy_execution_fingerprint,
+        outcome_identity="outcome_1",
+        status="observed",
+        reward=0.85,
+    )
+    evaluation = PolicyEvaluationRecord(
+        policy_id=artifact.policy_id,
+        dataset_identity="dataset_1",
+        status="sufficient_data",
+        approved=True,
+        effective_sample_size=42.0,
+        action_coverage=0.75,
+    )
+
+    assert repository.save_policy_artifact(artifact) == artifact
+    assert repository.commit_policy_execution(execution) == execution
+    assert repository.save_policy_reward(reward) == reward
+    assert repository.save_policy_evaluation(evaluation) == evaluation
+
+    restarted = _repository(database_path)
+    assert restarted.get_policy_artifact(artifact.policy_id) == artifact
+    assert (
+        restarted.get_policy_execution_by_request(
+            execution.request_fingerprint
+        )
+        == execution
+    )
+    assert (
+        restarted.get_policy_reward(
+            execution.policy_execution_fingerprint,
+            reward.reward_version,
+        )
+        == reward
+    )
+    assert (
+        restarted.get_policy_evaluation(
+            evaluation.policy_id,
+            evaluation.dataset_identity,
+        )
+        == evaluation
+    )
+
+
+def test_policy_execution_concurrency_keeps_request_first_writer(
+    tmp_path: Path,
+) -> None:
+    repository = _repository(tmp_path / "runtime" / "course_insight.sqlite3")
+    first = _policy_execution(policy_id="policy_first")
+    competitor = _policy_execution(policy_id="policy_competitor")
+
+    with ThreadPoolExecutor(max_workers=20) as executor:
+        results = list(
+            executor.map(
+                lambda index: repository.commit_policy_execution(
+                    first if index == 0 else competitor
+                ),
+                range(20),
+            )
+        )
+
+    assert len({result.policy_execution_fingerprint for result in results}) == 1
+    assert results[0] in {first, competitor}
+    assert all(result == results[0] for result in results)
+
+
+def test_policy_observation_is_committed_with_decision_and_restored(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+
+    result = _service(repository).decide_next_action(*_inputs(), None)
+    request_fingerprint = _only_request_fingerprint(database_path)
+    stored = repository.get_decision_by_request(request_fingerprint)
+
+    assert stored is not None
+    assert stored.result == result
+    assert stored.policy_execution_ref is not None
+    assert stored.policy_observation is not None
+    assert repository.get_policy_observation(stored.decision_id) == (
+        stored.policy_observation
+    )
+    with connect_sqlite(database_path) as connection:
+        assert connection.execute(
+            "SELECT COUNT(*) FROM m6_policy_observations"
+        ).fetchone()[0] == 1
+
+
+def test_policy_observation_failure_rolls_back_decision_and_snapshots(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+    with connect_sqlite(database_path) as connection:
+        connection.execute(
+            """
+            CREATE TRIGGER reject_m6_policy_observation
+            BEFORE INSERT ON m6_policy_observations
+            BEGIN
+                SELECT RAISE(ABORT, 'forced observation failure');
+            END
+            """
+        )
+
+    with pytest.raises((sqlite3.DatabaseError, RuntimeError, DomainError)):
+        _service(repository).decide_next_action(*_inputs(), None)
+
+    assert repository.get_latest_session_state("session_1") is None
+    assert repository.get_latest_decision("session_1") is None
+
+
+def test_old_decision_without_policy_observation_remains_readable(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+    result = _service(repository).decide_next_action(*_inputs(), None)
+    request_fingerprint = _only_request_fingerprint(database_path)
+    with connect_sqlite(database_path) as connection:
+        connection.execute("DELETE FROM m6_policy_observations")
+
+    stored = repository.get_decision_by_request(request_fingerprint)
+
+    assert stored is not None
+    assert stored.result == result
+    assert stored.policy_execution_ref is None
+    assert stored.policy_observation is None
+
+
+@pytest.mark.parametrize(
+    ("table", "lookup"),
+    [
+        (
+            "m6_policy_artifacts",
+            lambda repository, artifact, execution: repository.get_policy_artifact(
+                artifact.policy_id
+            ),
+        ),
+        (
+            "m6_policy_executions",
+            lambda repository, artifact, execution: (
+                repository.get_policy_execution_by_request(
+                    execution.request_fingerprint
+                )
+            ),
+        ),
+    ],
+)
+def test_policy_payload_corruption_fails_closed(
+    tmp_path: Path,
+    table: str,
+    lookup: Any,
+) -> None:
+    database_path = tmp_path / "runtime" / "course_insight.sqlite3"
+    repository = _repository(database_path)
+    artifact = _policy_artifact()
+    execution = _policy_execution()
+    repository.save_policy_artifact(artifact)
+    repository.commit_policy_execution(execution)
+    with connect_sqlite(database_path) as connection:
+        connection.execute(
+            f"UPDATE {table} SET payload_checksum = ?",
+            ("0" * 64,),
+        )
+
+    with pytest.raises((DomainError, RuntimeError)):
+        lookup(repository, artifact, execution)
