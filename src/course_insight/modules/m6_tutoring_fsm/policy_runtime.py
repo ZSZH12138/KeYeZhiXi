@@ -78,6 +78,12 @@ class PolicyRuntime:
     def mode(self) -> str:
         return self._mode
 
+    @property
+    def configured_gate_policy_version(self) -> str:
+        """Return the immutable gate version used by rules fallbacks."""
+
+        return self._gate_policy_version
+
     def prepare_execution(
         self,
         context: TutoringPolicyContext,

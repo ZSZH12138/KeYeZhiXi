@@ -345,16 +345,18 @@ class M6TutoringControlService:
             return (
                 desired
                 if desired.mode == "rules"
-                else rules_policy_execution(desired.request_fingerprint)
+                else self._rules_policy_execution(
+                    desired.request_fingerprint
+                )
             )
         try:
             execution = committer(desired)
         except DomainError as error:
             if error.code == "TUTORING_POLICY_INTEGRITY_ERROR":
                 raise
-            return rules_policy_execution(desired.request_fingerprint)
+            return self._rules_policy_execution(desired.request_fingerprint)
         except Exception:
-            return rules_policy_execution(desired.request_fingerprint)
+            return self._rules_policy_execution(desired.request_fingerprint)
         if (
             not isinstance(execution, PolicyExecutionRef)
             or execution.request_fingerprint != desired.request_fingerprint
@@ -370,7 +372,7 @@ class M6TutoringControlService:
         expected = (
             replay.policy_execution_ref
             if replay.policy_execution_ref is not None
-            else rules_policy_execution(request_key)
+            else self._rules_policy_execution(request_key)
         )
         stored = self._load_policy_execution(request_key)
         authoritative = (
@@ -385,8 +387,8 @@ class M6TutoringControlService:
         )
         return authoritative
 
-    @staticmethod
     def _validate_replay_policy_execution(
+        self,
         replay: TutoringDecisionRecord,
         execution: PolicyExecutionRef,
         request_key: str,
@@ -394,13 +396,24 @@ class M6TutoringControlService:
         expected = (
             replay.policy_execution_ref
             if replay.policy_execution_ref is not None
-            else rules_policy_execution(request_key)
+            else self._rules_policy_execution(request_key)
         )
         if (
             replay.request_fingerprint != request_key
             or execution != expected
         ):
             _raise_policy_integrity_error("replay_policy_execution_mismatch")
+
+    def _rules_policy_execution(
+        self,
+        request_key: str,
+    ) -> PolicyExecutionRef:
+        return rules_policy_execution(
+            request_key,
+            gate_policy_version=(
+                self._policy_runtime.configured_gate_policy_version
+            ),
+        )
 
     def _resolve_previous_snapshot(
         self,

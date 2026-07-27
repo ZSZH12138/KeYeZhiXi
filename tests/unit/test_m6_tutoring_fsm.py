@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -1199,7 +1199,11 @@ def test_reference_errors_do_not_echo_host_paths_or_sensitive_answers() -> None:
     assert SENSITIVE_ANSWER not in serialized_error
 
 
-def _learned_runtime(mode: str) -> PolicyRuntime:
+def _learned_runtime(
+    mode: str,
+    *,
+    configured_gate_version: str = "m6-active-gate-v1",
+) -> PolicyRuntime:
     class PreferHintAdapter:
         adapter_id = "test-prefer-hint"
         adapter_version = "v1"
@@ -1272,6 +1276,7 @@ def _learned_runtime(mode: str) -> PolicyRuntime:
             allowed_course_ids=(COURSE_ID,),
             allowed_class_ids=(CLASS_ID,),
         ),
+        gate_policy_version=configured_gate_version,
     )
 
 
@@ -1380,6 +1385,106 @@ def test_policy_persistence_failure_falls_back_to_rules_behavior() -> None:
     ).decide_next_action(task, scoring, state, _session("S1"))
 
     assert result.next_state() == "S3"
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    ("missing_committer", "domain_error", "runtime_error"),
+)
+def test_policy_commit_fallback_preserves_configured_gate_version(
+    failure_mode: str,
+) -> None:
+    class FailingPolicyRepository(InMemoryM6Repository):
+        def commit_policy_execution(self, execution: Any) -> Any:
+            del execution
+            if failure_mode == "domain_error":
+                raise DomainError(
+                    code="POLICY_PERSISTENCE_UNAVAILABLE",
+                    module="m6",
+                    message="policy persistence unavailable",
+                    details={},
+                    recoverable=True,
+                )
+            raise RuntimeError("policy persistence unavailable")
+
+    task, scoring, state = _valid_inputs()
+    repository = FailingPolicyRepository()
+    if failure_mode == "missing_committer":
+        repository.commit_policy_execution = None  # type: ignore[method-assign]
+    configured_gate = "configured-gate-v17"
+    service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+        policy_runtime=_learned_runtime(
+            "active",
+            configured_gate_version=configured_gate,
+        ),
+    )
+
+    execution = service.prepare_policy_execution(
+        task,
+        scoring,
+        state,
+        _session("S1"),
+    )
+
+    assert execution.mode == "rules"
+    assert execution.gate_policy_version == configured_gate
+
+
+def test_legacy_replay_rules_rebuild_preserves_configured_gate_version() -> None:
+    task, scoring, state = _valid_inputs()
+    previous = _session("S1")
+    repository = InMemoryM6Repository()
+    seed_service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+    )
+    seed_service.decide_next_action(task, scoring, state, previous)
+    request_key = request_fingerprint(
+        task_plan=task,
+        scoring_result_bundle=scoring,
+        state_update_result=state,
+        caller_previous_session_state_snapshot=previous,
+    )
+    stored = repository.get_decision_by_request(request_key)
+    assert stored is not None
+    legacy = replace(
+        stored,
+        policy_execution_ref=None,
+        policy_observation=None,
+    )
+    repository._decisions_by_request = {request_key: legacy}  # noqa: SLF001
+    repository._decisions_by_input = {  # noqa: SLF001
+        legacy.input_fingerprint: legacy
+    }
+    repository._decisions_by_turn = {  # noqa: SLF001
+        (legacy.session_id, legacy.turn_count): legacy
+    }
+    repository._policy_executions = {}  # noqa: SLF001
+    configured_gate = "configured-gate-v23"
+    service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+        policy_runtime=PolicyRuntime(
+            mode="rules",
+            gate_policy_version=configured_gate,
+        ),
+    )
+
+    prepared = service.prepare_policy_execution(
+        task,
+        scoring,
+        state,
+        previous,
+    )
+    replayed = service.decide_next_action(task, scoring, state, previous)
+
+    assert prepared.mode == "rules"
+    assert prepared.gate_policy_version == configured_gate
+    assert replayed.model_dump(mode="json") == legacy.result.model_dump(
+        mode="json"
+    )
 
 
 @pytest.mark.parametrize("entrypoint", ["prepare", "decide"])
