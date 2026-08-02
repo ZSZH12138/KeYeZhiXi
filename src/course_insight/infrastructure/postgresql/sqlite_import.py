@@ -76,6 +76,7 @@ _TABLE_ORDER = (
     "m8_scoring_results",
     "m9_teacher_reviews",
     "m9_teacher_analytics",
+    "m9_model_invocation_audits",
 )
 _SOURCE_SELECTS = {
     "m0_learning_events": """
@@ -146,6 +147,9 @@ _SOURCE_SELECTS = {
     "m9_teacher_analytics": """
         SELECT * FROM m9_teacher_analytics ORDER BY report_id
     """,
+    "m9_model_invocation_audits": """
+        SELECT * FROM m9_model_invocation_audits ORDER BY invocation_id
+    """,
 }
 _IDENTITY_COLUMNS = {
     "m0_learning_events": ("event_id",),
@@ -174,6 +178,7 @@ _IDENTITY_COLUMNS = {
     "m8_scoring_results": ("attempt_id", "result_key"),
     "m9_teacher_reviews": ("decision_id",),
     "m9_teacher_analytics": ("report_id",),
+    "m9_model_invocation_audits": ("invocation_id",),
 }
 _CONTRACT_TABLES = {
     "m4_task_plans": TaskPlan,
@@ -498,6 +503,7 @@ def source_table_columns(table: str) -> tuple[str, ...]:
         "m6_policy_observations",
         "m6_policy_rewards",
         "m6_policy_evaluations",
+        "m9_model_invocation_audits",
     }:
         return _COLUMNS[table]
     return tuple(

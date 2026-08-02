@@ -245,6 +245,19 @@ _COLUMNS = {
         "payload_checksum",
         "schema_version",
     ),
+    "m9_model_invocation_audits": (
+        "invocation_id",
+        "request_id",
+        "source_report_id",
+        "scope",
+        "provider",
+        "model_name",
+        "provider_status",
+        "validation_status",
+        "created_at",
+        "payload",
+        "payload_checksum",
+    ),
 }
 _IDENTITIES = {
     "m0_learning_events": ("event_id",),
@@ -273,6 +286,7 @@ _IDENTITIES = {
     "m8_scoring_results": ("attempt_id", "result_key"),
     "m9_teacher_reviews": ("decision_id",),
     "m9_teacher_analytics": ("report_id",),
+    "m9_model_invocation_audits": ("invocation_id",),
 }
 _JSON_COLUMNS = {
     "m0_learning_events": frozenset({"payload"}),
@@ -298,6 +312,7 @@ _JSON_COLUMNS = {
     "m8_scoring_results": frozenset({"payload"}),
     "m9_teacher_reviews": frozenset({"payload"}),
     "m9_teacher_analytics": frozenset({"learner_ids", "payload"}),
+    "m9_model_invocation_audits": frozenset({"payload"}),
 }
 _NULLABLE_JSON_NULL_MARKERS = {
     "m4_intent_decisions": {
@@ -321,6 +336,7 @@ _TIMESTAMP_COLUMNS = {
     "m4_intent_decisions": frozenset({"created_at"}),
     "m8_scoring_results": frozenset({"finalized_at"}),
     "m9_teacher_analytics": frozenset({"generated_at"}),
+    "m9_model_invocation_audits": frozenset({"created_at"}),
 }
 
 

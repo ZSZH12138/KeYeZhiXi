@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import json
 import sqlite3
-from datetime import timezone
+from datetime import datetime, timezone
 from pathlib import Path
 
 from course_insight.contracts.analytics import (
@@ -11,6 +14,9 @@ from course_insight.contracts.analytics import (
     TeacherReviewDecision,
 )
 from course_insight.infrastructure.json_io import dumps_json
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9ModelAuditRecord,
+)
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import migrate
 
@@ -25,6 +31,107 @@ class SQLiteM9Repository:
         connection = connect_sqlite(self._database_path)
         try:
             migrate(connection)
+        finally:
+            connection.close()
+
+    def save_model_audit(self, record: M9ModelAuditRecord) -> None:
+        """Persist one idempotent privacy-minimized model-call record."""
+
+        if not isinstance(record, M9ModelAuditRecord):
+            raise TypeError("record must be an M9ModelAuditRecord")
+        payload = dumps_json(record.to_dict())
+        checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT INTO m9_model_invocation_audits(
+                    invocation_id,
+                    request_id,
+                    source_report_id,
+                    scope,
+                    provider,
+                    model_name,
+                    provider_status,
+                    validation_status,
+                    created_at,
+                    payload,
+                    payload_checksum
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT DO NOTHING
+                """,
+                (
+                    record.invocation_id,
+                    record.request_id,
+                    record.source_report_id,
+                    record.scope,
+                    record.provider,
+                    record.model_name,
+                    record.provider_status,
+                    record.validation_status,
+                    record.created_at.astimezone(timezone.utc).isoformat(),
+                    payload,
+                    checksum,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT
+                    invocation_id,
+                    request_id,
+                    source_report_id,
+                    scope,
+                    provider,
+                    model_name,
+                    provider_status,
+                    validation_status,
+                    created_at,
+                    payload,
+                    payload_checksum
+                FROM m9_model_invocation_audits
+                WHERE invocation_id = ? OR request_id = ?
+                ORDER BY CASE WHEN invocation_id = ? THEN 0 ELSE 1 END
+                LIMIT 1
+                """,
+                (record.invocation_id, record.request_id, record.invocation_id),
+            ).fetchone()
+            if self._model_audit_from_row(row) != record:
+                raise RuntimeError("M9 model audit identity conflict")
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def get_model_audit(
+        self,
+        invocation_id: str,
+    ) -> M9ModelAuditRecord | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT
+                    invocation_id,
+                    request_id,
+                    source_report_id,
+                    scope,
+                    provider,
+                    model_name,
+                    provider_status,
+                    validation_status,
+                    created_at,
+                    payload,
+                    payload_checksum
+                FROM m9_model_invocation_audits
+                WHERE invocation_id = ?
+                """,
+                (invocation_id,),
+            ).fetchone()
+            return None if row is None else self._model_audit_from_row(row)
         finally:
             connection.close()
 
@@ -109,6 +216,31 @@ class SQLiteM9Repository:
                 WHERE report_id = ?
                 """,
                 (report_id,),
+            ).fetchone()
+            return (
+                None
+                if row is None
+                else self._analytics_from_row(row).model_copy(deep=True)
+            )
+        finally:
+            connection.close()
+
+    def get_scoped_analytics(
+        self,
+        report_id: str,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> TeacherAnalyticsBundle | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT report_id, course_id, class_id, learner_ids, payload
+                FROM m9_teacher_analytics
+                WHERE report_id = ? AND course_id = ? AND class_id = ?
+                """,
+                (report_id, course_id, class_id),
             ).fetchone()
             return (
                 None
@@ -266,3 +398,34 @@ class SQLiteM9Repository:
         ):
             raise RuntimeError("M9 teacher-review row identity mismatch")
         return decision
+
+    @staticmethod
+    def _model_audit_from_row(
+        row: sqlite3.Row | None,
+    ) -> M9ModelAuditRecord:
+        if row is None:
+            raise RuntimeError("M9 model audit insert produced no row")
+        payload = str(row["payload"])
+        expected_checksum = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+        if not hmac.compare_digest(
+            expected_checksum,
+            str(row["payload_checksum"]),
+        ):
+            raise RuntimeError("M9 model audit payload checksum mismatch")
+        record = M9ModelAuditRecord.from_dict(
+            json.loads(payload)
+        )
+        if (
+            record.invocation_id != str(row["invocation_id"])
+            or record.request_id != str(row["request_id"])
+            or record.source_report_id != str(row["source_report_id"])
+            or record.scope != str(row["scope"])
+            or record.provider != str(row["provider"])
+            or record.model_name != str(row["model_name"])
+            or record.provider_status != str(row["provider_status"])
+            or record.validation_status != str(row["validation_status"])
+            or record.created_at
+            != datetime.fromisoformat(str(row["created_at"]))
+        ):
+            raise RuntimeError("M9 model audit row identity mismatch")
+        return record

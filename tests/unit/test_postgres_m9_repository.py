@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
+import json
 from typing import Any
 
 import psycopg
@@ -20,6 +22,9 @@ from tests.unit._postgres_repository_fakes import (
     FailingPool,
     FakeConnection,
     FakePool,
+)
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9ModelAuditRecord,
 )
 
 try:
@@ -56,7 +61,73 @@ def _review_row(decision: Any) -> dict[str, Any]:
     }
 
 
-def _responder(analytics: list[Any], review: Any):
+def _model_audit(
+    analytics: Any,
+) -> M9ModelAuditRecord:
+    validated_output = {"scope": "class_aggregate"}
+    output_checksum = hashlib.sha256(
+        json.dumps(
+            validated_output,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return M9ModelAuditRecord(
+        invocation_id="invocation_request_1",
+        request_id="request_1",
+        source_report_id=analytics.report_id,
+        source_report_checksum=analytics.content_checksum(),
+        scope="class_aggregate",
+        prompt_template_id="m9-teacher-interpretation-json",
+        prompt_template_version="3.0.0",
+        output_schema_version="m9_teacher_interpretation_v2",
+        policy_version="m9-teacher-interpretation-v2",
+        input_checksum="a" * 64,
+        source_digest="b" * 64,
+        provider="deepseek",
+        model_name="deepseek-v4-flash",
+        provider_status="succeeded",
+        validation_status="passed",
+        safety_flags=(),
+        input_tokens=80,
+        output_tokens=40,
+        latency_ms=20,
+        error_code=None,
+        output_checksum=output_checksum,
+        validated_output=validated_output,
+        created_at=NOW,
+    )
+
+
+def _model_audit_row(record: M9ModelAuditRecord) -> dict[str, Any]:
+    payload = record.to_dict()
+    return {
+        "invocation_id": record.invocation_id,
+        "request_id": record.request_id,
+        "source_report_id": record.source_report_id,
+        "scope": record.scope,
+        "provider": record.provider,
+        "model_name": record.model_name,
+        "provider_status": record.provider_status,
+        "validation_status": record.validation_status,
+        "created_at": record.created_at,
+        "payload": payload,
+        "payload_checksum": hashlib.sha256(
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest(),
+    }
+
+
+def _responder(
+    analytics: list[Any],
+    review: Any,
+    model_audit: M9ModelAuditRecord | None = None,
+):
     by_report = {bundle.report_id: bundle for bundle in analytics}
 
     def respond(statement: str, parameters: tuple[Any, ...]):
@@ -64,9 +135,24 @@ def _responder(analytics: list[Any], review: Any):
         if "from m9_teacher_analytics" in normalized:
             if "order by generated_at desc" in normalized:
                 return [_analytics_row(bundle) for bundle in reversed(analytics)]
+            if (
+                "and course_id = %s" in normalized
+                and (
+                    str(parameters[1]) != "course_1"
+                    or str(parameters[2])
+                    != by_report[str(parameters[0])].class_report.class_id
+                )
+            ):
+                return None
             return _analytics_row(by_report[str(parameters[0])])
         if "from m9_teacher_reviews" in normalized:
             return _review_row(review)
+        if "from m9_model_invocation_audits" in normalized:
+            return (
+                None
+                if model_audit is None
+                else _model_audit_row(model_audit)
+            )
         return None
 
     return respond
@@ -109,6 +195,16 @@ def test_postgres_m9_persists_timestamptz_scope_and_unique_reviews() -> None:
         course_id="course_1",
     ) == newer
     assert repository.get_analytics("report_newer") == newer
+    assert repository.get_scoped_analytics(
+        "report_newer",
+        course_id="course_1",
+        class_id="class_1",
+    ) == newer
+    assert repository.get_scoped_analytics(
+        "report_newer",
+        course_id="another_course",
+        class_id="class_1",
+    ) is None
     assert repository.get_latest_analytics(
         course_id="course_1",
         class_id="class_1",
@@ -155,6 +251,39 @@ def test_postgres_m9_persists_timestamptz_scope_and_unique_reviews() -> None:
         and "@>" in statement
     )
     assert "@>" in learner_query
+
+
+@pytest.mark.skipif(
+    PostgresM9Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m9_persists_idempotent_model_audit_without_raw_prompt() -> None:
+    analytics = _analytics()
+    review = _review()
+    audit = _model_audit(analytics)
+    connection = FakeConnection(
+        _responder([analytics], review, audit)
+    )
+    repository = PostgresM9Repository(FakePool(connection))
+
+    repository.save_model_audit(audit)
+    assert repository.get_model_audit(audit.invocation_id) == audit
+
+    audit_insert = next(
+        parameters
+        for statement, parameters in connection.executions
+        if "INSERT INTO m9_model_invocation_audits" in statement
+    )
+    json_payloads = [
+        parameter.obj
+        for parameter in audit_insert
+        if isinstance(parameter, Jsonb)
+    ]
+    assert json_payloads == [audit.to_dict()]
+    serialized = json.dumps(json_payloads, ensure_ascii=False)
+    assert "messages" not in serialized
+    assert "api_key" not in serialized
+    assert audit.source_report_checksum in serialized
 
 
 @pytest.mark.skipif(
@@ -220,6 +349,11 @@ def test_postgres_m9_validates_scope_and_empty_recovery_paths() -> None:
     with pytest.raises(ValueError, match="course scope"):
         repository.insert_or_get_analytics(analytics, course_id=" ")
     assert repository.get_analytics("missing") is None
+    assert repository.get_scoped_analytics(
+        "missing",
+        course_id="course_1",
+        class_id="class_1",
+    ) is None
     assert repository.get_latest_analytics(
         course_id="course_1",
         class_id="class_1",
@@ -276,6 +410,11 @@ def test_postgres_m9_sanitizes_database_errors_across_protocol_methods() -> None
             course_id="course_1",
         ),
         lambda repository: repository.get_latest_analytics(
+            course_id="course_1",
+            class_id="class_1",
+        ),
+        lambda repository: repository.get_scoped_analytics(
+            analytics.report_id,
             course_id="course_1",
             class_id="class_1",
         ),

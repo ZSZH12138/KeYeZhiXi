@@ -507,6 +507,7 @@ def test_sqlite_v9_migration_preserves_v8_rows_as_explicit_legacy(
             WHERE operation_id = 'legacy-v8'
             """
         ).fetchone()
+        assert SCHEMA_VERSION == 14
         assert current_schema_version(connection) == SCHEMA_VERSION
         assert tuple(row) == (None, None, None, None, None)
 
@@ -561,8 +562,8 @@ def test_sqlite_v13_migration_preserves_v12_rows_with_null_policy_identity(
             WHERE operation_id = 'legacy-v12'
             """
         ).fetchone()
-        assert SCHEMA_VERSION == 13
-        assert current_schema_version(connection) == 13
+        assert SCHEMA_VERSION == 14
+        assert current_schema_version(connection) == SCHEMA_VERSION
         assert {
             "policy_id",
             "adapter_id",

@@ -30,11 +30,16 @@ from course_insight.infrastructure.postgresql.sqlite_import_cli import (
 from course_insight.infrastructure.sqlite import SCHEMA_VERSION
 from course_insight.infrastructure.sqlite.m4_repository import SQLiteM4Repository
 from course_insight.infrastructure.sqlite.m0_repository import SQLiteM0Repository
+from course_insight.infrastructure.sqlite.m9_repository import SQLiteM9Repository
 from course_insight.modules.m0_platform.workflow import AssessmentRun
 from course_insight.modules.m4_task_orchestration.intent import IntentStatus
 from course_insight.modules.m4_task_orchestration.intent_service import (
     StoredIntentDecision,
 )
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9ModelAuditRecord,
+)
+from tests.integration.test_web_workflow_persistence import _analytics
 
 
 NOW = datetime(2026, 7, 25, 8, 0, tzinfo=timezone.utc)
@@ -189,6 +194,46 @@ class _MemoryDestination:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _m9_audit_record(source_report_checksum: str) -> M9ModelAuditRecord:
+    validated_output = {
+        "scope": "class_aggregate",
+        "ai_notice": "仅供教师核查",
+    }
+    output_checksum = hashlib.sha256(
+        json.dumps(
+            validated_output,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return M9ModelAuditRecord(
+        invocation_id="invocation_m9_import",
+        request_id="request_m9_import",
+        source_report_id="report_1",
+        source_report_checksum=source_report_checksum,
+        scope="class_aggregate",
+        prompt_template_id="m9-teacher-interpretation-json",
+        prompt_template_version="3.0.0",
+        output_schema_version="m9_teacher_interpretation_v2",
+        policy_version="m9-teacher-interpretation-v2",
+        input_checksum="a" * 64,
+        source_digest="b" * 64,
+        provider="deepseek",
+        model_name="deepseek-v4-flash",
+        provider_status="succeeded",
+        validation_status="passed",
+        safety_flags=(),
+        input_tokens=20,
+        output_tokens=10,
+        latency_ms=5,
+        error_code=None,
+        output_checksum=output_checksum,
+        validated_output=validated_output,
+        created_at=NOW,
+    )
 
 
 def test_dry_run_validates_without_writing_and_writes_safe_report(
@@ -722,6 +767,38 @@ def test_policy_source_rejects_embedded_observation_decision_id_corruption(
         ).run(mode="dry-run")
 
 
+def test_sqlite_to_postgres_import_preserves_m9_model_audit(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "")
+    analytics = _analytics()
+    repository = SQLiteM9Repository(source)
+    repository.initialize()
+    repository.insert_or_get_analytics(analytics, course_id="course_1")
+    audit = _m9_audit_record(analytics.content_checksum())
+    repository.save_model_audit(audit)
+    destination = _MemoryDestination()
+
+    report = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=destination,
+    ).run(mode="apply")
+
+    audit_report = next(
+        item
+        for item in report.tables
+        if item.table == "m9_model_invocation_audits"
+    )
+    assert audit_report.source_count == audit_report.verified_count == 1
+    prepared = destination.rows[
+        ("m9_model_invocation_audits", (audit.invocation_id,))
+    ]
+    assert prepared.value_for("source_report_id") == "report_1"
+    assert prepared.value_for("validation_status") == "passed"
+    assert "messages" not in prepared.value_for("payload")
+    assert "reasoning_content" not in prepared.value_for("payload")
+
+
 def test_failed_batch_rolls_back_and_report_redacts_exception(
     tmp_path: Path,
 ) -> None:
@@ -789,6 +866,7 @@ def test_apply_uses_snapshot_checksum_from_reader_not_pre_read_file_hash(
                 "m8_scoring_results",
                 "m9_teacher_reviews",
                 "m9_teacher_analytics",
+                "m9_model_invocation_audits",
             )},
             0,
             expected_checksum,

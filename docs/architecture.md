@@ -20,9 +20,9 @@ outbox Worker、真实 Django Web/权限/表单、SQLite 与 PostgreSQL 仓储�
 `ArchitectureScaffoldResult` 语义，它仍固定返回 `skipped`；这只是“脚手架不启动
 Django 作业”，不是“Django 尚未实现”。
 
-“空实现”现在只描述尚未启用的智能算法和外部调用：M2 pgvector 仍为逻辑空边界，
-M5 不执行 DINA/BKT 参数估计，M8 不执行 IRT 标定或自适应选择，M7/M9 不调用
-DeepSeek。真实 PostgreSQL 适配器已经实现，但若验收环境没有提供受保护的临时
+“空实现”现在只描述默认装配中尚未启用的智能算法和外部调用：M2 pgvector 仍为
+逻辑空边界，M5 不执行 DINA/BKT 参数估计，M8 不执行 IRT 标定或自适应选择，
+M7/M9 默认不调用 DeepSeek。真实 PostgreSQL 适配器已经实现，但若验收环境没有提供受保护的临时
 PostgreSQL，相关 live tests 会明确跳过，不能据此声称已完成真实联调。
 
 M6 已实现私有、版本化的策略运行时和离线评估代码，但默认仍为
@@ -39,15 +39,15 @@ M0 Django 外层/鉴权/提交契约
 M1 课程版本与分块 ──► M2 RAG（词法 + pgvector 目标）──┐
            │                                        │
            └──► M3 知识包/Q 矩阵/题目标定依据         ▼
-                         │                       M7 DeepSeek
-                         ▼                       评分/反馈
+                         │                       M7 DeepSeek 主观评分
+                         ▼                       / 确定性模板反馈
                  M4 任务与版本编排                      │
                          │                             ▼
                          ▼                       M8 测评/评分/IRT/
                  M5 DINA 认知诊断 + BKT             自适应选题/在线标定
                          │                             │
                          ▼                             ▼
-                 M6 诊断驱动的辅导状态机      M9 DeepSeek 叙述/
+                 M6 诊断驱动的辅导状态机      M9 DeepSeek 教师解读/
                                                        模型质量/教师审核
 ```
 
@@ -67,9 +67,9 @@ OPE/approval 尚未正式接入 M9。
 | M4 | 任务识别、蓝图选择与工作流编排 | 冻结课程包、知识包、蓝图和路由引用 | 确定性路由与持久化幂等 |
 | M5 | 学习观测、认知诊断、知识追踪、状态 | DINA 系契约与 BKT 系契约 | 空运行，不估计参数 |
 | M6 | S0—S5 教学控制 | 消费 M4 任务、M8 评分、M5 状态和可选前版会话；私有 policy learning 不扩张公共契约 | 确定性 baseline；默认 rules；shadow 不改变公共动作；active 门禁失败回退 rules |
-| M7 | 主观评分与学生反馈 | DeepSeek 唯一 LLM 适配器 | 返回空生成结果，零网络调用 |
+| M7 | 主观评分与学生反馈 | DeepSeek 仅用于评分；严格结果校验；确定性反馈 | 默认零网络；显式注入后支持 V4 JSON 评分并强制教师复核，反馈始终不联网；个人信息出站规则待确认 |
 | M8 | 测评、评分、IRT、自适应选题与在线标定 | IRT 参数、能力估计、标定与选题契约 | 空参数集与空选题 |
-| M9 | 教师分析、质量门槛与复核 | DeepSeek 教师叙述、`ModelQualityReport` | 空生成，质量为 `insufficient_data` |
+| M9 | 教师分析、质量门槛与复核 | DeepSeek 教师解读、`ModelQualityReport` | legacy 默认零网络；显式启用后只解读匿名班级聚合事实；质量为 `insufficient_data` |
 
 ## 分层映射
 
@@ -78,7 +78,7 @@ OPE/approval 尚未正式接入 M9。
 | `src/course_insight/contracts/` | 84 个公开 Pydantic 契约及来源图逻辑 |
 | `src/course_insight/application/` | 应用组合根、运行上下文恢复、拆分 Web 用例与既有一站式编排 |
 | `src/course_insight/modules/m0_*`—`m9_*` | 十个责任域的服务、仓储边界和可替换实现 |
-| `src/course_insight/infrastructure/` | 配置、SQLite/PostgreSQL、JSON/日志、导入器与 DeepSeek 空适配器 |
+| `src/course_insight/infrastructure/` | 配置、SQLite/PostgreSQL、JSON/日志、导入器与 DeepSeek 真实/空适配器 |
 | `contracts/` | 84 份 Schema、1 份中性空示例与 `contract_provenance.json` |
 | `data/raw_course/` | 本地授权原始资料占位；真实资料不进入可分发产物 |
 | `runtime/` | 数据库、索引、快照、日志和 M6 JSON-only policy artifact；不进入可分发产物 |
@@ -149,10 +149,11 @@ canonical UTF-8 JSON、lowercase SHA-256、有限 23 维 LinUCB 参数，以及�
 `m6-features-v1`/`m6-action-space-v1` 版本匹配。它不是 course runtime manifest
 的一部分。
 
-SQLite/PostgreSQL 当前 bundled schema 为 v13。M4 intent 使用已发布的 v10/0010
+SQLite/PostgreSQL 当前 bundled schema 为 v14。M4 intent 使用已发布的 v10/0010
 与 v11/0011；M6 五张私有 policy 表位于
 v12/`0012_m6_policy_learning.sql`，M0 七字段 freeze 安全追加在
-v13/`0013_m0_policy_freeze.sql`。合并没有改写或重编号已发布的 M4 migration。
+v13/`0013_m0_policy_freeze.sql`，M9 模型调用审计追加在
+v14/`0014_m9_model_invocation_audits.sql`。合并没有改写或重编号已发布 migration。
 
 ## 日志与投递
 
@@ -167,7 +168,7 @@ v13/`0013_m0_policy_freeze.sql`。合并没有改写或重编号已发布的 M4 
 - 契约对象跨模块原样传递，不降级为临时字典。
 - 时间必须带时区，校验和使用规范化 JSON 的 SHA-256。
 - 外部身份只通过 M0 的伪匿名 `ActorContext` 进入核心。
-- DeepSeek 的密钥只能在运行时由 `DEEPSEEK_API_KEY` 提供，契约、审计和日志不存密钥或完整提示词。
+- DeepSeek 的密钥只能在运行时由 `DEEPSEEK_API_KEY` 提供，契约、审计和日志不存密钥或完整提示词。M9 只向模型发送达到首版群体门槛的匿名班级定性事实，不发送个体报告、复核队列、数字和自由文本。
 - DINA/BKT/IRT 和在线标定的每次运行都必须绑定数据水位、模型/参数版本与质量报告。
 - 新标定参数先以 shadow 版本产生，经 M9 质量门槛与教师审核后才能被 M8 启用。
 - M6 `m6-features-v1` 与 `m6-action-space-v1` 只允许在确定性
@@ -176,8 +177,9 @@ v13/`0013_m0_policy_freeze.sql`。合并没有改写或重编号已发布的 M4 
 - M6 active 必须同时满足 approved manifest、精确版本/SHA、作用域、至少两个
   候选、支持度、不确定性、离线评估、rollout 和 kill switch 门禁；任一缺失回退
   rules。
-- 当前智能空实现不读取 DeepSeek 密钥、不访问模型网络、不连接 pgvector，也不
-  伪造 DINA/BKT/IRT 或模型质量指标；这不否定 M0 PostgreSQL 平台适配器的存在。
+- legacy 智能空入口不读取 DeepSeek 密钥、不访问模型网络、不连接 pgvector，
+  也不伪造 DINA/BKT/IRT 或模型质量指标；M7/M9 真实适配器只能通过独立公开
+  入口显式配置，这不改变空入口语义，也不否定 M0 PostgreSQL 平台适配器的存在。
 - 量规、试卷、审计和结果总分必须守恒；教师复核追加新版本，不覆盖旧版本。
 - 对外不传播主机路径；索引、作业和产物使用逻辑引用或相对路径。
 
@@ -188,5 +190,6 @@ v13/`0013_m0_policy_freeze.sql`。合并没有改写或重编号已发布的 M4 
 3. 在 M2 实现 pgvector 建库、检索与审计，不把向量能力移入 M0。
 4. 去标识化作答数据达到质量门槛后，才在 M5 启用 DINA/BKT、在 M8 启用
    IRT shadow 标定和自适应选择。
-5. M7/M9 的安全、审计和量规约束完成后，才把 DeepSeek 空适配器替换为真实
-   API 适配器。
+5. 在目标环境用假传输与沙箱数据验收 M7/M9 真实适配器后再显式启用；M9
+   当前只开放教师主动触发的匿名班级聚合解读，长期边界调整须等待全仓测试和
+   教师标注评估。

@@ -7,6 +7,11 @@ from pathlib import Path
 from typing import Any
 
 from course_insight.contracts.assessment import RubricScoringResult
+from course_insight.contracts.intelligence import (
+    LLMGenerationResult,
+    ModelInvocationAudit,
+    SafetyCheckResult,
+)
 from course_insight.contracts.tutoring import StudentFeedbackPackage
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
@@ -39,6 +44,30 @@ class SQLiteM7Repository:
         prompt_payload: dict[str, Any],
     ) -> None:
         """Keep the pre-existing optional hook as a no-op in this milestone."""
+
+    def save_generation_result(
+        self,
+        result: LLMGenerationResult,
+    ) -> None:
+        """Keep sanitized generation persistence optional in this milestone."""
+
+        del result
+
+    def save_invocation_audit(
+        self,
+        audit: ModelInvocationAudit,
+    ) -> None:
+        """Keep sanitized invocation persistence optional in this milestone."""
+
+        del audit
+
+    def save_safety_check(
+        self,
+        result: SafetyCheckResult,
+    ) -> None:
+        """Keep sanitized safety persistence optional in this milestone."""
+
+        del result
 
     def insert_or_get_feedback(
         self,

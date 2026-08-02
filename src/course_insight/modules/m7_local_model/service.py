@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 from course_insight.contracts.assessment import (
     RubricScoringResult,
@@ -20,16 +20,31 @@ from course_insight.contracts.tutoring import (
     StudentFeedbackPackage,
 )
 from course_insight.infrastructure.deepseek import EmptyDeepSeekAdapter
+from course_insight.modules.m7_local_model.adapter import (
+    GovernedRubricScoringAdapter,
+    M7InvocationFailure,
+    M7ScoringOutcome,
+    RubricScoringAdapter,
+)
 from course_insight.modules.m7_local_model.prompts import (
     FEEDBACK_PROMPT_ID,
+    FEEDBACK_PROMPT_VERSION,
     SCORING_PROMPT_ID,
     feedback_message,
 )
 from course_insight.modules.m7_local_model.repository import M7Repository
 
 
+@runtime_checkable
+class ModelOutputValidator(Protocol):
+    """Compatibility boundary for the original validator object shape."""
+
+    def validate(self, result: RubricScoringResult) -> bool:
+        """Return whether one already structured score is acceptable."""
+
+
 class M7LocalModelService:
-    """Validate course-grounded local scoring and feedback outputs."""
+    """Validate model scoring and build deterministic learner feedback."""
 
     def __init__(
         self,
@@ -73,7 +88,8 @@ class M7LocalModelService:
         契约来源：prepare_scoring 与 retrieve 的对齐输出。
         返回消费者：M8.finalize_scoring。
         业务校验：查询、量规分项、学生证据、课程引用和总分必须一致。
-        错误码：INVALID_MODEL_JSON。
+        错误码：EVIDENCE_REQUIRED、MODEL_ADAPTER_UNCONFIGURED、
+        MODEL_API_UNAVAILABLE、MODEL_OUTPUT_BLOCKED、INVALID_MODEL_JSON。
         """
 
         self._require_aligned_evidence(
@@ -90,36 +106,69 @@ class M7LocalModelService:
                     details={"criterion_id": criterion.criterion_id},
                     recoverable=True,
                 )
-        scorer = getattr(self._local_model_adapter, "score", None)
-        if not callable(scorer):
-            raise DomainError(
-                code="INVALID_MODEL_JSON",
-                module="m7",
-                message="the configured rubric adapter cannot score answers",
-                details={"scoring_task_id": rubric_scoring_task.scoring_task_id},
-                recoverable=True,
+        outcome: M7ScoringOutcome | None = None
+        if isinstance(
+            self._local_model_adapter,
+            GovernedRubricScoringAdapter,
+        ):
+            try:
+                outcome = self._local_model_adapter.score_governed(
+                    rubric_scoring_task,
+                    evidence_bundle,
+                )
+            except M7InvocationFailure as failure:
+                self._record_failed_invocation(failure)
+                raise failure.error from None
+            if not isinstance(outcome, M7ScoringOutcome):
+                raise DomainError(
+                    code="INVALID_MODEL_JSON",
+                    module="m7",
+                    message="the governed scorer returned an invalid outcome",
+                    details={
+                        "scoring_task_id": (
+                            rubric_scoring_task.scoring_task_id
+                        )
+                    },
+                    recoverable=True,
+                )
+            result = outcome.result
+        else:
+            if not isinstance(self._local_model_adapter, RubricScoringAdapter):
+                raise DomainError(
+                    code="INVALID_MODEL_JSON",
+                    module="m7",
+                    message="the configured rubric adapter cannot score answers",
+                    details={
+                        "scoring_task_id": (
+                            rubric_scoring_task.scoring_task_id
+                        )
+                    },
+                    recoverable=True,
+                )
+            result = self._local_model_adapter.score(
+                rubric_scoring_task,
+                evidence_bundle,
             )
-        result = scorer(rubric_scoring_task, evidence_bundle)
-        self._validate_scoring_result(
-            rubric_scoring_task,
-            evidence_bundle,
-            result,
-        )
-        saver = getattr(self._prompt_repository, "save_prompt_record", None)
-        if callable(saver):
-            saver(
+        try:
+            self._validate_scoring_result(
+                rubric_scoring_task,
+                evidence_bundle,
+                result,
+            )
+        except DomainError:
+            if outcome is not None:
+                self._record_rejected_invocation(outcome)
+            raise
+        if outcome is not None:
+            self._record_successful_invocation(outcome)
+        else:
+            self._save_prompt_record(
                 SCORING_PROMPT_ID,
                 {
                     "scoring_task_id": rubric_scoring_task.scoring_task_id,
                     "evidence_query_id": evidence_bundle.query_id,
                     "adapter": result.model_name,
                 },
-            )
-        audit_saver = getattr(self._prompt_repository, "save_model_audit", None)
-        if callable(audit_saver):
-            audit_saver(
-                f"model_audit_{rubric_scoring_task.scoring_task_id}",
-                result.model_copy(deep=True),
             )
         return result
 
@@ -128,7 +177,7 @@ class M7LocalModelService:
         feedback_generation_task: FeedbackGenerationTask,
         evidence_bundle: EvidenceBundle,
     ) -> StudentFeedbackPackage:
-        """Generate cited learner-safe feedback.
+        """Build cited learner-safe feedback without a model call.
 
         原始输入：M6 反馈生成任务和 M2 课程证据包。
         契约来源：decide_next_action 与 retrieve 的对齐输出。
@@ -152,12 +201,13 @@ class M7LocalModelService:
         ]
         target_ids = feedback_generation_task.target_concept_ids()
         package = StudentFeedbackPackage(
-            feedback_id=(
-                f"feedback_{feedback_generation_task.feedback_task_id}"
-            ),
+            feedback_id=f"feedback_{feedback_generation_task.feedback_task_id}",
             task_id=feedback_generation_task.task_id,
             learner_id=feedback_generation_task.learner_id,
-            message=feedback_message(target_ids),
+            message=feedback_message(
+                target_ids,
+                feedback_generation_task.teaching_action.action_type,
+            ),
             rubric_feedback=[],
             missing_concept_ids=target_ids,
             evidence_citations=citations,
@@ -167,26 +217,26 @@ class M7LocalModelService:
             confidence=0.6,
             generated_at=feedback_generation_task.created_at,
         )
-        if not package.safe_for_student():
-            raise DomainError(
-                code="EVIDENCE_REQUIRED",
-                module="m7",
-                message="student feedback must remain cited and answer-safe",
-                details={
-                    "feedback_task_id": feedback_generation_task.feedback_task_id
-                },
-                recoverable=True,
-            )
-        saver = getattr(self._prompt_repository, "save_prompt_record", None)
-        if callable(saver):
-            saver(
-                FEEDBACK_PROMPT_ID,
-                {
-                    "feedback_task_id": feedback_generation_task.feedback_task_id,
-                    "evidence_query_id": evidence_bundle.query_id,
-                    "must_hide_answer": feedback_generation_task.must_hide_answer(),
-                },
-            )
+        self._validate_feedback_package(
+            feedback_generation_task,
+            evidence_bundle,
+            package,
+        )
+        self._save_prompt_record(
+            FEEDBACK_PROMPT_ID,
+            {
+                "feedback_task_id": (
+                    feedback_generation_task.feedback_task_id
+                ),
+                "evidence_query_id": evidence_bundle.query_id,
+                "prompt_template_version": FEEDBACK_PROMPT_VERSION,
+                "generation_mode": "deterministic",
+                "action_type": (
+                    feedback_generation_task.teaching_action.action_type
+                ),
+                "must_hide_answer": feedback_generation_task.must_hide_answer(),
+            },
+        )
         insert_or_get = getattr(
             self._prompt_repository,
             "insert_or_get_feedback",
@@ -197,7 +247,11 @@ class M7LocalModelService:
             if authoritative != package:
                 raise RuntimeError("M7 persisted feedback conflicts with result")
             return authoritative.model_copy(deep=True)
-        feedback_saver = getattr(self._prompt_repository, "save_feedback", None)
+        feedback_saver = getattr(
+            self._prompt_repository,
+            "save_feedback",
+            None,
+        )
         if callable(feedback_saver):
             feedback_saver(package.model_copy(deep=True))
         return package
@@ -275,9 +329,45 @@ class M7LocalModelService:
                 details={"scoring_task_id": task.scoring_task_id},
                 recoverable=True,
             )
+        if (
+            result.scoring_task_id != task.scoring_task_id
+            or len(result.criterion_scores)
+            != len(task.rubric.criteria)
+            or {
+                score.criterion_id for score in result.criterion_scores
+            }
+            != task.criterion_ids()
+            or result.total_score > task.max_score() + 1e-9
+        ):
+            raise DomainError(
+                code="INVALID_MODEL_JSON",
+                module="m7",
+                message="adapter output does not match the frozen scoring task",
+                details={"scoring_task_id": task.scoring_task_id},
+                recoverable=True,
+            )
         available_ids = set(evidence_bundle.citation_ids())
         for score in result.criterion_scores:
             criterion = task.rubric.criterion(score.criterion_id)
+            if (
+                score.score > criterion.max_score + 1e-9
+                or (
+                    score.student_evidence
+                    and score.student_evidence not in task.student_answer
+                )
+                or (
+                    score.score > 0.0
+                    and task.rubric.review_policy.require_evidence_for_positive_score
+                    and score.course_evidence_id is None
+                )
+            ):
+                raise DomainError(
+                    code="INVALID_MODEL_JSON",
+                    module="m7",
+                    message="adapter criterion output violates the frozen rubric",
+                    details={"criterion_id": score.criterion_id},
+                    recoverable=True,
+                )
             if score.course_evidence_id is not None and (
                 score.course_evidence_id not in available_ids
                 or score.course_evidence_id not in criterion.course_evidence_ids
@@ -289,9 +379,8 @@ class M7LocalModelService:
                     details={"criterion_id": score.criterion_id},
                     recoverable=True,
                 )
-        validator = getattr(self._output_validator, "validate", None)
-        if callable(validator):
-            accepted = validator(result)
+        if isinstance(self._output_validator, ModelOutputValidator):
+            accepted = self._output_validator.validate(result)
         elif callable(self._output_validator):
             accepted = self._output_validator(result)
         else:
@@ -304,3 +393,124 @@ class M7LocalModelService:
                 details={"scoring_task_id": task.scoring_task_id},
                 recoverable=True,
             )
+
+    @staticmethod
+    def _validate_feedback_package(
+        task: FeedbackGenerationTask,
+        evidence_bundle: EvidenceBundle,
+        package: Any,
+    ) -> None:
+        if not isinstance(package, StudentFeedbackPackage):
+            raise DomainError(
+                code="INVALID_MODEL_JSON",
+                module="m7",
+                message="the feedback builder returned an invalid result type",
+                details={"feedback_task_id": task.feedback_task_id},
+                recoverable=True,
+            )
+        citation_ids = set(package.citation_ids())
+        if (
+            package.feedback_id != f"feedback_{task.feedback_task_id}"
+            or package.task_id != task.task_id
+            or package.learner_id != task.learner_id
+            or not citation_ids
+            or not citation_ids <= set(evidence_bundle.citation_ids())
+            or not set(package.missing_concept_ids)
+            <= set(task.target_concept_ids())
+            or not package.safe_for_student()
+        ):
+            raise DomainError(
+                code="EVIDENCE_REQUIRED",
+                module="m7",
+                message="student feedback must remain aligned, cited, and answer-safe",
+                details={"feedback_task_id": task.feedback_task_id},
+                recoverable=True,
+            )
+
+    def _record_successful_invocation(
+        self,
+        outcome: M7ScoringOutcome,
+    ) -> None:
+        self._save_prompt_record(
+            outcome.prompt_record["prompt_template_id"],
+            dict(outcome.prompt_record),
+        )
+        invocation_saver = getattr(
+            self._prompt_repository,
+            "save_invocation_audit",
+            None,
+        )
+        if callable(invocation_saver):
+            invocation_saver(outcome.audit.model_copy(deep=True))
+        safety_saver = getattr(
+            self._prompt_repository,
+            "save_safety_check",
+            None,
+        )
+        if callable(safety_saver):
+            safety_saver(outcome.safety.model_copy(deep=True))
+
+    def _record_failed_invocation(
+        self,
+        failure: M7InvocationFailure,
+    ) -> None:
+        self._save_prompt_record(
+            failure.prompt_record["prompt_template_id"],
+            dict(failure.prompt_record),
+        )
+        invocation_saver = getattr(
+            self._prompt_repository,
+            "save_invocation_audit",
+            None,
+        )
+        if callable(invocation_saver):
+            invocation_saver(failure.audit.model_copy(deep=True))
+        safety_saver = getattr(
+            self._prompt_repository,
+            "save_safety_check",
+            None,
+        )
+        if callable(safety_saver):
+            safety_saver(failure.safety.model_copy(deep=True))
+
+    def _record_rejected_invocation(
+        self,
+        outcome: M7ScoringOutcome,
+    ) -> None:
+        """Record a completed call rejected by the service-level validator."""
+
+        self._save_prompt_record(
+            outcome.prompt_record["prompt_template_id"],
+            dict(outcome.prompt_record),
+        )
+        invocation_saver = getattr(
+            self._prompt_repository,
+            "save_invocation_audit",
+            None,
+        )
+        if callable(invocation_saver):
+            invocation_saver(outcome.audit.model_copy(deep=True))
+        safety_saver = getattr(
+            self._prompt_repository,
+            "save_safety_check",
+            None,
+        )
+        if callable(safety_saver):
+            safety_saver(
+                outcome.safety.model_copy(
+                    update={
+                        "status": "blocked",
+                        "flags": ["invalid_model_output"],
+                    },
+                    deep=True,
+                )
+            )
+
+    def _save_prompt_record(
+        self,
+        prompt_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        saver = getattr(self._prompt_repository, "save_prompt_record", None)
+        if callable(saver):
+            saver(prompt_id, dict(payload))

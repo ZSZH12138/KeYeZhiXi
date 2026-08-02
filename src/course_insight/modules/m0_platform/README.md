@@ -60,9 +60,10 @@ PostgreSQL；真实 PostgreSQL 是否通过联调，必须以提供受保护测�
 
 本阶段已经有 `.env` / `app.json` 配置加载、`roles.csv` 校验与同步、
 `app.log` 结构化日志、独立 outbox Worker、M0 Web Django migration 与
-PostgreSQL 适配器入口。M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M7/M9
-DeepSeek 网络调用仍是显式空实现；平台持久化不等于算法已经实现。生产长期运行
-与真实 PostgreSQL 仍需在目标环境验收。
+PostgreSQL 适配器入口。M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M9
+DeepSeek 调用仍为空；M7 默认/legacy 路径为空，但已有可显式注入的真实主观评分
+适配器，学生反馈为确定性零网络路径。平台持久化不等于算法已经实现。生产长期
+运行与真实 PostgreSQL 仍需在目标环境验收。
 
 运维文档入口：
 

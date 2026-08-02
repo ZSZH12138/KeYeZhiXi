@@ -9,6 +9,7 @@ from course_insight.infrastructure.sqlite.module_recovery_schema import (
     M5_CLASS_STATES_V4_SQL as _M5_CLASS_STATES_V4_SQL,
     M5_LEARNER_STATES_SQL as _M5_LEARNER_STATES_SQL,
     M5_LEARNER_STATES_V4_SQL as _M5_LEARNER_STATES_V4_SQL,
+    M9_MODEL_INVOCATION_AUDITS_SQL as _M9_MODEL_INVOCATION_AUDITS_SQL,
     MODULE_RECOVERY_TABLES as _MODULE_RECOVERY_TABLES,
 )
 from course_insight.infrastructure.sqlite.outbox_migration import (
@@ -32,7 +33,7 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     migrate_workflow_v10_to_v11,
 )
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
@@ -49,6 +50,7 @@ _ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME = (
 )
 _M6_POLICY_LEARNING_MIGRATION_NAME = "m6_policy_learning"
 _ASSESSMENT_POLICY_FREEZE_MIGRATION_NAME = "m0_policy_freeze"
+_M9_MODEL_AUDIT_MIGRATION_NAME = "m9_model_invocation_audits"
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -910,6 +912,22 @@ def _validate_module_recovery_schema(connection: sqlite3.Connection) -> None:
             )
 
 
+def _validate_m9_model_audit_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    if _normalized_table_schema_sql(
+        connection,
+        "m9_model_invocation_audits",
+    ) != _normalize_create_table_sql(_M9_MODEL_INVOCATION_AUDITS_SQL):
+        raise RuntimeError(
+            "m9_model_invocation_audits schema is incompatible"
+        )
+    if connection.execute(
+        "PRAGMA foreign_key_check('m9_model_invocation_audits')"
+    ).fetchone() is not None:
+        raise RuntimeError("M9 model audit data violates foreign keys")
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     """Apply every pending migration in one explicit immediate transaction."""
 
@@ -1035,6 +1053,7 @@ def migrate(connection: sqlite3.Connection) -> None:
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                 (9, _ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME),
             )
+            applied_versions.add(9)
         else:
             _validate_assessment_workflow_schema(
                 connection,
@@ -1102,6 +1121,16 @@ def migrate(connection: sqlite3.Connection) -> None:
                 connection,
                 schema_version=13,
             )
+        if 14 not in applied_versions:
+            connection.execute(_M9_MODEL_INVOCATION_AUDITS_SQL)
+            _validate_m9_model_audit_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (14, _M9_MODEL_AUDIT_MIGRATION_NAME),
+            )
+            applied_versions.add(14)
+        else:
+            _validate_m9_model_audit_schema(connection)
         validate_outbox_schema(connection, schema_version=SCHEMA_VERSION)
         connection.execute("COMMIT")
     except Exception:

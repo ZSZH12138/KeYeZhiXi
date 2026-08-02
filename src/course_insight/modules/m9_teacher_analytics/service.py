@@ -18,17 +18,27 @@ from course_insight.contracts.errors import DomainError
 from course_insight.contracts.intelligence import (
     LLMGenerationRequest,
     LLMGenerationResult,
+    ModelInvocationAudit,
+    SafetyCheckResult,
 )
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.learning_models import (
     CalibrationRunResult,
     ModelQualityReport,
 )
-from course_insight.contracts.platform import TeacherReviewSubmission
+from course_insight.contracts.platform import ActorContext, TeacherReviewSubmission
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.deepseek import EmptyDeepSeekAdapter
 from course_insight.infrastructure.json_io import read_json
-from course_insight.modules.m9_teacher_analytics.repository import M9Repository
+from course_insight.modules.m9_teacher_analytics.adapter import (
+    GovernedM9NarrativeAdapter,
+    M9InvocationFailure,
+    M9NarrativeOutcome,
+)
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9ModelAuditRecord,
+    M9Repository,
+)
 from course_insight.modules.m9_teacher_analytics.reports import (
     build_class_report,
     build_individual_report,
@@ -87,6 +97,19 @@ class M9TeacherAnalyticsService:
         self._repository = repository
         self._statistics_engine = statistics_engine
         self._suggestion_rule_engine = suggestion_rule_engine
+        self._narrative_adapter: GovernedM9NarrativeAdapter | None = None
+
+    def configure_teacher_interpreter(
+        self,
+        adapter: GovernedM9NarrativeAdapter,
+    ) -> None:
+        """Explicitly enable the optional, default-off DeepSeek path."""
+
+        if not isinstance(adapter, GovernedM9NarrativeAdapter):
+            raise TypeError("adapter must implement GovernedM9NarrativeAdapter")
+        if self._narrative_adapter is not None:
+            raise RuntimeError("M9 teacher interpreter is already configured")
+        self._narrative_adapter = adapter
 
     def generate_teacher_narrative(
         self,
@@ -108,6 +131,107 @@ class M9TeacherAnalyticsService:
                 message="M9 accepts only teacher-narrative generation",
             )
         return EmptyDeepSeekAdapter().generate(request)
+
+    def interpret_teacher_analytics(
+        self,
+        actor_context: ActorContext,
+        analytics_bundle: TeacherAnalyticsBundle,
+    ) -> LLMGenerationResult:
+        """Generate a teacher-only interpretation of authoritative analytics.
+
+        原始输入：教师权限上下文和已经持久化的 TeacherAnalyticsBundle。
+        契约来源：M0 ActorContext 及 M3/M8/M5 的确定性分析结果。
+        返回消费者：M0 教师分析界面。
+        业务校验：仅教师本人班级、仅权威报告、仅匿名班级聚合事实；模型
+        不能重算、改建议、读取个体数据或替教师决策。
+        错误码：MODEL_ADAPTER_UNCONFIGURED、MODEL_API_UNAVAILABLE、
+        MODEL_OUTPUT_BLOCKED、INVALID_MODEL_JSON、REPORT_SCOPE_INVALID、
+        TEACHER_INTERPRETATION_FORBIDDEN。
+        """
+
+        if (
+            actor_context.role != "teacher"
+            or analytics_bundle.class_report.class_id
+            not in actor_context.class_ids
+            or not actor_context.course_ids
+        ):
+            raise DomainError(
+                code="TEACHER_INTERPRETATION_FORBIDDEN",
+                module="m9",
+                message="teacher interpretation requires an authorized teacher class",
+                recoverable=False,
+            )
+        scoped_getter = getattr(
+            self._repository,
+            "get_scoped_analytics",
+            None,
+        )
+        authoritative = None
+        if callable(scoped_getter):
+            for course_id in actor_context.course_ids:
+                authoritative = scoped_getter(
+                    analytics_bundle.report_id,
+                    course_id=course_id,
+                    class_id=analytics_bundle.class_report.class_id,
+                )
+                if authoritative is not None:
+                    break
+        if authoritative is None:
+            raise DomainError(
+                code="TEACHER_INTERPRETATION_FORBIDDEN",
+                module="m9",
+                message=(
+                    "teacher interpretation requires an authorized "
+                    "course and class report"
+                ),
+                recoverable=False,
+            )
+        if (
+            not hmac.compare_digest(
+                authoritative.content_checksum(),
+                analytics_bundle.content_checksum(),
+            )
+            or authoritative != analytics_bundle
+        ):
+            raise DomainError(
+                code="REPORT_SCOPE_INVALID",
+                module="m9",
+                message="teacher interpretation requires the authoritative M9 report",
+                details={"report_id": analytics_bundle.report_id},
+                recoverable=True,
+            )
+        if self._narrative_adapter is None:
+            raise DomainError(
+                code="MODEL_ADAPTER_UNCONFIGURED",
+                module="m9",
+                message="the governed teacher-interpretation adapter is not configured",
+                recoverable=True,
+            )
+        try:
+            outcome = self._narrative_adapter.narrate(analytics_bundle)
+        except M9InvocationFailure as failure:
+            self._record_model_call(
+                prompt_record=failure.prompt_record,
+                generation=failure.generation,
+                invocation=failure.audit,
+                safety=failure.safety,
+            )
+            raise failure.error from None
+        if not isinstance(outcome, M9NarrativeOutcome):
+            raise DomainError(
+                code="INVALID_MODEL_JSON",
+                module="m9",
+                message="the governed narrative adapter returned an invalid outcome",
+                details={"report_id": analytics_bundle.report_id},
+                recoverable=True,
+            )
+        self._record_model_call(
+            prompt_record=outcome.prompt_record,
+            generation=outcome.generation,
+            invocation=outcome.audit,
+            safety=outcome.safety,
+        )
+        return outcome.generation.model_copy(deep=True)
 
     def build_model_quality_report(
         self,
@@ -381,6 +505,25 @@ class M9TeacherAnalyticsService:
             return None
         decision = getter(decision_id)
         return None if decision is None else decision.model_copy(deep=True)
+
+    def _record_model_call(
+        self,
+        *,
+        prompt_record: dict[str, Any],
+        generation: LLMGenerationResult,
+        invocation: ModelInvocationAudit,
+        safety: SafetyCheckResult,
+    ) -> None:
+        record = M9ModelAuditRecord.from_artifacts(
+            prompt_record=dict(prompt_record),
+            generation=generation.model_copy(deep=True),
+            invocation=invocation.model_copy(deep=True),
+            safety=safety.model_copy(deep=True),
+        )
+        saver = getattr(self._repository, "save_model_audit", None)
+        if not callable(saver):
+            raise RuntimeError("M9 repository does not persist model-call audits")
+        saver(record)
 
     @staticmethod
     def _validate_scope(
