@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from threading import RLock
 from types import MappingProxyType
 from typing import Mapping
@@ -180,9 +180,11 @@ class CourseRuntimeRegistry:
 
     def _resolve_ref(self, reference: Path) -> Path:
         path = Path(reference)
+        windows_path = PureWindowsPath(str(reference))
         if (
             path.is_absolute()
             or path.drive
+            or windows_path.anchor
             or not path.parts
             or any(part in {"", ".", ".."} for part in path.parts)
         ):
