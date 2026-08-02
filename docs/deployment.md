@@ -291,7 +291,7 @@ Conda 初始化与当前 shell，不要把依赖装入 base。
 命令：
 
 ```shell
-python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
+python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev,intent]"
 python -m pip check
 ```
 

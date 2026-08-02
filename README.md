@@ -50,7 +50,7 @@
 ```shell
 conda create --name course-insight-framework python=3.12 -y
 conda activate course-insight-framework
-python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
+python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev,intent]"
 python -m pytest -q
 ```
 

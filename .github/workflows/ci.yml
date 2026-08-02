@@ -42,7 +42,7 @@ jobs:
         run: >-
           python -m pip install --disable-pip-version-check
           --constraint requirements/ci-constraints.txt
-          -e ".[dev]"
+          -e ".[dev,intent]"
 
       - name: Check installed dependencies
         run: python -m pip check
@@ -56,9 +56,9 @@ jobs:
       - name: Enforce M6 coverage gate
         run: >-
           python -m pytest -q
-          tests/unit/test_m6_tutoring_fsm.py
-          tests/integration/test_m6_persistence.py
-          tests/integration/test_m6_cross_module.py
+          tests/unit
+          tests/integration
+          -k m6
           --cov=course_insight.modules.m6_tutoring_fsm
           --cov=course_insight.infrastructure.sqlite.m6_repository
           --cov=course_insight.infrastructure.sqlite.migrations
