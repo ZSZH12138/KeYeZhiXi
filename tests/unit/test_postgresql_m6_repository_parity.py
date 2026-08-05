@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
+import json
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
@@ -167,6 +169,13 @@ def _record(
         ),
         result=result,
     )
+
+
+def _legacy_payload_checksum(payload: dict[str, Any]) -> str:
+    """Calculate the historic ContractModel checksum from a JSON payload."""
+
+    serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    return hashlib.sha256(serialized.encode("utf-8")).hexdigest()
 
 
 def _policy_execution(
@@ -629,6 +638,36 @@ def test_commit_atomically_seeds_previous_result_and_decision() -> None:
     assert decision_row["payload_checksum"] == candidate.result.content_checksum()
     assert decision_row["schema_version"] == candidate.result.schema_version
     assert database.jsonb_bind_count == 4
+
+
+def test_legacy_m6_decision_with_legacy_evidence_query_restores() -> None:
+    module = _repository_module()
+    database = _FakeM6Database()
+    repository = module.PostgresM6Repository(_FakePool(database))
+    record = _record(_snapshot())
+    legacy_payload = record.result.to_dict()
+    legacy_query = legacy_payload["evidence_query"]
+    assert isinstance(legacy_query, dict)
+    legacy_query.pop("course_package_checksum", None)
+    legacy_query.pop("required_evidence_ids", None)
+    row = {
+        "decision_id": record.decision_id,
+        "session_id": record.session_id,
+        "turn_count": record.turn_count,
+        "previous_turn_count": record.previous_turn_count,
+        "request_fingerprint": record.request_fingerprint,
+        "input_fingerprint": record.input_fingerprint,
+        "evidence_fingerprint": record.evidence_fingerprint,
+        "evidence_identity": record.evidence_identity.to_dict(),
+        "result_payload": legacy_payload,
+        "payload_checksum": _legacy_payload_checksum(legacy_payload),
+        "schema_version": record.result.schema_version,
+    }
+    database.decisions_by_request[record.request_fingerprint] = row
+    database.decisions_by_input[record.input_fingerprint] = row
+    database.decisions_by_turn[(record.session_id, record.turn_count)] = row
+
+    assert repository.get_decision_by_request(record.request_fingerprint) == record
 
 
 def test_request_and_input_replays_return_only_compatible_authority() -> None:

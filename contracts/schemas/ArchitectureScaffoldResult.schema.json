@@ -393,6 +393,18 @@
           "title": "Chunk Count",
           "type": "integer"
         },
+        "course_package_checksum": {
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Course Package Checksum"
+        },
         "course_package_id": {
           "minLength": 1,
           "title": "Course Package Id",

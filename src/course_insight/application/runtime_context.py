@@ -16,6 +16,9 @@ from course_insight.modules.m0_platform.service import M0PlatformService
 from course_insight.modules.m2_evidence_retrieval.service import (
     M2EvidenceRetrievalService,
 )
+from course_insight.modules.m2_evidence_retrieval.lexical import (
+    LexicalIndexSnapshot,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -30,6 +33,21 @@ class _DiscardingM2Repository:
         index_id: str,
         index_version: str,
     ) -> EvidenceIndexRef | None:
+        del index_id, index_version
+        return None
+
+    def save_index_artifact(
+        self,
+        index: EvidenceIndexRef,
+        snapshot: LexicalIndexSnapshot,
+    ) -> None:
+        del index, snapshot
+
+    def load_index_artifact(
+        self,
+        index_id: str,
+        index_version: str,
+    ) -> tuple[EvidenceIndexRef, LexicalIndexSnapshot] | None:
         del index_id, index_version
         return None
 
