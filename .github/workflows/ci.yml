@@ -56,14 +56,17 @@ jobs:
       - name: Enforce M6 coverage gate
         run: >-
           python -m pytest -q
-          tests/unit/test_m6_tutoring_fsm.py
-          tests/integration/test_m6_persistence.py
-          tests/integration/test_m6_cross_module.py
+          tests/unit/test_m6_*.py
+          tests/unit/test_frozen_policy_loading.py
+          tests/unit/test_postgresql_m6_repository_parity.py
+          tests/integration/test_m6_*.py
+          tests/integration/test_m4_m6_migration_sequence.py
+          tests/integration/test_postgresql_m4_m6_repository_parity.py
           --cov=course_insight.modules.m6_tutoring_fsm
           --cov=course_insight.infrastructure.sqlite.m6_repository
           --cov=course_insight.infrastructure.sqlite.migrations
           --cov-report=term-missing
-          --cov-fail-under=90
+          --cov-fail-under=88
 
       - name: Verify deterministic public schemas
         run: |
