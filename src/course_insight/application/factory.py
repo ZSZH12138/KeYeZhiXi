@@ -17,6 +17,9 @@ from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.infrastructure.config import PlatformSettings
+from course_insight.infrastructure.m1_file_repository import FileM1Repository
+from course_insight.infrastructure.m2_file_repository import FileM2Repository
+from course_insight.infrastructure.m3_file_repository import FileM3Repository
 from course_insight.infrastructure.postgresql.m0_repository import (
     PostgresM0Repository,
 )
@@ -54,6 +57,7 @@ from course_insight.modules.m0_platform.service import M0PlatformService
 from course_insight.modules.m0_platform.outbox import IdempotentJsonlSink
 from course_insight.modules.m0_platform.outbox_worker import OutboxWorker
 from course_insight.modules.m1_course_governance.repository import M1Repository
+from course_insight.modules.m1_course_governance.parsers import parse_source
 from course_insight.modules.m1_course_governance.service import (
     M1CourseGovernanceService,
 )
@@ -339,9 +343,19 @@ def _assemble_application(
     )
     m1 = (
         M1CourseGovernanceService(
-            {".md": _read_markdown},
+            {
+                ".md": parse_source,
+                ".txt": parse_source,
+                ".pdf": parse_source,
+                ".docx": parse_source,
+                ".pptx": parse_source,
+            },
             _sha256,
-            _selected(repository_overrides.m1, _MemoryM1Repository()),
+            (
+                repository_overrides.m1
+                if repository_overrides.m1 is not None
+                else FileM1Repository(settings.runtime_dir)
+            ),
         )
         if service_overrides.m1 is None
         else service_overrides.m1
@@ -350,14 +364,22 @@ def _assemble_application(
         M2EvidenceRetrievalService(
             settings.runtime_dir / "indexes",
             _DeterministicDependency("lexical"),
-            _selected(repository_overrides.m2, _MemoryM2Repository()),
+            (
+                repository_overrides.m2
+                if repository_overrides.m2 is not None
+                else FileM2Repository(settings.runtime_dir)
+            ),
         )
         if service_overrides.m2 is None
         else service_overrides.m2
     )
     m3 = (
         M3KnowledgeBundleService(
-            _selected(repository_overrides.m3, _MemoryM3Repository()),
+            (
+                repository_overrides.m3
+                if repository_overrides.m3 is not None
+                else FileM3Repository(settings.runtime_dir)
+            ),
             _accept_knowledge_bundle,
         )
         if service_overrides.m3 is None
@@ -802,10 +824,6 @@ def _fixed_artifact_loader(
         return loaded
 
     return load
-
-
-def _read_markdown(path: Path) -> str:
-    return path.read_text(encoding="utf-8")
 
 
 def _sha256(payload: bytes) -> str:

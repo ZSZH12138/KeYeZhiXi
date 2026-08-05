@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 from pydantic import SecretStr
 
 from course_insight import cli
+from course_insight.application import runtime_context
 from course_insight.application import factory as application_factory
 from course_insight.application.factory import (
     ApplicationContainer,
@@ -26,10 +29,19 @@ from course_insight.contracts.course import (
     CoursePackage,
     SourceDocument,
 )
+from course_insight.contracts.assessment import RemediationPlan, ScoringResultBundle
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef, EvidenceQuery
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.platform import ActorContext
+from course_insight.contracts.state import (
+    ClassStateSnapshot,
+    ConceptState,
+    DiagnosisResult,
+    ItemDiagnosis,
+    LearnerStateSnapshot,
+    StateUpdateResult,
+)
 from course_insight.infrastructure.config import (
     DatabaseSettings,
     IntentSettings,
@@ -37,6 +49,13 @@ from course_insight.infrastructure.config import (
     PlatformSettings,
 )
 from course_insight.infrastructure.config.models import M6PolicySettings
+from course_insight.infrastructure.m1_file_repository import FileM1Repository
+from course_insight.infrastructure.m2_file_repository import FileM2Repository
+from course_insight.infrastructure.m3_file_repository import FileM3Repository
+from course_insight.modules.m1_course_governance.parsers import parse_source
+from course_insight.modules.m1_course_governance.stubs import (
+    M1CourseGovernanceServiceStub,
+)
 from course_insight.modules.m6_tutoring_fsm.policy_types import (
     CandidateAction,
     PolicyArtifactManifest,
@@ -78,6 +97,18 @@ from course_insight.modules.m0_platform.service import M0PlatformService
 from course_insight.modules.m0_platform.outbox_worker import OutboxWorker
 from course_insight.modules.m2_evidence_retrieval.stubs import (
     M2EvidenceRetrievalServiceStub,
+)
+from course_insight.modules.m2_evidence_retrieval.lexical import (
+    LexicalIndexSnapshot,
+    snapshot_from_payloads,
+    snapshot_to_payloads,
+)
+from course_insight.modules.m2_evidence_retrieval.service import (
+    M2EvidenceRetrievalService,
+)
+from course_insight.modules.m3_knowledge_bundle.stubs import (
+    M3KnowledgeBundleServiceStub,
+    _MemoryM3Repository,
 )
 from course_insight.modules.m4_task_orchestration import sklearn_adapter
 from course_insight.modules.m4_task_orchestration.intent import IntentStatus
@@ -131,7 +162,9 @@ def _course_package() -> CoursePackage:
         text="A governed rule explains the target concept.",
         locator="section:1",
         concept_hints=["concept_1"],
-        sha256=hashlib.sha256(b"governed chunk").hexdigest(),
+        sha256=hashlib.sha256(
+            b"A governed rule explains the target concept."
+        ).hexdigest(),
     )
     candidate = CoursePackage(
         course_package_id="package_1",
@@ -240,6 +273,836 @@ def test_real_django_does_not_break_legacy_empty_architecture_scaffold(
 
 class _RepositorySentinel:
     pass
+
+
+class _RecordingM2Repository:
+    """Complete M2 artifact double: records only successful immutable values."""
+
+    def __init__(self, *, fail_save: bool = False, fail_load: bool = False) -> None:
+        self.fail_save = fail_save
+        self.fail_load = fail_load
+        self.artifacts: dict[
+            tuple[str, str], tuple[EvidenceIndexRef, dict[str, bytes]]
+        ] = {}
+        self.save_calls: list[tuple[str, str]] = []
+        self.load_calls: list[tuple[str, str]] = []
+
+    @staticmethod
+    def _copy_snapshot(snapshot: LexicalIndexSnapshot) -> LexicalIndexSnapshot:
+        return snapshot_from_payloads(snapshot_to_payloads(snapshot))
+
+    def save_index(self, index: EvidenceIndexRef) -> None:
+        del index
+        raise AssertionError("M2 must save complete artifacts")
+
+    def get_index(
+        self, index_id: str, index_version: str
+    ) -> EvidenceIndexRef | None:
+        artifact = self.load_index_artifact(index_id, index_version)
+        return None if artifact is None else artifact[0]
+
+    def save_index_artifact(
+        self, index: EvidenceIndexRef, snapshot: LexicalIndexSnapshot
+    ) -> None:
+        self.save_calls.append((index.index_id, index.index_version))
+        if self.fail_save:
+            raise OSError("recording storage is unavailable")
+        payloads = snapshot_to_payloads(snapshot)
+        stored = (index.model_copy(deep=True), dict(payloads))
+        key = (index.index_id, index.index_version)
+        current = self.artifacts.get(key)
+        if current is not None and current != stored:
+            raise DomainError(
+                code="INDEX_VERSION_CONFLICT",
+                module="m2",
+                message="evidence index version conflicts with an immutable artifact",
+                details={},
+            )
+        self.artifacts.setdefault(key, stored)
+
+    def load_index_artifact(
+        self, index_id: str, index_version: str
+    ) -> tuple[EvidenceIndexRef, LexicalIndexSnapshot] | None:
+        self.load_calls.append((index_id, index_version))
+        if self.fail_load:
+            raise OSError("recording storage is unavailable")
+        current = self.artifacts.get((index_id, index_version))
+        if current is None:
+            return None
+        return current[0].model_copy(deep=True), self._copy_snapshot(
+            snapshot_from_payloads(current[1])
+        )
+
+
+class _RecordingM3Repository(_MemoryM3Repository):
+    """Complete M3 artifact double with explicit approved/rejected records."""
+
+    def __init__(self, *, fail_save: bool = False, fail_load: bool = False) -> None:
+        super().__init__()
+        self.fail_save = fail_save
+        self.fail_load = fail_load
+        self.approved: list[tuple[Any, Any, Any]] = []
+        self.rejected: list[tuple[Any, Any]] = []
+
+    def save_bundle_artifact(self, bundle: Any, report: Any, snapshot: Any) -> None:
+        self.approved.append((bundle, report, snapshot))
+        if self.fail_save:
+            raise OSError("recording storage is unavailable")
+        super().save_bundle_artifact(bundle, report, snapshot)
+
+    def save_rejected_validation(self, report: Any, snapshot: Any) -> None:
+        self.rejected.append((report, snapshot))
+        if self.fail_save:
+            raise OSError("recording storage is unavailable")
+        super().save_rejected_validation(report, snapshot)
+
+    def load_bundle_artifact(
+        self,
+        knowledge_bundle_id: str,
+        bundle_version: str,
+    ) -> Any:
+        if self.fail_load:
+            raise OSError("recording storage is unavailable")
+        return super().load_bundle_artifact(knowledge_bundle_id, bundle_version)
+
+
+def _m3_seed_paths(
+    tmp_path: Path,
+    package: CoursePackage,
+    *,
+    valid: bool = True,
+) -> dict[str, Path]:
+    tmp_path.mkdir(parents=True, exist_ok=True)
+    roles: dict[str, dict[str, object]] = {
+        "concept": {
+            "knowledge_bundle_id": "bundle_factory",
+            "bundle_version": "v1",
+            "published_at": NOW.isoformat(),
+            "course_id": package.course_id,
+            "course_package_id": package.course_package_id,
+            "course_package_checksum": package.checksum,
+            "concepts": [
+                {
+                    "concept_id": "concept_1",
+                    "name": "Factory concept",
+                    "chapter_id": "chapter_1",
+                    "description": "A concept loaded from teacher JSON.",
+                    "aliases": [],
+                    "status": "published",
+                }
+            ],
+            "concept_evidence_ids": {"concept_1": ["evidence_chunk_1"]},
+        },
+        "item": {
+            "items": [
+                {
+                    "item_id": "item_1",
+                    "version": "v1",
+                    "stem": "The factory item is valid.",
+                    "item_type": "true_false",
+                    "concept_ids": ["concept_1"],
+                    "misconception_ids": [],
+                    "difficulty_level": 1,
+                    "cognitive_level": "remember",
+                    "parameter_rules": [],
+                    "answer_key": {"answer": True, "max_score": 1.0},
+                    "rubric_id": None,
+                    "source_evidence_ids": ["evidence_chunk_1"],
+                    "status": "teacher_approved",
+                }
+            ],
+            "q_matrix": (
+                [
+                    {
+                        "item_id": "item_1",
+                        "item_version": "v1",
+                        "concept_id": "concept_1",
+                        "weight": 1.0,
+                    }
+                ]
+                if valid
+                else []
+            ),
+        },
+        "rubric": {"rubrics": []},
+        "blueprint": {
+            "blueprints": [
+                {
+                    "blueprint_id": "blueprint_1",
+                    "version": "v1",
+                    "course_id": package.course_id,
+                    "sections": [
+                        {
+                            "section_id": "section_1",
+                            "name": "Factory section",
+                            "item_count": 1,
+                            "score": 1.0,
+                            "item_types": [],
+                            "concept_weights": {"concept_1": 1.0},
+                            "difficulty_range": [1, 1],
+                            "anchor_item_ids": ["item_1"],
+                            "anchor_item_versions": {"item_1": "v1"},
+                        }
+                    ],
+                    "total_score": 1.0,
+                    "duration_minutes": 30,
+                    "status": "teacher_approved",
+                }
+            ]
+        },
+        "prerequisite": {"prerequisite_relations": []},
+        "misconception": {"misconception_tags": []},
+    }
+    paths: dict[str, Path] = {}
+    for role, value in roles.items():
+        path = tmp_path / f"{role}.json"
+        path.write_text(json.dumps(value, separators=(",", ":")), encoding="utf-8")
+        paths[role] = path
+    return paths
+
+
+def test_factory_default_m1_uses_runtime_file_repository(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    container = build_application(settings)
+
+    repository = container.m1_service._repository  # noqa: SLF001
+    assert isinstance(repository, FileM1Repository)
+    assert repository._store._runtime_dir == settings.runtime_dir  # noqa: SLF001
+
+
+def test_factory_default_m2_uses_runtime_file_repository(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    container = build_application(settings)
+
+    repository = container.m2_service._repository  # noqa: SLF001
+    assert isinstance(repository, FileM2Repository)
+    assert repository._store._runtime_dir == settings.runtime_dir  # noqa: SLF001
+
+
+def test_factory_default_m3_uses_runtime_file_repository(tmp_path: Path) -> None:
+    settings = _settings(tmp_path)
+
+    container = build_application(settings)
+
+    repository = container.m3_service._repository  # noqa: SLF001
+    assert isinstance(repository, FileM3Repository)
+    assert (  # noqa: SLF001
+        repository._store._runtime_dir.as_posix().removeprefix("//?/")
+        == settings.runtime_dir.resolve().as_posix()
+    )
+
+
+def test_factory_m3_repository_override_preserves_identity_without_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _RecordingM3Repository()
+
+    def fail_default_repository(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("discarded default M3 repository was constructed")
+
+    monkeypatch.setattr(
+        application_factory,
+        "FileM3Repository",
+        fail_default_repository,
+        raising=False,
+    )
+
+    container = build_application(
+        _settings(tmp_path), repositories=RepositoryOverrides(m3=repository)
+    )
+
+    assert container.m3_service._repository is repository  # noqa: SLF001
+
+
+def test_factory_m3_recording_repository_receives_complete_artifacts_and_restores(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    package = _course_package()
+    repository = _RecordingM3Repository()
+    paths = _m3_seed_paths(tmp_path / "teacher-seeds", package)
+    first = build_application(
+        settings, repositories=RepositoryOverrides(m3=repository)
+    )
+
+    bundle = first.m3_service.build_knowledge_bundle(
+        package,
+        paths["concept"],
+        paths["item"],
+        paths["rubric"],
+        paths["blueprint"],
+        paths["prerequisite"],
+        paths["misconception"],
+    )
+    first.close()
+
+    assert len(repository.approved) == 1
+    _, report, snapshot = repository.approved[0]
+    assert report.status == "approved"
+    assert report.seed_snapshot_checksum == snapshot.checksum
+    restarted = build_application(
+        settings, repositories=RepositoryOverrides(m3=repository)
+    )
+    restored = restarted.m3_service.restore_knowledge_bundle(
+        course_package=package,
+        knowledge_bundle_id=bundle.knowledge_bundle_id,
+        bundle_version=bundle.bundle_version,
+    )
+    restarted.close()
+
+    assert restored.model_dump(mode="json") == bundle.model_dump(mode="json")
+
+
+def test_factory_file_m3_restores_real_bundle_for_downstream_interfaces(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    package = _course_package()
+    paths = _m3_seed_paths(tmp_path / "teacher-seeds", package)
+    first = build_application(settings)
+    bundle = first.m3_service.build_knowledge_bundle(
+        package,
+        paths["concept"],
+        paths["item"],
+        paths["rubric"],
+        paths["blueprint"],
+        paths["prerequisite"],
+        paths["misconception"],
+    )
+    first.close()
+    shutil.rmtree(paths["concept"].parent)
+
+    restarted = build_application(settings)
+    try:
+        restarted.m0_service.initialize()
+        restored = restarted.m3_service.restore_knowledge_bundle(
+            course_package=package,
+            knowledge_bundle_id="bundle_factory",
+            bundle_version="v1",
+        )
+        task_plan = restarted.m4_service.create_task_plan(
+            student_text="start stage assessment",
+            task_type_hint="stage_assessment",
+            course_id=package.course_id,
+            class_id="class_1",
+            learner_id="learner_1",
+            session_id="session_1",
+            knowledge_bundle=restored,
+            learner_state_snapshot=None,
+        )
+        paper = restarted.m8_service.generate_paper(
+            task_plan=task_plan,
+            knowledge_bundle=restored,
+            learner_state_snapshot=None,
+            diagnosis_result=None,
+        )
+        scoring = ScoringResultBundle(
+            attempt_id="attempt_1",
+            paper_id=paper.paper_id,
+            learner_id="learner_1",
+            score_audit_records=[],
+            learning_events=[],
+            remediation_plan=RemediationPlan(
+                plan_id="remediation_1",
+                based_on_attempt_id="attempt_1",
+                learner_id="learner_1",
+                targets=[],
+                created_at=NOW,
+            ),
+            total_score=0.0,
+            max_score=0.0,
+            finalized_at=NOW,
+        )
+        state_update = StateUpdateResult(
+            diagnosis_result=DiagnosisResult(
+                diagnosis_id="diagnosis_1",
+                attempt_id="attempt_1",
+                learner_id="learner_1",
+                item_diagnoses=[
+                    ItemDiagnosis(
+                        item_instance_id="instance_1",
+                        concept_ids=["concept_1"],
+                        misconception_ids=[],
+                        error_type="none",
+                        confidence=1.0,
+                        evidence_audit_ids=["audit_1"],
+                        prerequisite_gap_ids=[],
+                    )
+                ],
+                priority_concept_ids=["concept_1"],
+                priority_misconception_ids=[],
+                generated_at=NOW,
+            ),
+            learner_state_snapshot=LearnerStateSnapshot(
+                snapshot_id="learner_snapshot_1",
+                course_id=package.course_id,
+                class_id="class_1",
+                learner_id="learner_1",
+                state_version=1,
+                concept_states=[
+                    ConceptState(
+                        concept_id="concept_1",
+                        mastery_probability=0.5,
+                        mastery_confidence=1.0,
+                        misconceptions=[],
+                        hint_dependency=0.0,
+                        recent_correction_rate=1.0,
+                        evidence_count=1,
+                        updated_at=NOW,
+                    )
+                ],
+                overall_mastery=0.5,
+                evidence_count=1,
+                updated_at=NOW,
+            ),
+            class_state_snapshot=ClassStateSnapshot(
+                snapshot_id="class_snapshot_1",
+                course_id=package.course_id,
+                class_id="class_1",
+                aggregation_policy_version="1.0.0",
+                scope={"course_id": package.course_id, "class_id": "class_1"},
+                class_size=1,
+                assessed_count=1,
+                coverage_rate=1.0,
+                concept_status=[],
+                misconception_summary=[],
+                evidence_status="sufficient",
+                updated_at=NOW,
+            ),
+            processed_audit_ids=["audit_1"],
+            updated_at=NOW,
+        )
+
+        assert restored.model_dump(mode="json") == bundle.model_dump(mode="json")
+        assert restored.knowledge_bundle_id == "bundle_factory"
+        assert restored.bundle_version == "v1"
+        assert task_plan.knowledge_bundle_id == restored.knowledge_bundle_id
+        assert paper.blueprint_id == task_plan.blueprint_id
+        assert restarted.m5_service._state_scope(  # noqa: SLF001
+            scoring,
+            restored,
+            None,
+            None,
+            authoritative_class_id="class_1",
+        ) == (package.course_id, "class_1", "learner_1")
+        restarted.m9_service._validate_scope(restored, scoring, state_update)  # noqa: SLF001
+    finally:
+        restarted.close()
+
+
+def test_factory_m3_recording_repository_receives_rejected_artifact(
+    tmp_path: Path,
+) -> None:
+    package = _course_package()
+    repository = _RecordingM3Repository()
+    paths = _m3_seed_paths(tmp_path / "teacher-seeds", package, valid=False)
+    service = build_application(
+        _settings(tmp_path), repositories=RepositoryOverrides(m3=repository)
+    ).m3_service
+
+    with pytest.raises(DomainError) as captured:
+        service.build_knowledge_bundle(
+            package,
+            paths["concept"],
+            paths["item"],
+            paths["rubric"],
+            paths["blueprint"],
+            paths["prerequisite"],
+            paths["misconception"],
+        )
+
+    assert captured.value.code == "Q_MATRIX_CONFLICT"
+    assert len(repository.rejected) == 1
+    report, snapshot = repository.rejected[0]
+    assert report.report_id == captured.value.details["report_id"]
+    assert report.seed_snapshot_checksum == snapshot.checksum
+
+
+@pytest.mark.parametrize("failure", ["save", "load"])
+def test_factory_m3_repository_failure_maps_through_service_boundary(
+    tmp_path: Path,
+    failure: str,
+) -> None:
+    package = _course_package()
+    paths = _m3_seed_paths(tmp_path / "teacher-seeds", package)
+    service = build_application(
+        _settings(tmp_path),
+        repositories=RepositoryOverrides(
+            m3=_RecordingM3Repository(
+                fail_save=failure == "save",
+                fail_load=failure == "load",
+            )
+        ),
+    ).m3_service
+
+    with pytest.raises(DomainError) as captured:
+        service.build_knowledge_bundle(
+            package,
+            paths["concept"],
+            paths["item"],
+            paths["rubric"],
+            paths["blueprint"],
+            paths["prerequisite"],
+            paths["misconception"],
+        )
+
+    assert captured.value.code == "KNOWLEDGE_ARTIFACT_INVALID"
+    assert captured.value.module == "m3"
+    assert captured.value.details == {}
+
+
+def test_factory_m3_service_override_does_not_construct_discarded_dependencies(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacement = M3KnowledgeBundleServiceStub()
+
+    def fail_default_repository(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("discarded default M3 repository was constructed")
+
+    def fail_service_constructor(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("discarded M3 validator dependency was constructed")
+
+    monkeypatch.setattr(
+        application_factory,
+        "FileM3Repository",
+        fail_default_repository,
+        raising=False,
+    )
+    monkeypatch.setattr(
+        application_factory,
+        "M3KnowledgeBundleService",
+        fail_service_constructor,
+    )
+
+    container = build_application(
+        _settings(tmp_path), services=ServiceOverrides(m3=replacement)
+    )
+
+    assert container.m3_service is replacement
+    assert container.coordinator._m3 is replacement  # noqa: SLF001
+
+
+def test_factory_m2_repository_override_preserves_identity_without_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _RecordingM2Repository()
+
+    def fail_default_repository(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("discarded default M2 repository was constructed")
+
+    monkeypatch.setattr(
+        application_factory,
+        "FileM2Repository",
+        fail_default_repository,
+    )
+
+    container = build_application(
+        _settings(tmp_path), repositories=RepositoryOverrides(m2=repository)
+    )
+
+    assert container.m2_service._repository is repository  # noqa: SLF001
+
+
+def test_factory_m2_repository_override_persists_complete_artifact_for_fresh_service(
+    tmp_path: Path,
+) -> None:
+    repository = _RecordingM2Repository()
+    settings = _settings(tmp_path)
+    first = build_application(
+        settings, repositories=RepositoryOverrides(m2=repository)
+    )
+    package = _course_package()
+
+    ref = first.m2_service.build_index(package)
+    assert repository.save_calls == [(ref.index_id, ref.index_version)]
+    stored_ref, stored_payloads = repository.artifacts[(ref.index_id, ref.index_version)]
+    assert stored_ref.course_package_id == package.course_package_id
+    assert stored_ref.course_package_checksum == package.checksum
+    assert snapshot_from_payloads(stored_payloads).course_package_checksum == package.checksum
+
+    restarted = build_application(
+        settings, repositories=RepositoryOverrides(m2=repository)
+    )
+    restored = restarted.m2_service.restore_index(
+        course_package=package, evidence_index_ref=ref
+    )
+    evidence = restarted.m2_service.retrieve(
+        EvidenceQuery(
+            query_id="factory_m2_recording_query",
+            course_package_id=package.course_package_id,
+            course_package_checksum=package.checksum,
+            query_text="governed rule",
+            concept_ids=["concept_1"],
+            item_id=None,
+            use_case="qa",
+            top_k=1,
+            min_relevance=0.1,
+        ),
+        restored,
+    )
+
+    assert repository.load_calls == [(ref.index_id, ref.index_version)]
+    assert [row.chunk_id for row in evidence.evidence_chunks] == ["chunk_1"]
+
+
+@pytest.mark.parametrize("failure", ["save", "load"])
+def test_factory_m2_repository_failure_maps_through_service_boundary(
+    tmp_path: Path, failure: str
+) -> None:
+    package = _course_package()
+    repository = _RecordingM2Repository(
+        fail_save=failure == "save", fail_load=failure == "load"
+    )
+    service = build_application(
+        _settings(tmp_path), repositories=RepositoryOverrides(m2=repository)
+    ).m2_service
+
+    if failure == "save":
+        with pytest.raises(DomainError) as captured:
+            service.build_index(package)
+    else:
+        source = _RecordingM2Repository()
+        ref = M2EvidenceRetrievalService(Path("indexes"), "lexical", source).build_index(
+            package
+        )
+        repository.artifacts.update(source.artifacts)
+        with pytest.raises(DomainError) as captured:
+            service.restore_index(course_package=package, evidence_index_ref=ref)
+
+    assert captured.value.code == "INDEX_ARTIFACT_INVALID"
+    assert captured.value.details == {}
+
+
+def test_factory_m2_service_override_does_not_construct_file_or_tokenizer(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacement = M2EvidenceRetrievalServiceStub()
+
+    def fail_default_repository(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("discarded default M2 repository was constructed")
+
+    real_dependency = application_factory._DeterministicDependency
+
+    def selective_dependency(name: str) -> object:
+        if name == "lexical":
+            raise AssertionError("discarded default M2 tokenizer was constructed")
+        return real_dependency(name)
+
+    monkeypatch.setattr(application_factory, "FileM2Repository", fail_default_repository)
+    monkeypatch.setattr(application_factory, "_DeterministicDependency", selective_dependency)
+
+    container = build_application(
+        _settings(tmp_path), services=ServiceOverrides(m2=replacement)
+    )
+
+    assert container.m2_service is replacement
+
+
+def test_factory_m2_file_artifact_restores_and_retrieves_after_restart(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    package = _course_package()
+    first = build_application(settings)
+    ref = first.m2_service.build_index(package)
+    first.close()
+
+    restarted = build_application(settings)
+    restored = restarted.m2_service.restore_index(
+        course_package=package, evidence_index_ref=ref
+    )
+    evidence = restarted.m2_service.retrieve(
+        EvidenceQuery(
+            query_id="factory_m2_file_query",
+            course_package_id=package.course_package_id,
+            course_package_checksum=package.checksum,
+            query_text="governed rule",
+            concept_ids=["concept_1"],
+            item_id=None,
+            use_case="qa",
+            top_k=1,
+            min_relevance=0.1,
+        ),
+        restored,
+    )
+    restarted.close()
+
+    assert [row.chunk_id for row in evidence.evidence_chunks] == ["chunk_1"]
+
+
+def test_factory_default_m1_registers_exact_supported_byte_parsers(
+    tmp_path: Path,
+) -> None:
+    container = build_application(_settings(tmp_path))
+
+    assert set(container.m1_service._parser_registry) == {  # noqa: SLF001
+        ".md",
+        ".txt",
+        ".pdf",
+        ".docx",
+        ".pptx",
+    }
+    assert all(
+        parser is parse_source
+        for parser in container.m1_service._parser_registry.values()  # noqa: SLF001
+    )
+
+
+def test_factory_default_m1_persists_authorized_txt_import_for_fresh_container(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path)
+    source = tmp_path / "lesson.txt"
+    source_bytes = b"Governed text"
+    source.write_bytes(source_bytes)
+    metadata = tmp_path / "course.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "course_package_id": "package-factory",
+                "course_id": "course-factory",
+                "package_version": "v1",
+                "course_name": "Factory Course",
+                "imported_at": "2026-08-03T00:00:00+00:00",
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    authorization = tmp_path / "authorization.csv"
+    authorization.write_text(
+        "file_name,source_id,expected_sha256,authorized_by,authorized_at,license_note\n"
+        f"lesson.txt,source-factory,{hashlib.sha256(source_bytes).hexdigest()},Teacher,2026-08-01T00:00:00+00:00,course-use\n",
+        encoding="utf-8",
+    )
+
+    first = build_application(settings)
+    package = first.m1_service.import_course(
+        [source], metadata, authorization, tmp_path / "output"
+    )
+    first.close()
+    restarted = build_application(settings)
+    restored = restarted.m1_service._repository.get_course_package(  # noqa: SLF001
+        "package-factory", "v1"
+    )
+    restarted.close()
+
+    assert restored == package
+
+
+def test_factory_m1_repository_override_preserves_identity_without_default(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repository = _RepositorySentinel()
+
+    def fail_default_repository(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("discarded default M1 repository was constructed")
+
+    monkeypatch.setattr(
+        application_factory,
+        "FileM1Repository",
+        fail_default_repository,
+    )
+
+    container = build_application(
+        _settings(tmp_path), repositories=RepositoryOverrides(m1=repository)
+    )
+
+    assert container.m1_service._repository is repository  # noqa: SLF001
+
+
+def test_factory_m1_service_override_preserves_identity_without_default_repository(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    replacement = M1CourseGovernanceServiceStub()
+
+    def fail_default_repository(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise AssertionError("discarded default M1 repository was constructed")
+
+    monkeypatch.setattr(
+        application_factory,
+        "FileM1Repository",
+        fail_default_repository,
+    )
+
+    container = build_application(
+        _settings(tmp_path), services=ServiceOverrides(m1=replacement)
+    )
+
+    assert container.m1_service is replacement
+    assert container.coordinator._m1 is replacement  # noqa: SLF001
+
+
+def test_m1_stub_accepts_markdown_and_text_byte_parsers(tmp_path: Path) -> None:
+    stub = M1CourseGovernanceServiceStub()
+
+    markdown = stub._parse(tmp_path / "lesson.md", b"# Lesson")  # noqa: SLF001
+    text = stub._parse(tmp_path / "lesson.txt", b"Lesson")  # noqa: SLF001
+
+    assert markdown.media_type == "text/markdown"
+    assert text.media_type == "text/plain"
+
+
+def test_m1_stub_import_uses_complete_snapshot_persistence(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    stub = M1CourseGovernanceServiceStub()
+    source = tmp_path / "lesson.txt"
+    source_bytes = b"Governed text"
+    source.write_bytes(source_bytes)
+    metadata = tmp_path / "course.json"
+    metadata.write_text(
+        json.dumps(
+            {
+                "course_package_id": "package-stub",
+                "course_id": "course-stub",
+                "package_version": "v1",
+                "course_name": "Stub Course",
+                "imported_at": "2026-08-03T00:00:00+00:00",
+            },
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+    authorization = tmp_path / "authorization.csv"
+    authorization.write_text(
+        "file_name,source_id,expected_sha256,authorized_by,authorized_at,license_note\n"
+        f"lesson.txt,source-stub,{hashlib.sha256(source_bytes).hexdigest()},Teacher,2026-08-01T00:00:00+00:00,course-use\n",
+        encoding="utf-8",
+    )
+    repository = stub._repository  # noqa: SLF001
+
+    def reject_incomplete_save(package: CoursePackage) -> None:
+        del package
+        raise AssertionError("stub must use save_course_import")
+
+    monkeypatch.setattr(repository, "save_course_package", reject_incomplete_save)
+
+    package = stub.import_course(
+        [source], metadata, authorization, tmp_path / "output"
+    )
+    stored = repository.get_course_package("package-stub", "v1")
+    snapshot = repository.snapshots[("package-stub", "v1")]
+
+    assert stored == package
+    assert stored is not package
+    assert snapshot.source_payloads[0].raw_bytes == source_bytes
 
 
 class _FalseyRepositorySentinel:
@@ -1027,6 +1890,49 @@ def test_runtime_registry_restores_snapshots_and_rebuilds_fresh_m2_index(
     assert evidence.course_id == "course_1"
     assert [item.chunk_id for item in evidence.evidence_chunks] == ["chunk_1"]
     assert container.runtime_registry.require("course_1") == context
+
+
+def test_legacy_v1_runtime_restore_uses_discarding_preview_and_idempotent_real_build(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    container = build_application(_settings(tmp_path))
+    container.m0_service.initialize()
+    refs = _snapshot_refs(container)
+    preview_repositories: list[object] = []
+
+    class _PreviewRecordingService(M2EvidenceRetrievalService):
+        def __init__(
+            self,
+            index_dir: Path,
+            tokenizer_or_embedding_adapter: object,
+            repository: object,
+        ) -> None:
+            preview_repositories.append(repository)
+            super().__init__(
+                index_dir,
+                tokenizer_or_embedding_adapter,
+                repository,  # type: ignore[arg-type]
+            )
+
+    monkeypatch.setattr(
+        runtime_context, "M2EvidenceRetrievalService", _PreviewRecordingService
+    )
+
+    first = container.runtime_registry.restore("course_1", refs)
+    second = container.runtime_registry.restore("course_1", refs)
+    artifact = container.m2_service._repository.load_index_artifact(  # noqa: SLF001
+        first.evidence_index_ref.index_id,
+        first.evidence_index_ref.index_version,
+    )
+
+    assert len(preview_repositories) == 2
+    assert all(
+        isinstance(repository, runtime_context._DiscardingM2Repository)  # noqa: SLF001
+        for repository in preview_repositories
+    )
+    assert artifact is not None
+    assert artifact[0] == first.evidence_index_ref == second.evidence_index_ref
 
 
 @pytest.mark.parametrize(

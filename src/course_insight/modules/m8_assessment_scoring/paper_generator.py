@@ -20,6 +20,10 @@ from course_insight.contracts.knowledge import (
 )
 from course_insight.contracts.state import DiagnosisResult, LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
+from course_insight.modules.m3_knowledge_bundle.selection import (
+    BlueprintSelectionError,
+    select_blueprint_items,
+)
 
 
 FIXED_TIME = datetime(2026, 7, 15, 9, 0, tzinfo=timezone(timedelta(hours=8)))
@@ -55,10 +59,23 @@ class PaperGenerator:
                 "assessment blueprint is not approved for the task course",
             )
 
-        used_item_ids: set[str] = set()
+        try:
+            selected_sections = select_blueprint_items(
+                knowledge_bundle,
+                blueprint,
+            )
+        except BlueprintSelectionError:
+            self._raise_unsatisfiable(
+                task_plan,
+                "assessment blueprint constraints cannot be satisfied",
+            )
         sections = [
-            self._build_section(section, knowledge_bundle, used_item_ids)
-            for section in blueprint.sections
+            self._build_section(section, selected, knowledge_bundle)
+            for section, selected in zip(
+                blueprint.sections,
+                selected_sections,
+                strict=True,
+            )
         ]
         paper_payload: dict[str, Any] = {
             "paper_id": f"paper_{task_plan.task_id}",
@@ -124,34 +141,9 @@ class PaperGenerator:
     def _build_section(
         self,
         section: BlueprintSection,
+        selected: tuple[ItemCard, ...],
         knowledge_bundle: KnowledgeBundle,
-        used_item_ids: set[str],
     ) -> PaperSection:
-        approved = [
-            item
-            for item in knowledge_bundle.approved_items()
-            if item.item_id not in used_item_ids and section.accepts(item)
-        ]
-        by_id = {item.item_id: item for item in approved}
-        if any(anchor_id not in by_id for anchor_id in section.anchor_item_ids):
-            self._raise_section_unsatisfiable(section, "anchor item is unavailable")
-
-        anchors = [by_id[anchor_id] for anchor_id in section.anchor_item_ids]
-        if len(anchors) > section.item_count:
-            self._raise_section_unsatisfiable(
-                section,
-                "anchor count exceeds the section item count",
-            )
-        anchored_ids = {item.item_id for item in anchors}
-        remaining = [item for item in approved if item.item_id not in anchored_ids]
-        ordered_candidates = [
-            *[item for item in remaining if item.is_objective()],
-            *[item for item in remaining if not item.is_objective()],
-        ]
-        selected = [*anchors, *ordered_candidates][0 : section.item_count]
-        if len(selected) != section.item_count:
-            self._raise_section_unsatisfiable(section, "not enough approved items")
-
         item_total = math.fsum(
             item.max_score(knowledge_bundle) for item in selected
         )
@@ -166,7 +158,6 @@ class PaperGenerator:
                 "selected item maxima do not match the section score",
             )
 
-        used_item_ids.update(item.item_id for item in selected)
         instances = [
             self._freeze_item(item, knowledge_bundle) for item in selected
         ]
