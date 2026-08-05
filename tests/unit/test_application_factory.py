@@ -131,7 +131,9 @@ def _course_package() -> CoursePackage:
         text="A governed rule explains the target concept.",
         locator="section:1",
         concept_hints=["concept_1"],
-        sha256=hashlib.sha256(b"governed chunk").hexdigest(),
+        sha256=hashlib.sha256(
+            b"A governed rule explains the target concept."
+        ).hexdigest(),
     )
     candidate = CoursePackage(
         course_package_id="package_1",

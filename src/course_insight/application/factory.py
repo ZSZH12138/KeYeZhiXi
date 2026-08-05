@@ -58,6 +58,9 @@ from course_insight.modules.m1_course_governance.service import (
     M1CourseGovernanceService,
 )
 from course_insight.modules.m2_evidence_retrieval.repository import M2Repository
+from course_insight.modules.m2_evidence_retrieval.lexical import (
+    LexicalIndexSnapshot,
+)
 from course_insight.modules.m2_evidence_retrieval.service import (
     M2EvidenceRetrievalService,
 )
@@ -238,6 +241,9 @@ class _MemoryM2Repository:
     indexes: Mapping[tuple[str, str], EvidenceIndexRef] = field(
         default_factory=lambda: MappingProxyType({})
     )
+    snapshots: Mapping[tuple[str, str], LexicalIndexSnapshot] = field(
+        default_factory=lambda: MappingProxyType({})
+    )
 
     def save_index(self, index: EvidenceIndexRef) -> None:
         key = (index.index_id, index.index_version)
@@ -251,6 +257,29 @@ class _MemoryM2Repository:
     ) -> EvidenceIndexRef | None:
         index = self.indexes.get((index_id, index_version))
         return None if index is None else index.model_copy(deep=True)
+
+    def save_index_artifact(
+        self,
+        index: EvidenceIndexRef,
+        snapshot: LexicalIndexSnapshot,
+    ) -> None:
+        key = (index.index_id, index.index_version)
+        updated_indexes = {**self.indexes, key: index.model_copy(deep=True)}
+        updated_snapshots = {**self.snapshots, key: snapshot}
+        object.__setattr__(self, "indexes", MappingProxyType(updated_indexes))
+        object.__setattr__(self, "snapshots", MappingProxyType(updated_snapshots))
+
+    def load_index_artifact(
+        self,
+        index_id: str,
+        index_version: str,
+    ) -> tuple[EvidenceIndexRef, LexicalIndexSnapshot] | None:
+        key = (index_id, index_version)
+        index = self.indexes.get(key)
+        snapshot = self.snapshots.get(key)
+        if index is None or snapshot is None:
+            return None
+        return index.model_copy(deep=True), snapshot
 
 
 @dataclass(frozen=True, slots=True)
