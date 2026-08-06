@@ -31,6 +31,12 @@ from course_insight.contracts.evidence import (
     EvidenceQuery,
 )
 from course_insight.contracts.knowledge import KnowledgeBundle
+from course_insight.contracts.learning_models import (
+    CognitiveDiagnosisResult,
+    KnowledgeTraceSnapshot,
+    LearningModelRun,
+    LearningObservationBatch,
+)
 from course_insight.contracts.state import (
     ClassStateSnapshot,
     ConceptState,
@@ -634,6 +640,44 @@ class _FixedM5:
 
     def update_state(self, **_: Any) -> StateUpdateResult:
         return self._state_update.model_copy(deep=True)
+
+    def convert_to_observations(self, **_: Any) -> LearningObservationBatch:
+        return LearningObservationBatch(
+            batch_id="fixed_batch",
+            learner_id=LEARNER_ID,
+            observations=[],
+            watermark="fixed_watermark",
+            created_at=NOW,
+        )
+
+    def run_learning_models(self, **_: Any) -> LearningModelRun:
+        return LearningModelRun(
+            run_id="fixed_run",
+            diagnosis=CognitiveDiagnosisResult(
+                run_id="fixed_dina",
+                learner_id=LEARNER_ID,
+                model_type="DINA",
+                model_version="unconfigured",
+                concept_mastery={},
+                observation_count=0,
+                status="empty",
+                generated_at=NOW,
+            ),
+            knowledge_trace=KnowledgeTraceSnapshot(
+                trace_id="fixed_bkt",
+                learner_id=LEARNER_ID,
+                model_type="BKT",
+                model_version="unconfigured",
+                concept_probabilities={},
+                observation_watermark="fixed_watermark",
+                observation_count=0,
+                status="empty",
+                updated_at=NOW,
+            ),
+            observation_count=0,
+            status="empty",
+            created_at=NOW,
+        )
 
 
 class _RecordingM6:

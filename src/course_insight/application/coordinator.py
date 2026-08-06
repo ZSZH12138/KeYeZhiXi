@@ -171,6 +171,14 @@ class AppCoordinator:
             previous_class_state_snapshot=None,
             state_policy_path=state_policy_path,
         )
+        # M5-06: convert score audits to learning observations and run models
+        observation_batch = self._m5.convert_to_observations(
+            bundle=scoring,
+            knowledge=knowledge_bundle,
+        )
+        learning_models = self._m5.run_learning_models(
+            observation_batch=observation_batch,
+        )
         tutoring = self._m6.decide_next_action(
             task_plan=task_plan,
             scoring_result_bundle=scoring,
@@ -199,6 +207,7 @@ class AppCoordinator:
             "rubric_scoring_result": rubric_result,
             "scoring_result": scoring,
             "state_result": state,
+            "learning_models": learning_models,
             "tutoring_result": tutoring,
             "feedback": feedback,
             "analytics": analytics,

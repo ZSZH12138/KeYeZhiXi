@@ -77,10 +77,18 @@ class M5StateService:
                 details={"attempt_id": scoring_result_bundle.attempt_id},
                 recoverable=True,
             )
+        # M5-07: load processed audit watermark from repository for restart recovery
         seen = self._processed_by_learner.get(
             scoring_result_bundle.learner_id,
-            frozenset(),
         )
+        if seen is None:
+            seen = self._repository.get_processed_audits(
+                scoring_result_bundle.learner_id
+            )
+            self._processed_by_learner = {
+                **self._processed_by_learner,
+                scoring_result_bundle.learner_id: seen,
+            }
         # M5-01: filter out already-processed audits from mixed batches
         new_audit_keys = audit_keys - seen
         if not new_audit_keys:
@@ -110,6 +118,23 @@ class M5StateService:
             )
             else DeterministicClassAggregationPolicy()
         )
+        # M5-07: recover previous state from repository when not provided by caller
+        if previous_learner_state_snapshot is None:
+            previous_learner_state_snapshot = (
+                self._repository.get_latest_learner_state(
+                    scoring_result_bundle.learner_id
+                )
+            )
+        if previous_class_state_snapshot is None:
+            # Recover class_id from learning events (M8-07 freezes it there)
+            class_id = "class_unavailable"
+            for event in scoring_result_bundle.learning_events:
+                if event.class_id:
+                    class_id = event.class_id
+                break
+            previous_class_state_snapshot = (
+                self._repository.get_latest_class_state(class_id)
+            )
         diagnosis = update_policy.build_diagnosis(
             scoring_result_bundle,
             knowledge_bundle,
@@ -133,21 +158,13 @@ class M5StateService:
             processed_audit_ids=sorted(new_audit_keys),
             updated_at=scoring_result_bundle.finalized_at,
         )
-        # M5-07: persist state through the repository
-        save_learner = getattr(self._repository, "save_learner_state", None)
-        if callable(save_learner):
-            save_learner(learner.model_copy(deep=True))
-        save_class = getattr(self._repository, "save_class_state", None)
-        if callable(save_class):
-            save_class(class_state.model_copy(deep=True))
-        save_processed = getattr(
-            self._repository, "save_processed_audits", None
+        # M5-07: persist state directly through the repository (no getattr)
+        self._repository.save_learner_state(learner.model_copy(deep=True))
+        self._repository.save_class_state(class_state.model_copy(deep=True))
+        self._repository.save_processed_audits(
+            scoring_result_bundle.learner_id,
+            seen | new_audit_keys,
         )
-        if callable(save_processed):
-            save_processed(
-                scoring_result_bundle.learner_id,
-                seen | new_audit_keys,
-            )
         self._processed_by_learner = {
             **self._processed_by_learner,
             scoring_result_bundle.learner_id: seen | new_audit_keys,

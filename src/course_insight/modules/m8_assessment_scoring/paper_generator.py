@@ -29,6 +29,17 @@ _SCORE_TOLERANCE = 1e-9
 class PaperGenerator:
     """Select and freeze approved items without random or model behavior."""
 
+    def __init__(self, clock: Any = None) -> None:
+        # M8-09: use injectable clock instead of hardcoded FIXED_TIME
+        self._clock = clock
+
+    def _now(self) -> datetime:
+        """Return current time from injected clock, or FIXED_TIME as default."""
+
+        if self._clock is not None and callable(getattr(self._clock, "now", None)):
+            return self._clock.now()
+        return FIXED_TIME
+
     def generate(
         self,
         task_plan: TaskPlan,
@@ -72,7 +83,7 @@ class PaperGenerator:
             "blueprint_version": blueprint.version,
             "learner_id": task_plan.learner_id,
             "sections": sections,
-            "generated_at": FIXED_TIME,
+            "generated_at": self._now(),
             "immutable_checksum": "pending",
             "course_id": task_plan.course_id,
             "class_id": task_plan.class_id,

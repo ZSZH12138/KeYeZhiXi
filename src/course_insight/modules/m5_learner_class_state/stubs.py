@@ -37,12 +37,40 @@ class InMemoryM5Repository:
         record = self._learner_states.get((learner_id, state_version))
         return record.model_copy(deep=True) if record is not None else None
 
+    def get_latest_learner_state(
+        self,
+        learner_id: str,
+    ) -> LearnerStateSnapshot | None:
+        candidates = [
+            snap
+            for (lid, _ver), snap in self._learner_states.items()
+            if lid == learner_id
+        ]
+        if not candidates:
+            return None
+        latest = max(candidates, key=lambda s: s.state_version)
+        return latest.model_copy(deep=True)
+
     def save_class_state(self, snapshot: ClassStateSnapshot) -> None:
         self._class_states[snapshot.snapshot_id] = snapshot.model_copy(deep=True)
 
     def get_class_state(self, snapshot_id: str) -> ClassStateSnapshot | None:
         record = self._class_states.get(snapshot_id)
         return record.model_copy(deep=True) if record is not None else None
+
+    def get_latest_class_state(
+        self,
+        class_id: str,
+    ) -> ClassStateSnapshot | None:
+        candidates = [
+            snap
+            for snap in self._class_states.values()
+            if snap.class_id == class_id
+        ]
+        if not candidates:
+            return None
+        latest = max(candidates, key=lambda s: s.updated_at)
+        return latest.model_copy(deep=True)
 
     def get_processed_audits(self, learner_id: str) -> frozenset[str]:
         return self._processed_audits.get(learner_id, frozenset())

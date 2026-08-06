@@ -109,9 +109,8 @@ class M8AssessmentService:
             **self._paper_event_context,
             paper.paper_id: (task_plan.course_id, task_plan.class_id),
         }
-        saver = getattr(self._repository, "save_paper", None)
-        if callable(saver):
-            saver(paper.model_copy(deep=True))
+        # M8-10: persist paper directly (no getattr defensive pattern)
+        self._repository.save_paper(paper.model_copy(deep=True))
         return paper
 
     def prepare_scoring(
@@ -433,10 +432,9 @@ class M8AssessmentService:
             max_score=max_score,
             finalized_at=self._clock.now(),
         )
-        saver = getattr(self._repository, "save_score_audit", None)
-        if callable(saver):
-            for record in bundle.score_audit_records:
-                saver(record.model_copy(deep=True))
+        # M8-10: persist score audits directly (no getattr defensive pattern)
+        for record in bundle.score_audit_records:
+            self._repository.save_score_audit(record.model_copy(deep=True))
         return bundle
 
     def apply_teacher_review(
@@ -456,6 +454,24 @@ class M8AssessmentService:
         current = current_scoring_result_bundle.get_audit_record(
             teacher_review_decision.audit_id
         )
+        # M8-10: read authoritative audit from repository to detect concurrent versions
+        authoritative = self._repository.get_latest_score_audit(
+            teacher_review_decision.audit_id
+        )
+        if (
+            authoritative is not None
+            and authoritative.audit_version > current.audit_version
+        ):
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m8",
+                message="a newer audit version was already persisted by another reviewer",
+                details={
+                    "audit_id": teacher_review_decision.audit_id,
+                    "expected_version": current.audit_version,
+                    "authoritative_version": authoritative.audit_version,
+                },
+            )
         teacher_review_decision.assert_matches(current)
         override_by_id = {
             override.criterion_id: override
@@ -547,9 +563,8 @@ class M8AssessmentService:
                 "finalized_at": teacher_review_decision.reviewed_at,
             }
         )
-        saver = getattr(self._repository, "save_score_audit", None)
-        if callable(saver):
-            saver(replacement.model_copy(deep=True))
+        # M8-10: persist reviewed audit directly (no getattr defensive pattern)
+        self._repository.save_score_audit(replacement.model_copy(deep=True))
         return finalized
 
     # ── M8-11 IRT 2PL 基础标定参数 ──
@@ -729,6 +744,14 @@ class M8AssessmentService:
                 "attempt_id": path.attempt_id,
                 "paper_id": path.paper_id,
                 "learner_id": path.learner_id,
+                # M8-06: include submission identity in checksum so that
+                # different submissions with identical answers are distinct.
+                "submission_id": path.submission_id,
+                "submitted_at": (
+                    path.submitted_at.isoformat()
+                    if path.submitted_at is not None
+                    else None
+                ),
                 "answers": [
                     {"item_instance_id": item_id, "answer": answer}
                     for item_id, answer in sorted(path.answers.items())

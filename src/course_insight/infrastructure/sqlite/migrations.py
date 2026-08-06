@@ -5,10 +5,11 @@ from __future__ import annotations
 import sqlite3
 
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
+_M5_M8_PERSISTENCE_MIGRATION_NAME = "m5_m8_persistence_tables"
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -233,6 +234,28 @@ _M6_DECISION_FOREIGN_KEY = (
         "NONE",
     ),
 )
+_M5_PROCESSED_AUDITS_SQL = """
+CREATE TABLE IF NOT EXISTS m5_processed_audits (
+    learner_id TEXT PRIMARY KEY CHECK (length(learner_id) > 0),
+    audit_keys TEXT NOT NULL CHECK (
+        CASE WHEN json_valid(audit_keys)
+            THEN json(audit_keys) = audit_keys
+            ELSE 0
+        END
+    )
+)
+"""
+_M8_PAPERS_SQL = """
+CREATE TABLE IF NOT EXISTS m8_papers (
+    paper_id TEXT PRIMARY KEY CHECK (length(paper_id) > 0),
+    payload TEXT NOT NULL CHECK (
+        CASE WHEN json_valid(payload)
+            THEN json(payload) = payload
+            ELSE 0
+        END
+    )
+)
+"""
 
 
 def current_schema_version(connection: sqlite3.Connection) -> int:
@@ -417,6 +440,14 @@ def migrate(connection: sqlite3.Connection) -> None:
             version = 3
         else:
             _validate_m6_decision_schema(connection)
+        if version < 4:
+            connection.execute(_M5_PROCESSED_AUDITS_SQL)
+            connection.execute(_M8_PAPERS_SQL)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (4, _M5_M8_PERSISTENCE_MIGRATION_NAME),
+            )
+            version = 4
         connection.execute("COMMIT")
     except Exception:
         if connection.in_transaction:
