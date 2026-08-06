@@ -49,6 +49,19 @@
           ],
           "title": "Rubric Id"
         },
+        "rubric_version": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Rubric Version"
+        },
         "schema_version": {
           "default": "1.0.0",
           "title": "Schema Version",

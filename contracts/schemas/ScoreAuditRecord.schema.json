@@ -88,10 +88,36 @@
       "title": "Criterion Scores",
       "type": "array"
     },
+    "item_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Item Id"
+    },
     "item_instance_id": {
       "minLength": 1,
       "title": "Item Instance Id",
       "type": "string"
+    },
+    "item_version": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Item Version"
     },
     "max_score": {
       "minimum": 0.0,
