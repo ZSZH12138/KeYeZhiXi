@@ -14,10 +14,16 @@ from course_insight.modules.m7_local_model.policy import (
     DEFAULT_M7_EXECUTION_POLICY,
     M7ExecutionPolicy,
 )
+from course_insight.modules.m7_local_model.privacy import (
+    DEFAULT_M7_OUTBOUND_PRIVACY_POLICY,
+    M7OutboundPrivacyPolicy,
+    OutboundPrivacyResult,
+    govern_student_answer,
+)
 
 
 SCORING_PROMPT_ID = "m7-rubric-scoring-json"
-SCORING_PROMPT_VERSION = "3.0.0"
+SCORING_PROMPT_VERSION = "4.0.0"
 FEEDBACK_PROMPT_ID = "m7-deterministic-feedback"
 FEEDBACK_PROMPT_VERSION = "1.0.0"
 
@@ -47,15 +53,55 @@ class PromptEnvelope:
         }
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedScoringPrompt:
+    """Privacy-governed scoring input, or a fail-closed block decision."""
+
+    prompt: PromptEnvelope | None
+    governed_task: RubricScoringTask | None
+    privacy: OutboundPrivacyResult
+
+
 def scoring_prompt(
     task: RubricScoringTask,
     evidence_bundle: EvidenceBundle,
     policy: M7ExecutionPolicy = DEFAULT_M7_EXECUTION_POLICY,
 ) -> PromptEnvelope:
-    """Build a JSON-only scoring prompt from frozen M7 inputs."""
+    """Build a JSON-only prompt after fail-closed outbound governance."""
+
+    prepared = prepare_scoring_prompt(task, evidence_bundle, policy)
+    if prepared.prompt is None:
+        _privacy_blocked(prepared.privacy)
+    assert prepared.prompt is not None
+    return prepared.prompt
+
+
+def prepare_scoring_prompt(
+    task: RubricScoringTask,
+    evidence_bundle: EvidenceBundle,
+    policy: M7ExecutionPolicy = DEFAULT_M7_EXECUTION_POLICY,
+    privacy_policy: M7OutboundPrivacyPolicy = (
+        DEFAULT_M7_OUTBOUND_PRIVACY_POLICY
+    ),
+) -> PreparedScoringPrompt:
+    """Apply privacy policy before constructing any provider-bound message."""
 
     if len(task.student_answer) > policy.max_student_answer_characters:
         _input_too_large("student_answer")
+    privacy = govern_student_answer(task.student_answer, privacy_policy)
+    if privacy.decision == "blocked":
+        return PreparedScoringPrompt(
+            prompt=None,
+            governed_task=None,
+            privacy=privacy,
+        )
+    assert privacy.outbound_text is not None
+    governed_task = RubricScoringTask.model_validate(
+        {
+            **task.model_dump(mode="python"),
+            "student_answer": privacy.outbound_text,
+        }
+    )
     evidence = _evidence_payload(evidence_bundle, policy)
     rubric = [
         {
@@ -69,40 +115,44 @@ def scoring_prompt(
                 criterion.course_evidence_ids
             ),
         }
-        for criterion in task.rubric.criteria
+        for criterion in governed_task.rubric.criteria
     ]
     user_payload = {
-        "scoring_task_id": task.scoring_task_id,
-        "student_answer": task.student_answer,
+        "scoring_task_id": governed_task.scoring_task_id,
+        "student_answer": governed_task.student_answer,
         "item": {
-            "item_id": task.item_instance.item_id,
-            "stem": task.item_instance.stem,
-            "concept_ids": list(task.item_instance.concept_ids),
-            "max_score": task.item_instance.max_score,
+            "item_id": governed_task.item_instance.item_id,
+            "stem": governed_task.item_instance.stem,
+            "concept_ids": list(governed_task.item_instance.concept_ids),
+            "max_score": governed_task.item_instance.max_score,
         },
         "rubric": {
-            "rubric_id": task.rubric.rubric_id,
-            "version": task.rubric.version,
-            "total_score": task.rubric.total_score,
+            "rubric_id": governed_task.rubric.rubric_id,
+            "version": governed_task.rubric.version,
+            "total_score": governed_task.rubric.total_score,
             "criteria": rubric,
             "review_policy": {
                 "low_confidence_threshold": (
-                    task.rubric.review_policy.low_confidence_threshold
+                    governed_task.rubric.review_policy.low_confidence_threshold
                 ),
                 "require_evidence_for_positive_score": (
-                    task.rubric.review_policy.require_evidence_for_positive_score
+                    governed_task.rubric.review_policy.require_evidence_for_positive_score
                 ),
             },
         },
         "course_evidence": evidence,
     }
-    return _envelope(
-        prompt_id=SCORING_PROMPT_ID,
-        prompt_version=SCORING_PROMPT_VERSION,
-        policy=policy,
-        evidence_ids=evidence_bundle.citation_ids(),
-        system=_SCORING_SYSTEM_PROMPT,
-        user_payload=user_payload,
+    return PreparedScoringPrompt(
+        prompt=_envelope(
+            prompt_id=SCORING_PROMPT_ID,
+            prompt_version=SCORING_PROMPT_VERSION,
+            policy=policy,
+            evidence_ids=evidence_bundle.citation_ids(),
+            system=_SCORING_SYSTEM_PROMPT,
+            user_payload=user_payload,
+        ),
+        governed_task=governed_task,
+        privacy=privacy,
     )
 
 
@@ -245,12 +295,27 @@ def _input_too_large(field: str) -> None:
     )
 
 
+def _privacy_blocked(result: OutboundPrivacyResult) -> None:
+    raise DomainError(
+        code="MODEL_INPUT_PRIVACY_BLOCKED",
+        module="m7",
+        message="student answer is unsafe for third-party model processing",
+        details={
+            "privacy_policy_version": result.policy_version,
+            "privacy_flags": list(result.flags),
+        },
+        recoverable=True,
+    )
+
+
 __all__ = [
     "FEEDBACK_PROMPT_ID",
     "FEEDBACK_PROMPT_VERSION",
+    "PreparedScoringPrompt",
     "PromptEnvelope",
     "SCORING_PROMPT_ID",
     "SCORING_PROMPT_VERSION",
     "feedback_message",
+    "prepare_scoring_prompt",
     "scoring_prompt",
 ]

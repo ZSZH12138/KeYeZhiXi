@@ -494,11 +494,13 @@ def test_sqlite_web_golden_path_delivers_student_and_teacher_events(
         assert result.max_score == 1.0
         assert len(result.audits) == 1
         rule_audit = result.audits[0]
-        assert rule_audit.confidence == 1.0
+        assert not hasattr(rule_audit, "confidence")
         assert len(rule_audit.criteria) == 1
         assert rule_audit.criteria[0].criterion_id == "objective_item_1"
-        assert rule_audit.criteria[0].reason == (
-            "The normalized answer matches the approved answer key."
+        assert not hasattr(rule_audit.criteria[0], "reason")
+        assert (
+            b"The normalized answer matches the approved answer key."
+            not in result_page.content
         )
         feedback_page = student_client.get(
             result_page.context["feedback_url"]
@@ -506,7 +508,7 @@ def test_sqlite_web_golden_path_delivers_student_and_teacher_events(
         assert feedback_page.status_code == 200
         feedback = feedback_page.context["feedback"]
         assert feedback.citations
-        assert "governed rule" in feedback.citations[0].quote
+        assert feedback.citations[0].label == "source_1@section:1"
 
         _login(teacher_client, teacher)
         context_url = reverse(

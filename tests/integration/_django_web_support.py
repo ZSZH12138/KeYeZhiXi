@@ -209,7 +209,6 @@ def feedback_for(actor_id: str) -> StudentFeedbackPackage:
                 evidence_id="evidence_1",
                 source_id="source_1",
                 locator="p.1",
-                quote="Governed evidence.",
             )
         ],
         next_practice_item_ids=["item_2"],

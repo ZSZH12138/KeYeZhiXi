@@ -58,6 +58,23 @@ class AuditView:
 
 
 @dataclass(frozen=True, slots=True)
+class StudentCriterionView:
+    """Minimum score projection that cannot carry model rationale."""
+
+    criterion_id: str
+    score: float
+
+
+@dataclass(frozen=True, slots=True)
+class StudentAuditView:
+    """Student-visible audit projection with internal evidence removed."""
+
+    total_score: float
+    max_score: float
+    criteria: tuple[StudentCriterionView, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class RubricFeedbackView:
     criterion_id: str
     earned_score: float
@@ -69,7 +86,6 @@ class RubricFeedbackView:
 @dataclass(frozen=True, slots=True)
 class CitationView:
     label: str
-    quote: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,9 +101,10 @@ class FeedbackView:
 class StudentResultView:
     paper: PaperView
     attempt_id: str
-    total_score: float
+    total_score: float | None
     max_score: float
-    audits: tuple[AuditView, ...]
+    score_pending_rescore: bool
+    audits: tuple[StudentAuditView, ...]
     feedback: FeedbackView
 
 
@@ -95,7 +112,7 @@ class StudentResultView:
 class IndividualReportView:
     learner_id: str
     overall_mastery: float
-    recent_score: float
+    recent_score: float | None
     weak_concept_ids: tuple[str, ...]
     active_misconception_ids: tuple[str, ...]
     review_required_count: int
@@ -174,6 +191,22 @@ def audit_view(audit: ScoreAuditRecord) -> AuditView:
     )
 
 
+def student_audit_view(audit: ScoreAuditRecord) -> StudentAuditView:
+    """Project only numeric scoring fields approved for learner display."""
+
+    return StudentAuditView(
+        total_score=audit.total_score,
+        max_score=audit.max_score,
+        criteria=tuple(
+            StudentCriterionView(
+                criterion_id=item.criterion_id,
+                score=item.score,
+            )
+            for item in audit.criterion_scores
+        ),
+    )
+
+
 def feedback_view(feedback: StudentFeedbackPackage) -> FeedbackView:
     return FeedbackView(
         message=feedback.message,
@@ -191,7 +224,6 @@ def feedback_view(feedback: StudentFeedbackPackage) -> FeedbackView:
         citations=tuple(
             CitationView(
                 label=citation.label(),
-                quote=citation.quote,
             )
             for citation in feedback.evidence_citations
         ),
@@ -204,12 +236,16 @@ def student_result_view(
     scoring: ScoringResultBundle,
     feedback: StudentFeedbackPackage,
 ) -> StudentResultView:
+    score_pending_rescore = scoring.has_rejected_score()
     return StudentResultView(
         paper=paper_view(paper),
         attempt_id=scoring.attempt_id,
-        total_score=scoring.total_score,
+        total_score=(None if score_pending_rescore else scoring.total_score),
         max_score=scoring.max_score,
-        audits=tuple(audit_view(item) for item in _current_audits(scoring)),
+        score_pending_rescore=score_pending_rescore,
+        audits=tuple(
+            student_audit_view(item) for item in _current_audits(scoring)
+        ),
         feedback=feedback_view(feedback),
     )
 

@@ -2,14 +2,22 @@
 
 from __future__ import annotations
 
+import hmac
+import json
 import sqlite3
 
+from course_insight.contracts.analytics import TeacherAnalyticsBundle
+from course_insight.infrastructure.sqlite.m7_audit_schema import (
+    M7_MODEL_INVOCATION_AUDITS_CREATED_AT_INDEX_SQL,
+    M7_MODEL_INVOCATION_AUDITS_SQL,
+)
 from course_insight.infrastructure.sqlite.module_recovery_schema import (
     M5_CLASS_STATES_SQL as _M5_CLASS_STATES_SQL,
     M5_CLASS_STATES_V4_SQL as _M5_CLASS_STATES_V4_SQL,
     M5_LEARNER_STATES_SQL as _M5_LEARNER_STATES_SQL,
     M5_LEARNER_STATES_V4_SQL as _M5_LEARNER_STATES_V4_SQL,
     M9_MODEL_INVOCATION_AUDITS_SQL as _M9_MODEL_INVOCATION_AUDITS_SQL,
+    M9_MODEL_INVOCATION_AUDITS_V14_SQL as _M9_MODEL_INVOCATION_AUDITS_V14_SQL,
     MODULE_RECOVERY_TABLES as _MODULE_RECOVERY_TABLES,
 )
 from course_insight.infrastructure.sqlite.outbox_migration import (
@@ -32,8 +40,11 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     migrate_workflow_v8_to_v9,
     migrate_workflow_v10_to_v11,
 )
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9ModelAuditRecord,
+)
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 16
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
@@ -51,6 +62,15 @@ _ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME = (
 _M6_POLICY_LEARNING_MIGRATION_NAME = "m6_policy_learning"
 _ASSESSMENT_POLICY_FREEZE_MIGRATION_NAME = "m0_policy_freeze"
 _M9_MODEL_AUDIT_MIGRATION_NAME = "m9_model_invocation_audits"
+_M9_SOURCE_REPORT_CHECKSUM_MIGRATION_NAME = "m9_source_report_checksum"
+_M7_MODEL_AUDIT_MIGRATION_NAME = "m7_model_invocation_audits"
+_M9_MODEL_INVOCATION_AUDITS_V15_STAGING_SQL = (
+    _M9_MODEL_INVOCATION_AUDITS_SQL.replace(
+        "CREATE TABLE IF NOT EXISTS m9_model_invocation_audits",
+        "CREATE TABLE m9_model_invocation_audits_v15",
+        1,
+    )
+)
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -625,6 +645,18 @@ def _normalize_create_table_sql(schema_sql: str) -> str:
     return normalized
 
 
+def _normalize_create_index_sql(schema_sql: str) -> str:
+    normalized = "".join(
+        character.casefold()
+        for character in _strip_sql_comments(schema_sql)
+        if not character.isspace()
+    ).removesuffix(";")
+    optional_prefix = "createindexifnotexists"
+    if normalized.startswith(optional_prefix):
+        return f"createindex{normalized[len(optional_prefix):]}"
+    return normalized
+
+
 def _normalized_table_schema_sql(
     connection: sqlite3.Connection,
     table_name: str,
@@ -635,6 +667,18 @@ def _normalized_table_schema_sql(
     ).fetchone()
     schema_sql = "" if row is None or row[0] is None else str(row[0])
     return _normalize_create_table_sql(schema_sql)
+
+
+def _normalized_index_schema_sql(
+    connection: sqlite3.Connection,
+    index_name: str,
+) -> str:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+        (index_name,),
+    ).fetchone()
+    schema_sql = "" if row is None or row[0] is None else str(row[0])
+    return _normalize_create_index_sql(schema_sql)
 
 
 def validate_m0_schema(connection: sqlite3.Connection) -> None:
@@ -912,13 +956,130 @@ def _validate_module_recovery_schema(connection: sqlite3.Connection) -> None:
             )
 
 
-def _validate_m9_model_audit_schema(
+def _migrate_m9_source_report_checksum(connection: sqlite3.Connection) -> None:
+    """Bind each M9 model audit to an independently stored report checksum."""
+
+    _validate_m9_source_report_bindings(connection)
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info('m9_model_invocation_audits')"
+        ).fetchall()
+    }
+    if "source_report_checksum" in columns:
+        return
+    connection.execute(_M9_MODEL_INVOCATION_AUDITS_V15_STAGING_SQL)
+    connection.execute(
+        """
+        INSERT INTO m9_model_invocation_audits_v15(
+            invocation_id,
+            request_id,
+            source_report_id,
+            source_report_checksum,
+            scope,
+            provider,
+            model_name,
+            provider_status,
+            validation_status,
+            created_at,
+            payload,
+            payload_checksum
+        )
+        SELECT
+            invocation_id,
+            request_id,
+            source_report_id,
+            json_extract(payload, '$.source_report_checksum'),
+            scope,
+            provider,
+            model_name,
+            provider_status,
+            validation_status,
+            created_at,
+            payload,
+            payload_checksum
+        FROM m9_model_invocation_audits
+        """
+    )
+    connection.execute("DROP TABLE m9_model_invocation_audits")
+    connection.execute(
+        "ALTER TABLE m9_model_invocation_audits_v15 "
+        "RENAME TO m9_model_invocation_audits"
+    )
+
+
+def _validate_m9_source_report_bindings(
     connection: sqlite3.Connection,
 ) -> None:
-    if _normalized_table_schema_sql(
+    """Reject legacy audits that do not identify the authoritative report bytes."""
+
+    audit_columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info('m9_model_invocation_audits')"
+        ).fetchall()
+    }
+    stored_checksum_expression = (
+        "audit.source_report_checksum"
+        if "source_report_checksum" in audit_columns
+        else "json_extract(audit.payload, '$.source_report_checksum')"
+    )
+    rows = connection.execute(
+        f"""
+        SELECT
+            audit.invocation_id,
+            audit.source_report_id,
+            {stored_checksum_expression} AS stored_source_report_checksum,
+            audit.payload AS audit_payload,
+            report.payload AS report_payload
+        FROM m9_model_invocation_audits AS audit
+        LEFT JOIN m9_teacher_analytics AS report
+            ON report.report_id = audit.source_report_id
+        ORDER BY audit.invocation_id
+        """
+    ).fetchall()
+    for row in rows:
+        try:
+            source_report_id = str(row["source_report_id"])
+            if row["report_payload"] is None:
+                raise ValueError
+            audit = M9ModelAuditRecord.from_dict(
+                json.loads(str(row["audit_payload"]))
+            )
+            report = TeacherAnalyticsBundle.model_validate_json(
+                str(row["report_payload"])
+            )
+            if (
+                audit.source_report_id != source_report_id
+                or report.report_id != source_report_id
+                or not hmac.compare_digest(
+                    audit.source_report_checksum,
+                    str(row["stored_source_report_checksum"]),
+                )
+                or not hmac.compare_digest(
+                    str(row["stored_source_report_checksum"]),
+                    report.content_checksum(),
+                )
+            ):
+                raise ValueError
+        except Exception:
+            raise RuntimeError(
+                "M9 model audit source report checksum mismatch"
+            ) from None
+
+
+def _validate_m9_model_audit_schema(
+    connection: sqlite3.Connection,
+    *,
+    allow_legacy: bool = False,
+) -> None:
+    actual_sql = _normalized_table_schema_sql(
         connection,
         "m9_model_invocation_audits",
-    ) != _normalize_create_table_sql(_M9_MODEL_INVOCATION_AUDITS_SQL):
+    ).replace('"m9_model_invocation_audits"', "m9_model_invocation_audits")
+    expected_sql = _normalize_create_table_sql(_M9_MODEL_INVOCATION_AUDITS_SQL)
+    legacy_sql = _normalize_create_table_sql(_M9_MODEL_INVOCATION_AUDITS_V14_SQL)
+    if actual_sql != expected_sql and (not allow_legacy or actual_sql != legacy_sql):
         raise RuntimeError(
             "m9_model_invocation_audits schema is incompatible"
         )
@@ -926,6 +1087,33 @@ def _validate_m9_model_audit_schema(
         "PRAGMA foreign_key_check('m9_model_invocation_audits')"
     ).fetchone() is not None:
         raise RuntimeError("M9 model audit data violates foreign keys")
+
+
+def _validate_m7_model_audit_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    actual_table_sql = _normalized_table_schema_sql(
+        connection,
+        "m7_model_invocation_audits",
+    )
+    expected_table_sql = _normalize_create_table_sql(
+        M7_MODEL_INVOCATION_AUDITS_SQL
+    )
+    if actual_table_sql != expected_table_sql:
+        raise RuntimeError(
+            "m7_model_invocation_audits schema is incompatible"
+        )
+    actual_index_sql = _normalized_index_schema_sql(
+        connection,
+        "m7_model_invocation_audits_created_at_idx",
+    )
+    expected_index_sql = _normalize_create_index_sql(
+        M7_MODEL_INVOCATION_AUDITS_CREATED_AT_INDEX_SQL
+    )
+    if actual_index_sql != expected_index_sql:
+        raise RuntimeError(
+            "m7_model_invocation_audits index is incompatible"
+        )
 
 
 def migrate(connection: sqlite3.Connection) -> None:
@@ -1122,15 +1310,42 @@ def migrate(connection: sqlite3.Connection) -> None:
                 schema_version=13,
             )
         if 14 not in applied_versions:
-            connection.execute(_M9_MODEL_INVOCATION_AUDITS_SQL)
-            _validate_m9_model_audit_schema(connection)
+            connection.execute(_M9_MODEL_INVOCATION_AUDITS_V14_SQL)
+            _validate_m9_model_audit_schema(connection, allow_legacy=True)
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                 (14, _M9_MODEL_AUDIT_MIGRATION_NAME),
             )
             applied_versions.add(14)
         else:
+            _validate_m9_model_audit_schema(connection, allow_legacy=True)
+        if 15 not in applied_versions:
+            _migrate_m9_source_report_checksum(connection)
             _validate_m9_model_audit_schema(connection)
+            _validate_m9_source_report_bindings(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (15, _M9_SOURCE_REPORT_CHECKSUM_MIGRATION_NAME),
+            )
+            applied_versions.add(15)
+        else:
+            _validate_m9_model_audit_schema(connection)
+            _validate_m9_source_report_bindings(connection)
+        if 16 not in applied_versions:
+            connection.execute(
+                M7_MODEL_INVOCATION_AUDITS_SQL
+            )
+            connection.execute(
+                M7_MODEL_INVOCATION_AUDITS_CREATED_AT_INDEX_SQL
+            )
+            _validate_m7_model_audit_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (16, _M7_MODEL_AUDIT_MIGRATION_NAME),
+            )
+            applied_versions.add(16)
+        else:
+            _validate_m7_model_audit_schema(connection)
         validate_outbox_schema(connection, schema_version=SCHEMA_VERSION)
         connection.execute("COMMIT")
     except Exception:

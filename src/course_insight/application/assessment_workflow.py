@@ -514,7 +514,7 @@ class AssessmentWorkflow:
             start=start,
             attempt_id=submit.attempt_id,
             feedback_id=submit.feedback_id,
-            report_id=submit.report_id,
+            report_id=None,
             target_audit_id=review_submission.audit_id,
             target_audit_version=review_submission.expected_audit_version,
             dependencies=dependencies,
@@ -551,6 +551,7 @@ class AssessmentWorkflow:
                     ),
                 )
             validate_decision(decision, review_submission)
+            rejected = decision.is_reject()
             if run.checkpoint == "claimed":
                 run = self._advance(run, "decision_saved")
 
@@ -582,7 +583,7 @@ class AssessmentWorkflow:
                 run = self._advance(run, "events_appended")
 
             state = self._results.exact_state(run)
-            if state is None:
+            if state is None and not rejected:
                 state = self._m5.get_state_update_for_audit(
                     run.attempt_id,
                     decision.audit_id,
@@ -599,7 +600,15 @@ class AssessmentWorkflow:
                     learner=previous_state.learner_state_snapshot,
                     class_state=previous_state.class_state_snapshot,
                 )
-            if state is None or review_key not in state.processed_audit_ids:
+                if rejected:
+                    state = previous_state
+            if rejected and state is None:
+                state = self._results.exact_state(base_run)
+                require_results(state)
+            if (
+                not rejected
+                and (state is None or review_key not in state.processed_audit_ids)
+            ):
                 if run.checkpoint != "state_inputs_frozen":
                     missing("review state result is unavailable")
                 previous_learner, previous_class = (
@@ -630,7 +639,20 @@ class AssessmentWorkflow:
                     state_version=state.learner_state_snapshot.state_version,
                 )
 
-            analytics = self._results.analytics_for(state)
+            analytics = (
+                self._m9.get_analytics(run.report_id)
+                if rejected and run.report_id is not None
+                else (
+                    None
+                    if rejected
+                    else self._results.analytics_for(state)
+                )
+            )
+            if rejected and analytics is not None and any(
+                report.recent_score is not None
+                for report in analytics.individual_reports
+            ):
+                analytics = None
             if analytics is None:
                 verify_policy_dependencies(
                     frozen_dependencies,
@@ -639,16 +661,30 @@ class AssessmentWorkflow:
                 )
                 analytics = self._execute(
                     run,
-                    lambda: self._m9.build_teacher_analytics_with_frozen_policy(
-                        knowledge_bundle=knowledge_bundle,
-                        scoring_result_bundle=reviewed,
-                        state_update_result=state,
-                        teacher_threshold_policy_path=(
-                            teacher_threshold_policy_path
-                        ),
-                        expected_policy_checksum=(
-                            expected_teacher_policy_checksum
-                        ),
+                    lambda: (
+                        self._m9.build_rejected_score_analytics_with_frozen_policy(
+                            knowledge_bundle=knowledge_bundle,
+                            scoring_result_bundle=reviewed,
+                            state_update_result=state,
+                            teacher_threshold_policy_path=(
+                                teacher_threshold_policy_path
+                            ),
+                            expected_policy_checksum=(
+                                expected_teacher_policy_checksum
+                            ),
+                        )
+                        if rejected
+                        else self._m9.build_teacher_analytics_with_frozen_policy(
+                            knowledge_bundle=knowledge_bundle,
+                            scoring_result_bundle=reviewed,
+                            state_update_result=state,
+                            teacher_threshold_policy_path=(
+                                teacher_threshold_policy_path
+                            ),
+                            expected_policy_checksum=(
+                                expected_teacher_policy_checksum
+                            ),
+                        )
                     ),
                 )
             if run.checkpoint == "state_saved":

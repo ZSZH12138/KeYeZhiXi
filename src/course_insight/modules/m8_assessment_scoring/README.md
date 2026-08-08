@@ -26,6 +26,18 @@
 - `CalibrationRunResult`：供 M9 质量门槛/审核；当前为 `empty`。
 - `AdaptiveSelectionResult`：供出卷编排；当前题目列表为空。
 
+## 教师驳回语义
+
+目标协议中，`reject` 会追加 `rejected_pending_rescore` 审计版本并保留原分数作为
+历史证据，但该数字不再是可用成绩，也不会自动改成零分。当前候选已阻止 rejected
+bundle 再次进入 M5，并让 M9 分数统计和学生界面隐藏该分数；`confirm` 不能恢复
+已驳回评分，只有新评分或完整守恒的 `override` 可以恢复消费。
+
+现有提交流程在教师复核前已经把初始评分写入 M5，因此完整撤销 mastery/class
+影响仍需冻结跨模块补偿或延迟入账协议。该缺口记录在
+`docs/m7_m9_cross_module_change_request.md`，在全局审核结论前不得宣称 reject 已完成
+端到端回滚。
+
 ## 禁止事项
 
 不得覆盖审计/参数历史、接受越界分数或无证据正分、在数据不足时伪造

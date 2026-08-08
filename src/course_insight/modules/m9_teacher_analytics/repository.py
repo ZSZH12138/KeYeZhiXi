@@ -23,6 +23,20 @@ _REVIEW_TABLE = "m9_teacher_reviews"
 _LOWER_HEX = frozenset("0123456789abcdef")
 
 
+class M9ReviewDecisionConflict(RuntimeError):
+    """Signal a competing decision for one immutable audit version."""
+
+    def __init__(
+        self,
+        *,
+        audit_id: str,
+        expected_audit_version: int,
+    ) -> None:
+        super().__init__("M9 teacher-review decision conflict")
+        self.audit_id = audit_id
+        self.expected_audit_version = expected_audit_version
+
+
 @dataclass(frozen=True, slots=True)
 class M9ModelAuditRecord:
     """One M9-owned call record without raw prompt or provider response."""
@@ -365,4 +379,8 @@ def _required_record_text(value: dict[str, Any], field: str) -> str:
     return selected
 
 
-__all__ = ["M9ModelAuditRecord", "M9Repository"]
+__all__ = [
+    "M9ModelAuditRecord",
+    "M9Repository",
+    "M9ReviewDecisionConflict",
+]

@@ -13,6 +13,7 @@ from course_insight.modules.m9_teacher_analytics.policy import (
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
     M9Repository,
+    M9ReviewDecisionConflict,
 )
 from course_insight.modules.m9_teacher_analytics.service import (
     M9TeacherAnalyticsService,
@@ -27,6 +28,7 @@ __all__ = [
     "GovernedM9NarrativeAdapter",
     "M9ModelAuditRecord",
     "M9Repository",
+    "M9ReviewDecisionConflict",
     "M9InvocationFailure",
     "M9NarrativeOutcome",
     "M9NarrativePolicy",

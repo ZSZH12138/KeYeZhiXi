@@ -13,6 +13,9 @@ SCORE_TOLERANCE = 1e-9
 COMPLETED_REVIEW_STATUSES = frozenset(
     {"approved", "completed", "confirmed", "not_required", "reviewed"}
 )
+REJECTED_REVIEW_STATUSES = frozenset(
+    {"rejected", "rejected_pending_rescore"}
+)
 
 
 class _AuditRecordLike(Protocol):

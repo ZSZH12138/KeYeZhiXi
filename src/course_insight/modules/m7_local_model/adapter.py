@@ -25,11 +25,18 @@ from course_insight.contracts.intelligence import (
 from course_insight.infrastructure.deepseek import DeepSeekClient
 from course_insight.modules.m7_local_model.prompts import (
     PromptEnvelope,
-    scoring_prompt,
+    SCORING_PROMPT_ID,
+    SCORING_PROMPT_VERSION,
+    prepare_scoring_prompt,
 )
 from course_insight.modules.m7_local_model.policy import (
     DEFAULT_M7_EXECUTION_POLICY,
     M7ExecutionPolicy,
+)
+from course_insight.modules.m7_local_model.privacy import (
+    DEFAULT_M7_OUTBOUND_PRIVACY_POLICY,
+    M7OutboundPrivacyPolicy,
+    OutboundPrivacyResult,
 )
 
 
@@ -41,6 +48,7 @@ class M7ScoringOutcome:
     audit: ModelInvocationAudit
     safety: SafetyCheckResult
     prompt_record: dict[str, Any]
+    student_answer_for_validation: str
 
 
 class M7InvocationFailure(Exception):
@@ -114,6 +122,9 @@ class DeepSeekM7Adapter:
         self,
         client: DeepSeekClient,
         policy: M7ExecutionPolicy = DEFAULT_M7_EXECUTION_POLICY,
+        privacy_policy: M7OutboundPrivacyPolicy = (
+            DEFAULT_M7_OUTBOUND_PRIVACY_POLICY
+        ),
     ) -> None:
         client_policy = client.policy
         if (
@@ -128,6 +139,7 @@ class DeepSeekM7Adapter:
             )
         self._client = client
         self._policy = policy
+        self._privacy_policy = privacy_policy
 
     def score_governed(
         self,
@@ -136,7 +148,18 @@ class DeepSeekM7Adapter:
     ) -> M7ScoringOutcome:
         """Generate and validate one evidence-bound rubric score."""
 
-        prompt = scoring_prompt(task, evidence_bundle, self._policy)
+        prepared = prepare_scoring_prompt(
+            task,
+            evidence_bundle,
+            self._policy,
+            self._privacy_policy,
+        )
+        if prepared.prompt is None or prepared.governed_task is None:
+            self._privacy_blocked(task, prepared.privacy)
+        assert prepared.prompt is not None
+        assert prepared.governed_task is not None
+        prompt = prepared.prompt
+        governed_task = prepared.governed_task
         request = self._request(
             request_id=(
                 f"m7_score_{task.scoring_task_id}_"
@@ -144,25 +167,32 @@ class DeepSeekM7Adapter:
             ),
             use_case="rubric_scoring",
             prompt=prompt,
-            created_at=task.created_at,
+            created_at=governed_task.created_at,
         )
         invocation = self._client.invoke_json(
             request=request,
             messages=prompt.messages,
         )
-        prompt_record = prompt.safe_record(
-            request_id=request.request_id,
-            use_case=request.use_case,
-        )
+        prompt_record = {
+            **prompt.safe_record(
+                request_id=request.request_id,
+                use_case=request.use_case,
+            ),
+            "scoring_task_id": governed_task.scoring_task_id,
+            "model_version": self._client.model_version,
+            **prepared.privacy.safe_record(),
+        }
+        privacy_flags = _privacy_safety_flags(prepared.privacy)
         self._require_success(
             invocation.result,
             invocation.audit,
             request=request,
             prompt_record=prompt_record,
+            privacy_flags=privacy_flags,
         )
         try:
             result = _parse_scoring_result(
-                task=task,
+                task=governed_task,
                 evidence_bundle=evidence_bundle,
                 generation=invocation.result,
                 model_name=self._client.model_name,
@@ -175,12 +205,13 @@ class DeepSeekM7Adapter:
                 generation=invocation.result,
                 audit=invocation.audit,
                 prompt_record=prompt_record,
+                privacy_flags=privacy_flags,
                 cause=error,
             )
         safety = SafetyCheckResult(
             request_id=request.request_id,
             status="passed",
-            flags=["teacher_review_required"],
+            flags=["teacher_review_required", *privacy_flags],
             checked_at=invocation.result.generated_at,
         )
         return M7ScoringOutcome(
@@ -188,6 +219,7 @@ class DeepSeekM7Adapter:
             audit=invocation.audit,
             safety=safety,
             prompt_record=prompt_record,
+            student_answer_for_validation=governed_task.student_answer,
         )
 
     def _request(
@@ -222,6 +254,7 @@ class DeepSeekM7Adapter:
         *,
         request: LLMGenerationRequest,
         prompt_record: dict[str, Any],
+        privacy_flags: list[str],
     ) -> None:
         if generation.status == "succeeded":
             return
@@ -229,7 +262,10 @@ class DeepSeekM7Adapter:
         safety = SafetyCheckResult(
             request_id=request.request_id,
             status=("blocked" if blocked else "not_run"),
-            flags=(["provider_content_filter"] if blocked else []),
+            flags=[
+                *privacy_flags,
+                *(["provider_content_filter"] if blocked else []),
+            ],
             checked_at=generation.generated_at,
         )
         error_code = audit.error_code or "DEEPSEEK_INVOCATION_FAILED"
@@ -269,6 +305,7 @@ class DeepSeekM7Adapter:
         generation: LLMGenerationResult,
         audit: ModelInvocationAudit,
         prompt_record: dict[str, Any],
+        privacy_flags: list[str],
         cause: Exception,
     ) -> None:
         del cause
@@ -284,8 +321,66 @@ class DeepSeekM7Adapter:
             safety=SafetyCheckResult(
                 request_id=request.request_id,
                 status="blocked",
-                flags=["invalid_model_output"],
+                flags=[*privacy_flags, "invalid_model_output"],
                 checked_at=generation.generated_at,
+            ),
+            prompt_record=prompt_record,
+        )
+
+    def _privacy_blocked(
+        self,
+        task: RubricScoringTask,
+        privacy: OutboundPrivacyResult,
+    ) -> None:
+        """Stop before prompt construction or network access and retain metadata."""
+
+        request_id = (
+            f"m7_score_{task.scoring_task_id}_privacy_"
+            f"{privacy.input_checksum[:12]}"
+        )
+        flags = ["outbound_privacy_blocked", *privacy.flags]
+        prompt_record = {
+            "request_id": request_id,
+            "use_case": "rubric_scoring",
+            "scoring_task_id": task.scoring_task_id,
+            "model_version": self._client.model_version,
+            "prompt_template_id": SCORING_PROMPT_ID,
+            "prompt_template_version": SCORING_PROMPT_VERSION,
+            "execution_policy_version": self._policy.policy_version,
+            "input_checksum": None,
+            "evidence_ids": [],
+            **privacy.safe_record(),
+        }
+        raise M7InvocationFailure(
+            error=DomainError(
+                code="MODEL_INPUT_PRIVACY_BLOCKED",
+                module="m7",
+                message=(
+                    "student answer is unsafe for third-party model processing"
+                ),
+                details={
+                    "privacy_policy_version": privacy.policy_version,
+                    "privacy_flags": list(privacy.flags),
+                },
+                recoverable=True,
+            ),
+            audit=ModelInvocationAudit(
+                invocation_id=f"invocation_{request_id}",
+                request_id=request_id,
+                provider="deepseek",
+                model_name=self._client.model_name,
+                status="not_run",
+                input_tokens=0,
+                output_tokens=0,
+                latency_ms=0,
+                error_code="OUTBOUND_PRIVACY_BLOCKED",
+                created_at=task.created_at,
+            ),
+            safety=SafetyCheckResult(
+                request_id=request_id,
+                status="blocked",
+                flags=flags,
+                checked_at=task.created_at,
             ),
             prompt_record=prompt_record,
         )
@@ -424,6 +519,10 @@ def _parse_scoring_result(
         model_version=model_version,
         scored_at=generation.generated_at,
     )
+
+
+def _privacy_safety_flags(result: OutboundPrivacyResult) -> list[str]:
+    return [f"outbound_privacy_{result.decision}", *result.flags]
 
 
 def _require_exact_keys(

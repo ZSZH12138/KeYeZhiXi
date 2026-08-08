@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
 import json
@@ -25,6 +26,7 @@ from tests.unit._postgres_repository_fakes import (
 )
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
+    M9ReviewDecisionConflict,
 )
 
 try:
@@ -105,6 +107,7 @@ def _model_audit_row(record: M9ModelAuditRecord) -> dict[str, Any]:
         "invocation_id": record.invocation_id,
         "request_id": record.request_id,
         "source_report_id": record.source_report_id,
+        "source_report_checksum": record.source_report_checksum,
         "scope": record.scope,
         "provider": record.provider,
         "model_name": record.model_name,
@@ -284,6 +287,88 @@ def test_postgres_m9_persists_idempotent_model_audit_without_raw_prompt() -> Non
     assert "messages" not in serialized
     assert "api_key" not in serialized
     assert audit.source_report_checksum in serialized
+    assert audit.source_report_checksum in audit_insert
+
+
+@pytest.mark.skipif(
+    PostgresM9Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m9_rejects_model_audit_source_checksum_mismatch() -> None:
+    analytics = _analytics()
+    review = _review()
+    audit = _model_audit(analytics)
+    repository = PostgresM9Repository(
+        FakePool(FakeConnection(_responder([analytics], review, audit)))
+    )
+
+    with pytest.raises(PostgresOperationError, match="checksum"):
+        repository.save_model_audit(
+            replace(audit, source_report_checksum="0" * 64)
+        )
+
+
+@pytest.mark.skipif(
+    PostgresM9Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m9_rejects_tampered_model_audit_source_binding() -> None:
+    analytics = _analytics()
+    review = _review()
+    audit = _model_audit(analytics)
+    base_responder = _responder([analytics], review, audit)
+
+    def tampered(statement: str, parameters: tuple[Any, ...]):
+        response = base_responder(statement, parameters)
+        if (
+            isinstance(response, dict)
+            and "FROM m9_model_invocation_audits" in statement
+        ):
+            return {**response, "source_report_checksum": "0" * 64}
+        return response
+
+    repository = PostgresM9Repository(
+        FakePool(FakeConnection(tampered))
+    )
+
+    with pytest.raises(PostgresOperationError, match="integrity"):
+        repository.get_model_audit(audit.invocation_id)
+
+
+@pytest.mark.skipif(
+    PostgresM9Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m9_recomputes_authoritative_report_checksum() -> None:
+    analytics = _analytics()
+    review = _review()
+    audit = _model_audit(analytics)
+    base_responder = _responder([analytics], review, audit)
+    tampered_bundle = analytics.model_copy(
+        update={
+            "class_report": analytics.class_report.model_copy(
+                update={"score_statistics": {"mean": 0.5}},
+                deep=True,
+            )
+        },
+        deep=True,
+    )
+
+    def tampered_report(statement: str, parameters: tuple[Any, ...]):
+        response = base_responder(statement, parameters)
+        if (
+            isinstance(response, dict)
+            and "FROM m9_teacher_analytics" in statement
+        ):
+            return {**response, "payload": tampered_bundle.to_dict()}
+        return response
+
+    repository = PostgresM9Repository(
+        FakePool(FakeConnection(tampered_report))
+    )
+
+    with pytest.raises(PostgresOperationError, match="checksum"):
+        repository.get_model_audit(audit.invocation_id)
 
 
 @pytest.mark.skipif(
@@ -303,8 +388,10 @@ def test_postgres_m9_rejects_review_uniqueness_conflicts() -> None:
         FakePool(FakeConnection(_responder([analytics], stored)))
     )
 
-    with pytest.raises(RuntimeError, match="conflict"):
+    with pytest.raises(M9ReviewDecisionConflict) as raised:
         repository.insert_or_get_review_decision(conflicting)
+    assert raised.value.audit_id == conflicting.audit_id
+    assert raised.value.expected_audit_version == 1
 
 
 @pytest.mark.skipif(

@@ -368,11 +368,15 @@ def feedback(
         paper_id=paper_id,
         learner_id=request.user.actor_id,
     )
+    scoring = _contract(response, "scoring_result", ScoringResultBundle)
     package = _contract(response, "feedback", StudentFeedbackPackage)
     return render(
         request,
         "course_insight/student/feedback.html",
-        {"feedback": feedback_view(package)},
+        {
+            "feedback": feedback_view(package),
+            "score_pending_rescore": scoring.has_rejected_score(),
+        },
     )
 
 

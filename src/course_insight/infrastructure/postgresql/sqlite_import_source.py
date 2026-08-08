@@ -12,7 +12,10 @@ from typing import Any
 
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.events import LearningEvent
-from course_insight.contracts.tutoring import TutoringControlResult
+from course_insight.contracts.tutoring import (
+    StudentFeedbackPackage,
+    TutoringControlResult,
+)
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.migrations import SCHEMA_VERSION
 from course_insight.modules.m0_platform.outbox import (
@@ -36,6 +39,7 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
     PolicyObservation,
     PolicyRewardRecord,
 )
+from course_insight.modules.m7_local_model.repository import M7ModelAuditRecord
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
 )
@@ -81,6 +85,7 @@ def read_and_validate_source(
                 if not prepared.contract_validated:
                     partial_count += 1
             out[table] = tuple(prepared_rows)
+        _validate_m9_source_bindings(out)
         snapshot_checksum = _digest(
             (
                 tuple(
@@ -99,6 +104,28 @@ def read_and_validate_source(
         if connection.in_transaction:
             connection.execute("ROLLBACK")
         connection.close()
+
+
+def _validate_m9_source_bindings(
+    rows_by_table: dict[str, tuple[PreparedImportRow, ...]],
+) -> None:
+    report_checksums = {
+        str(row.value_for("report_id")): str(
+            row.value_for("payload_checksum")
+        )
+        for row in rows_by_table["m9_teacher_analytics"]
+    }
+    for audit in rows_by_table["m9_model_invocation_audits"]:
+        source_report_id = str(audit.value_for("source_report_id"))
+        stored_checksum = str(audit.value_for("source_report_checksum"))
+        authoritative_checksum = report_checksums.get(source_report_id)
+        if authoritative_checksum is None or not hmac.compare_digest(
+            stored_checksum,
+            authoritative_checksum,
+        ):
+            raise ValueError(
+                "M9 model audit source report binding is invalid"
+            )
 
 
 def _validate_source_schema(connection: sqlite3.Connection) -> None:
@@ -146,6 +173,10 @@ def _prepare_row(table: str, row: sqlite3.Row) -> PreparedImportRow:
         return _prepare_tutoring_decision(row)
     if table in _POLICY_RECORD_TYPES:
         return _prepare_policy_record(table, row)
+    if table == "m7_model_invocation_audits":
+        return _prepare_m7_model_audit(row)
+    if table == "m7_student_feedback":
+        return _prepare_m7_student_feedback(row)
     if table == "m9_model_invocation_audits":
         return _prepare_model_audit(row)
     contract_type = _CONTRACT_TABLES[table]
@@ -168,6 +199,48 @@ def _prepare_row(table: str, row: sqlite3.Row) -> PreparedImportRow:
         values_by_column,
         version=_contract_version(table, row, contract),
         checksum=contract.content_checksum(),
+        contract_validated=True,
+    )
+
+
+def _prepare_m7_student_feedback(row: sqlite3.Row) -> PreparedImportRow:
+    """Normalize the one supported legacy citation field during import."""
+
+    payload = _canonical_json_object(row["payload"])
+    citations = payload.get("evidence_citations")
+    if type(citations) is list:
+        quote_presence = tuple(
+            type(citation) is dict and "quote" in citation
+            for citation in citations
+        )
+        if any(quote_presence) and not all(quote_presence):
+            raise ValueError("legacy feedback citation shape is mixed")
+        for citation in citations:
+            if type(citation) is not dict or "quote" not in citation:
+                continue
+            quote = citation["quote"]
+            if type(quote) is not str or not quote.strip():
+                raise ValueError("legacy feedback quote is invalid")
+            citation.pop("quote")
+    contract = StudentFeedbackPackage.model_validate(payload)
+    _require_current_schema(contract)
+    _validate_contract_identity("m7_student_feedback", row, contract)
+    checksum = contract.content_checksum()
+    columns = tuple(
+        key for key in row.keys() if key != "payload"
+    ) + ("payload", "payload_checksum", "schema_version")
+    values_by_column = {
+        **{key: row[key] for key in row.keys() if key != "payload"},
+        "payload": dumps_json(contract.to_dict()),
+        "payload_checksum": checksum,
+        "schema_version": contract.schema_version,
+    }
+    return _build_prepared(
+        "m7_student_feedback",
+        columns,
+        values_by_column,
+        version=_contract_version("m7_student_feedback", row, contract),
+        checksum=checksum,
         contract_validated=True,
     )
 
@@ -258,9 +331,67 @@ def _prepare_intent_decision(row: sqlite3.Row) -> PreparedImportRow:
     )
 
 
+def _prepare_m7_model_audit(row: sqlite3.Row) -> PreparedImportRow:
+    payload = _canonical_json_object(row["payload"])
+    record = M7ModelAuditRecord.from_dict(payload)
+    serialized = dumps_json(record.to_dict())
+    checksum = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(
+        checksum,
+        _required_sha256(row, "payload_checksum"),
+    ):
+        raise ValueError("M7 model audit checksum is invalid")
+    checks = {
+        "invocation_id": record.invocation_id,
+        "request_id": record.request_id,
+        "scoring_task_id": record.scoring_task_id,
+        "provider": record.provider,
+        "model_name": record.model_name,
+        "provider_status": record.provider_status,
+        "validation_status": record.validation_status,
+        "privacy_decision": record.privacy_decision,
+    }
+    if any(str(row[field]) != expected for field, expected in checks.items()):
+        raise ValueError("M7 model audit identity does not match its row")
+    created_at = _aware_datetime(row["created_at"])
+    if created_at != record.created_at:
+        raise ValueError("M7 model audit timestamp does not match its row")
+    columns = source_table_columns("m7_model_invocation_audits")
+    values = {
+        **checks,
+        "created_at": created_at,
+        "payload": serialized,
+        "payload_checksum": checksum,
+    }
+    return _build_prepared(
+        "m7_model_invocation_audits",
+        columns,
+        values,
+        version=(
+            record.model_version,
+            record.prompt_template_version,
+            record.execution_policy_version,
+            record.privacy_policy_version,
+            record.privacy_decision,
+            record.validation_status,
+        ),
+        checksum=checksum,
+        contract_validated=True,
+    )
+
+
 def _prepare_model_audit(row: sqlite3.Row) -> PreparedImportRow:
     payload = _canonical_json_object(row["payload"])
     record = M9ModelAuditRecord.from_dict(payload)
+    stored_source_checksum = _required_sha256(
+        row,
+        "source_report_checksum",
+    )
+    if not hmac.compare_digest(
+        stored_source_checksum,
+        record.source_report_checksum,
+    ):
+        raise ValueError("M9 model audit source checksum is invalid")
     serialized = dumps_json(record.to_dict())
     checksum = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
     if not hmac.compare_digest(
@@ -272,6 +403,7 @@ def _prepare_model_audit(row: sqlite3.Row) -> PreparedImportRow:
         "invocation_id": record.invocation_id,
         "request_id": record.request_id,
         "source_report_id": record.source_report_id,
+        "source_report_checksum": record.source_report_checksum,
         "scope": record.scope,
         "provider": record.provider,
         "model_name": record.model_name,

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import inspect
 import json
 from pathlib import Path
@@ -28,8 +29,13 @@ from course_insight.infrastructure.deepseek import (
     DeepSeekClient,
     DeepSeekHTTPResponse,
 )
+from course_insight.infrastructure.json_io import dumps_json
+from course_insight.infrastructure.sqlite import connect_sqlite, migrate
 from course_insight.infrastructure.sqlite.m9_repository import (
     SQLiteM9Repository,
+)
+from course_insight.infrastructure.sqlite.module_recovery_schema import (
+    M9_MODEL_INVOCATION_AUDITS_V14_SQL,
 )
 from course_insight.modules.m9_teacher_analytics.adapter import (
     DeepSeekM9NarrativeAdapter,
@@ -228,7 +234,7 @@ def _valid_output() -> dict[str, Any]:
         "review_questions": [
             {
                 "question_code": "check_recent_classroom_evidence",
-                "fact_refs": ["fact_2", "fact_3"],
+                "fact_refs": ["fact_1", "fact_2", "fact_3"],
             }
         ],
         "suggestion_explanations": [
@@ -328,8 +334,9 @@ def test_teacher_interpretation_rehydrates_only_after_strict_validation(
         {
             "question_code": "check_recent_classroom_evidence",
             "text": "这些程序事实与近期课堂活动中的证据是否一致？",
-            "fact_refs": ["fact_2", "fact_3"],
+            "fact_refs": ["fact_1", "fact_2", "fact_3"],
             "source_ids": [
+                "report_private_scope",
                 "concept_private_scope",
                 "misconception_private_scope",
             ],
@@ -377,7 +384,7 @@ def test_prompt_contains_only_anonymous_aggregate_qualitative_facts() -> None:
     system_message, user_message = prompt.messages
     model_input = user_message["content"]
 
-    assert NARRATIVE_PROMPT_VERSION == "3.0.0"
+    assert NARRATIVE_PROMPT_VERSION == "3.1.0"
     for private_value in (
         "learner_private_scope",
         "class_private_scope",
@@ -392,6 +399,25 @@ def test_prompt_contains_only_anonymous_aggregate_qualitative_facts() -> None:
         assert private_value not in model_input
     assert '"fact_ref":"fact_1"' in model_input
     assert '"meaning_code":"evidence_sufficient"' in model_input
+    payload = json.loads(model_input)
+    assert payload["allowed_review_question_bindings"] == [
+        {
+            "question_code": "check_recent_classroom_evidence",
+            "fact_refs": ["fact_1", "fact_2", "fact_3"],
+        },
+        {
+            "question_code": "check_assessment_coverage",
+            "fact_refs": ["fact_1"],
+        },
+        {
+            "question_code": "check_concept_transfer",
+            "fact_refs": ["fact_2"],
+        },
+        {
+            "question_code": "check_misconception_context",
+            "fact_refs": ["fact_3"],
+        },
+    ]
     assert '"text"' not in model_input
     assert '"explanation"' not in model_input
     assert "只服务教师" in system_message["content"]
@@ -401,6 +427,66 @@ def test_prompt_contains_only_anonymous_aggregate_qualitative_facts() -> None:
         "misconception_private_scope",
         "audit_private_scope",
     )
+
+
+def _m9_audit(
+    analytics: TeacherAnalyticsBundle,
+) -> M9ModelAuditRecord:
+    return M9ModelAuditRecord(
+        invocation_id="invocation_legacy_binding",
+        request_id="request_legacy_binding",
+        source_report_id=analytics.report_id,
+        source_report_checksum=analytics.content_checksum(),
+        scope="class_aggregate",
+        prompt_template_id="m9-teacher-narrative-json",
+        prompt_template_version="3.1.0",
+        output_schema_version="1.0.0",
+        policy_version="m9-governed-v1",
+        input_checksum="a" * 64,
+        source_digest="b" * 64,
+        provider="deepseek",
+        model_name="deepseek-v4-flash",
+        provider_status="failed",
+        validation_status="not_run",
+        safety_flags=(),
+        input_tokens=0,
+        output_tokens=0,
+        latency_ms=3,
+        error_code="DEEPSEEK_NETWORK_ERROR",
+        output_checksum=None,
+        validated_output={},
+        created_at=NOW,
+    )
+
+
+def test_reported_coverage_concept_binding_fails_closed_with_visible_rule(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "private-test-key")
+    analytics = _analytics()
+    prompt = teacher_narrative_prompt(analytics, M9NarrativePolicy())
+    model_payload = json.loads(prompt.messages[1]["content"])
+    coverage = next(
+        binding
+        for binding in model_payload["allowed_review_question_bindings"]
+        if binding["question_code"] == "check_assessment_coverage"
+    )
+    assert coverage["fact_refs"] == ["fact_1"]
+
+    data = _bound_output(analytics)
+    data["review_questions"] = [
+        {
+            "question_code": "check_assessment_coverage",
+            "fact_refs": ["fact_2"],
+        }
+    ]
+    service, repository, _ = _service(analytics, _response(data))
+
+    with pytest.raises(DomainError) as raised:
+        service.interpret_teacher_analytics(_teacher(), analytics)
+
+    assert raised.value.code == "INVALID_MODEL_JSON"
+    assert repository.audits[0].validation_status == "blocked"
 
 
 @pytest.mark.parametrize(
@@ -646,17 +732,161 @@ def test_sqlite_persists_one_idempotent_sanitized_m9_call_record(
     repository.save_model_audit(stored)
     connection = sqlite3.connect(tmp_path / "m9.sqlite3")
     try:
-        raw_payload = connection.execute(
+        raw_payload, source_report_checksum = connection.execute(
             """
-            SELECT payload
+            SELECT payload, source_report_checksum
             FROM m9_model_invocation_audits
             WHERE invocation_id = ?
             """,
             (invocation_id,),
-        ).fetchone()[0]
+        ).fetchone()
     finally:
         connection.close()
     assert "private-test-key" not in raw_payload
     assert "learner_private_scope" not in raw_payload
     assert "messages" not in raw_payload
     assert "你是只服务教师" not in raw_payload
+    assert source_report_checksum == analytics.content_checksum()
+
+    with sqlite3.connect(tmp_path / "m9.sqlite3") as connection:
+        connection.execute(
+            """
+            UPDATE m9_model_invocation_audits
+            SET source_report_checksum = ?
+            WHERE invocation_id = ?
+            """,
+            ("0" * 64, invocation_id),
+        )
+    with pytest.raises(RuntimeError, match="identity mismatch"):
+        repository.get_model_audit(invocation_id)
+
+
+def test_sqlite_v15_upgrade_rejects_bad_legacy_source_binding_atomically(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "m9_legacy.sqlite3"
+    analytics = _analytics()
+    repository = SQLiteM9Repository(database_path)
+    repository.initialize()
+    repository.insert_or_get_analytics(
+        analytics,
+        course_id="course_private_scope",
+    )
+    repository.save_model_audit(_m9_audit(analytics))
+
+    with sqlite3.connect(database_path) as connection:
+        connection.row_factory = sqlite3.Row
+        row = connection.execute(
+            "SELECT * FROM m9_model_invocation_audits"
+        ).fetchone()
+        assert row is not None
+        payload = json.loads(str(row["payload"]))
+        payload["source_report_checksum"] = "0" * 64
+        tampered_payload = dumps_json(payload)
+        tampered_payload_checksum = hashlib.sha256(
+            tampered_payload.encode("utf-8")
+        ).hexdigest()
+        connection.execute("DROP TABLE m9_model_invocation_audits")
+        connection.execute(M9_MODEL_INVOCATION_AUDITS_V14_SQL)
+        connection.execute(
+            """
+            INSERT INTO m9_model_invocation_audits(
+                invocation_id,
+                request_id,
+                source_report_id,
+                scope,
+                provider,
+                model_name,
+                provider_status,
+                validation_status,
+                created_at,
+                payload,
+                payload_checksum
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["invocation_id"],
+                row["request_id"],
+                row["source_report_id"],
+                row["scope"],
+                row["provider"],
+                row["model_name"],
+                row["provider_status"],
+                row["validation_status"],
+                row["created_at"],
+                tampered_payload,
+                tampered_payload_checksum,
+            ),
+        )
+        connection.execute("DROP TABLE m7_model_invocation_audits")
+        connection.execute("DELETE FROM schema_migrations WHERE version >= 15")
+
+    with connect_sqlite(database_path) as connection:
+        with pytest.raises(RuntimeError, match="source report checksum mismatch"):
+            migrate(connection)
+        ledger_version = int(
+            connection.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()[0]
+        )
+        audit_columns = {
+            str(item["name"])
+            for item in connection.execute(
+                "PRAGMA table_info('m9_model_invocation_audits')"
+            ).fetchall()
+        }
+        m7_table = connection.execute(
+            """
+            SELECT 1
+            FROM sqlite_master
+            WHERE type = 'table' AND name = 'm7_model_invocation_audits'
+            """
+        ).fetchone()
+
+    assert ledger_version == 14
+    assert "source_report_checksum" not in audit_columns
+    assert m7_table is None
+
+
+def test_sqlite_current_schema_rejects_tampered_independent_source_checksum(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "m9_current_tampered.sqlite3"
+    analytics = _analytics()
+    repository = SQLiteM9Repository(database_path)
+    repository.initialize()
+    repository.insert_or_get_analytics(
+        analytics,
+        course_id="course_private_scope",
+    )
+    audit = _m9_audit(analytics)
+    repository.save_model_audit(audit)
+
+    with sqlite3.connect(database_path) as connection:
+        connection.execute(
+            """
+            UPDATE m9_model_invocation_audits
+            SET source_report_checksum = ?
+            WHERE invocation_id = ?
+            """,
+            ("0" * 64, audit.invocation_id),
+        )
+
+    with connect_sqlite(database_path) as connection:
+        with pytest.raises(RuntimeError, match="source report checksum mismatch"):
+            migrate(connection)
+        assert int(
+            connection.execute(
+                "SELECT MAX(version) FROM schema_migrations"
+            ).fetchone()[0]
+        ) == 16
+        assert str(
+            connection.execute(
+                """
+                SELECT source_report_checksum
+                FROM m9_model_invocation_audits
+                WHERE invocation_id = ?
+                """,
+                (audit.invocation_id,),
+            ).fetchone()[0]
+        ) == "0" * 64

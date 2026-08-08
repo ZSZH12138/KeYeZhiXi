@@ -19,13 +19,19 @@ def latest_audits(bundle: ScoringResultBundle) -> list[ScoreAuditRecord]:
     return [bundle.get_audit_record(audit_id) for audit_id in order]
 
 
+def usable_latest_audits(bundle: ScoringResultBundle) -> list[ScoreAuditRecord]:
+    """Return latest score records excluding teacher-invalidated versions."""
+
+    return [record for record in latest_audits(bundle) if not record.is_rejected()]
+
+
 def build_class_report(
     scoring: ScoringResultBundle,
     state: StateUpdateResult,
 ) -> ClassReport:
     """Copy class state and summarize existing latest audit scores."""
 
-    audits = latest_audits(scoring)
+    audits = usable_latest_audits(scoring)
     scores = [record.total_score for record in audits]
     total = math.fsum(scores) if scores else 0.0
     statistics = {
@@ -80,6 +86,6 @@ def build_individual_report(
         overall_mastery=learner.overall_mastery,
         weak_concept_ids=weak_ids,
         active_misconception_ids=misconception_ids,
-        recent_score=scoring.total_score,
+        recent_score=(None if scoring.has_rejected_score() else scoring.total_score),
         review_required_count=sum(record.needs_review() for record in audits),
     )

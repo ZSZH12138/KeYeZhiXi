@@ -33,19 +33,21 @@ M7 现在提供两条明确分离的运行路径：
 - `RubricScoringResult` 返回 M8，并强制加入
   `teacher_review_required`，不能直接成为无人审核的最终评分；
 - `StudentFeedbackPackage` 返回 M0 学生外层，引用只能来自当前
-  `EvidenceBundle`，且必须通过答案泄露检查；
+  `EvidenceBundle`，短期只携带来源与定位，不携带证据原文；所有学生可见文字
+  必须通过答案泄露检查；
 - DeepSeek 的 `LLMGenerationResult` 只在适配器内瞬时解析，不交给仓储；
-  M7 只记录安全提示元数据、`ModelInvocationAudit` 和
-  `SafetyCheckResult`。最终 `RubricScoringResult` 由 M8 的评分流程负责审计。
+  M7 将安全提示元数据、调用状态、安全判定和隐私判定合并成一份原子审计。
+  最终 `RubricScoringResult` 仍由 M8 的评分流程负责审计。
 
-评分提示使用 `m7-rubric-scoring-json@3.0.0`；反馈模板使用
+评分提示使用 `m7-rubric-scoring-json@4.0.0`；反馈模板使用
 `m7-deterministic-feedback@1.0.0`。评分输入的题干、学生答案、量规文字和
 课程证据全部位于 user JSON，并被 system 规则声明为不可信数据，不能改变角色、
 评分规则或输出格式。
 
-当前版本按负责人冯于 2026-08-02 的决定，暂不提供学生答案个人信息检测、阻断
-或自动脱敏。显式启用真实适配器后，`student_answer` 会原样进入 DeepSeek 请求；
-是否增加出站治理机制，待与项目负责人讨论后再确定。
+学生答案在任何提示消息构造前执行 `m7-outbound-privacy-v1`：邮箱、手机号、
+校验通过的中国居民身份证号和带明确标签的学号使用固定占位符脱敏；明确的姓名、
+详细地址、健康或家庭自由文本失败关闭。若答案主要由被脱敏标识符构成，系统也会
+以 `redaction_meaning_loss` 阻断，转入人工或本地处理。没有默认绕过开关。
 
 ## 显式启用
 
@@ -80,7 +82,8 @@ service = M7LocalModelService(adapter, m7_repository, output_validator)
 - 使用非流式 JSON Output、有限超时、有限指数退避和响应大小上限；
 - v1 执行策略固定使用 V4 Flash、非思考模式和零温度，不接受自定义主机或密钥变量名；
 - 评分必须完整且仅覆盖冻结量规分项，正分必须引用学生原文和允许的课程证据，
-  单项/总分不能越界，所有评分都进入教师复核；
+  单项/总分不能越界；`teacher_review_required` 同时在适配器和 M7 服务边界强制，
+  所有评分都进入教师复核；
 - 反馈根据 M6 `action_type` 选择固定模板，只引用当前证据包，缺失概念必须属于
   M6 目标；该路径不会消费任何模型生成文本；
 - 只对 429、可恢复 5xx、超时、空 JSON content 和资源不足做有限重试；内容
@@ -89,15 +92,20 @@ service = M7LocalModelService(adapter, m7_repository, output_validator)
 
 ## 调用审计的当前边界
 
-真实评分调用只形成三份可持久化记录：
+真实评分调用形成一份 `M7ModelAuditRecord`，由 SQLite/PostgreSQL 在一个事务中
+幂等写入。记录只包含：
 
-- 安全提示记录：模板/策略版本、输入校验和和证据 ID；
-- `ModelInvocationAudit`：模型、token、耗时、状态和错误码；
-- `SafetyCheckResult`：输出安全检查状态与有限标记。
+- 请求/调用标识、模型与模板/策略版本、规范化证据 ID；
+- 原答案、脱敏后答案、提示输入和验证结果的 SHA-256（适用时）；
+- 隐私决定、白名单安全标记、脱敏数量、token、耗时、状态、白名单错误码和
+  安全检查时间。
 
-完整提示词、学生答案、模型响应正文和验证后的评分结果均不写入 M7 调用审计。
-SQLite/PostgreSQL 目前只持久化最终 `StudentFeedbackPackage`，审计相关方法是
-显式 no-op；在 M1—M3 详细实现和整体数据保留政策确定前不新增审计表。
+完整提示词、学生答案、匹配到的个人信息、模型响应正文和结构化评分内容均不写入
+M7 调用审计。读取接口只接受 `system_admin`；教师与学生均被拒绝。默认保留期为
+180 天。部署必须由受信任的调度器至少每天执行一次
+`python manage.py purge_m7_model_audits`；该命令使用应用组合根选择 SQLite 或
+PostgreSQL 仓储，只输出删除数量，不读取或输出审计内容。底层服务仅保留显式
+1—3650 天参数供受控运维集成使用，生产命令固定采用已批准的 180 天。
 
 ## 测试
 
@@ -113,5 +121,4 @@ python -m pytest -q \
 
 不得接入 DeepSeek 以外的 LLM、把 DeepSeek 用于学生反馈、加载本地模型权重、
 硬编码密钥、默认联网、保存完整模型响应、接受不匹配证据、引用不存在证据、
-绕过教师复核，或在学生反馈中泄漏答案。真实部署前必须单独确认学生答案的
-个人信息出站规则。
+绕过教师复核、绕过出站隐私治理，或在学生反馈中泄漏答案/证据原文。

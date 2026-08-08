@@ -379,6 +379,10 @@ def _review_questions(
     ):
         raise ValueError
     fact_by_ref = {fact.fact_ref: fact for fact in prompt.facts}
+    binding_by_code = {
+        binding.question_code: binding.fact_refs
+        for binding in prompt.review_question_bindings
+    }
     seen: set[tuple[str, tuple[str, ...]]] = set()
     result: list[dict[str, Any]] = []
     for raw in value:
@@ -392,8 +396,8 @@ def _review_questions(
         fact_refs = _text_list(raw["fact_refs"], require_nonempty=True)
         if any(ref not in fact_by_ref for ref in fact_refs):
             raise ValueError
-        allowed_kinds = _QUESTION_ALLOWED_FACT_KINDS[question_code]
-        if any(fact_by_ref[ref].kind not in allowed_kinds for ref in fact_refs):
+        expected_fact_refs = binding_by_code.get(question_code)
+        if expected_fact_refs is None or tuple(fact_refs) != expected_fact_refs:
             raise ValueError
         identity = (question_code, tuple(fact_refs))
         if identity in seen:
@@ -547,14 +551,6 @@ _QUESTION_TEMPLATES = {
     "check_misconception_context": (
         "相关错误模式是否集中出现在特定课堂情境中？"
     ),
-}
-_QUESTION_ALLOWED_FACT_KINDS = {
-    "check_recent_classroom_evidence": frozenset(
-        {"class_evidence", "concept_status", "misconception_pattern"}
-    ),
-    "check_assessment_coverage": frozenset({"class_evidence"}),
-    "check_concept_transfer": frozenset({"concept_status"}),
-    "check_misconception_context": frozenset({"misconception_pattern"}),
 }
 _SUGGESTION_TEMPLATES = {
     "collect_rule_basis": (

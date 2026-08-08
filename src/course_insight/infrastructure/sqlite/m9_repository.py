@@ -16,6 +16,7 @@ from course_insight.contracts.analytics import (
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
+    M9ReviewDecisionConflict,
 )
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import migrate
@@ -44,12 +45,22 @@ class SQLiteM9Repository:
         connection = connect_sqlite(self._database_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            authoritative_source_checksum = self._source_report_checksum(
+                connection,
+                record.source_report_id,
+            )
+            if not hmac.compare_digest(
+                record.source_report_checksum,
+                authoritative_source_checksum,
+            ):
+                raise RuntimeError("M9 model audit source report checksum mismatch")
             connection.execute(
                 """
                 INSERT INTO m9_model_invocation_audits(
                     invocation_id,
                     request_id,
                     source_report_id,
+                    source_report_checksum,
                     scope,
                     provider,
                     model_name,
@@ -58,13 +69,14 @@ class SQLiteM9Repository:
                     created_at,
                     payload,
                     payload_checksum
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT DO NOTHING
                 """,
                 (
                     record.invocation_id,
                     record.request_id,
                     record.source_report_id,
+                    record.source_report_checksum,
                     record.scope,
                     record.provider,
                     record.model_name,
@@ -81,6 +93,7 @@ class SQLiteM9Repository:
                     invocation_id,
                     request_id,
                     source_report_id,
+                    source_report_checksum,
                     scope,
                     provider,
                     model_name,
@@ -96,7 +109,10 @@ class SQLiteM9Repository:
                 """,
                 (record.invocation_id, record.request_id, record.invocation_id),
             ).fetchone()
-            if self._model_audit_from_row(row) != record:
+            if self._model_audit_from_row(
+                row,
+                authoritative_source_checksum=authoritative_source_checksum,
+            ) != record:
                 raise RuntimeError("M9 model audit identity conflict")
             connection.execute("COMMIT")
         except Exception:
@@ -118,6 +134,7 @@ class SQLiteM9Repository:
                     invocation_id,
                     request_id,
                     source_report_id,
+                    source_report_checksum,
                     scope,
                     provider,
                     model_name,
@@ -131,7 +148,16 @@ class SQLiteM9Repository:
                 """,
                 (invocation_id,),
             ).fetchone()
-            return None if row is None else self._model_audit_from_row(row)
+            if row is None:
+                return None
+            authoritative_source_checksum = self._source_report_checksum(
+                connection,
+                str(row["source_report_id"]),
+            )
+            return self._model_audit_from_row(
+                row,
+                authoritative_source_checksum=authoritative_source_checksum,
+            )
         finally:
             connection.close()
 
@@ -264,7 +290,7 @@ class SQLiteM9Repository:
                 SELECT report_id, course_id, class_id, learner_ids, payload
                 FROM m9_teacher_analytics
                 WHERE course_id = ? AND class_id = ?
-                ORDER BY generated_at DESC, rowid DESC
+                ORDER BY generated_at DESC, report_id DESC
                 """,
                 (course_id, class_id),
             ).fetchall()
@@ -330,7 +356,12 @@ class SQLiteM9Repository:
             ).fetchone()
             stored = self._review_from_row(row)
             if stored != decision:
-                raise RuntimeError("M9 teacher-review identity conflict")
+                raise M9ReviewDecisionConflict(
+                    audit_id=decision.audit_id,
+                    expected_audit_version=(
+                        decision.expected_audit_version
+                    ),
+                )
             connection.execute("COMMIT")
             return stored.model_copy(deep=True)
         except Exception:
@@ -400,8 +431,26 @@ class SQLiteM9Repository:
         return decision
 
     @staticmethod
+    def _source_report_checksum(
+        connection: sqlite3.Connection,
+        source_report_id: str,
+    ) -> str:
+        row = connection.execute(
+            "SELECT payload FROM m9_teacher_analytics WHERE report_id = ?",
+            (source_report_id,),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("M9 model audit source report is unavailable")
+        bundle = TeacherAnalyticsBundle.model_validate_json(str(row["payload"]))
+        if bundle.report_id != source_report_id:
+            raise RuntimeError("M9 model audit source report identity mismatch")
+        return bundle.content_checksum()
+
+    @staticmethod
     def _model_audit_from_row(
         row: sqlite3.Row | None,
+        *,
+        authoritative_source_checksum: str,
     ) -> M9ModelAuditRecord:
         if row is None:
             raise RuntimeError("M9 model audit insert produced no row")
@@ -415,10 +464,19 @@ class SQLiteM9Repository:
         record = M9ModelAuditRecord.from_dict(
             json.loads(payload)
         )
+        stored_source_checksum = str(row["source_report_checksum"])
         if (
             record.invocation_id != str(row["invocation_id"])
             or record.request_id != str(row["request_id"])
             or record.source_report_id != str(row["source_report_id"])
+            or not hmac.compare_digest(
+                record.source_report_checksum,
+                stored_source_checksum,
+            )
+            or not hmac.compare_digest(
+                stored_source_checksum,
+                authoritative_source_checksum,
+            )
             or record.scope != str(row["scope"])
             or record.provider != str(row["provider"])
             or record.model_name != str(row["model_name"])

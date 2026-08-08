@@ -24,6 +24,7 @@ from course_insight.infrastructure.postgresql.base import (
 from course_insight.infrastructure.postgresql.pool import PostgresPool
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
+    M9ReviewDecisionConflict,
 )
 
 
@@ -56,6 +57,7 @@ _MODEL_AUDIT_COLUMNS = """
 invocation_id,
 request_id,
 source_report_id,
+source_report_checksum,
 scope,
 provider,
 model_name,
@@ -83,12 +85,22 @@ class PostgresM9Repository:
         try:
             with self._pool.connection() as connection:
                 with connection.transaction():
+                    authoritative_source_checksum = _source_report_checksum(
+                        connection,
+                        record.source_report_id,
+                    )
+                    if not hmac.compare_digest(
+                        record.source_report_checksum,
+                        authoritative_source_checksum,
+                    ):
+                        raise PostgresOperationError(_CHECKSUM_ERROR)
                     connection.execute(
                         """
                         INSERT INTO m9_model_invocation_audits(
                             invocation_id,
                             request_id,
                             source_report_id,
+                            source_report_checksum,
                             scope,
                             provider,
                             model_name,
@@ -99,7 +111,7 @@ class PostgresM9Repository:
                             payload_checksum
                         ) VALUES (
                             %s, %s, %s, %s, %s, %s,
-                            %s, %s, %s, %s, %s
+                            %s, %s, %s, %s, %s, %s
                         )
                         ON CONFLICT DO NOTHING
                         """,
@@ -107,6 +119,7 @@ class PostgresM9Repository:
                             record.invocation_id,
                             record.request_id,
                             record.source_report_id,
+                            record.source_report_checksum,
                             record.scope,
                             record.provider,
                             record.model_name,
@@ -132,7 +145,10 @@ class PostgresM9Repository:
                             record.invocation_id,
                         ),
                     ).fetchone()
-                    if _model_audit_from_row(row) != record:
+                    if _model_audit_from_row(
+                        row,
+                        authoritative_source_checksum=authoritative_source_checksum,
+                    ) != record:
                         raise PostgresOperationError(_CONFLICT_ERROR)
         except PostgresError:
             raise
@@ -153,7 +169,16 @@ class PostgresM9Repository:
                     """,
                     (invocation_id,),
                 ).fetchone()
-                return None if row is None else _model_audit_from_row(row)
+                if row is None:
+                    return None
+                authoritative_source_checksum = _source_report_checksum(
+                    connection,
+                    _required_text(row, "source_report_id"),
+                )
+                return _model_audit_from_row(
+                    row,
+                    authoritative_source_checksum=authoritative_source_checksum,
+                )
         except PostgresError:
             raise
         except psycopg.Error:
@@ -368,7 +393,12 @@ class PostgresM9Repository:
                     ).fetchone()
                     stored = _review_from_row(row)
                     if stored != candidate:
-                        raise PostgresOperationError(_CONFLICT_ERROR)
+                        raise M9ReviewDecisionConflict(
+                            audit_id=candidate.audit_id,
+                            expected_audit_version=(
+                                candidate.expected_audit_version
+                            ),
+                        )
                     return stored
         except PostgresError:
             raise
@@ -403,8 +433,28 @@ class PostgresM9Repository:
             raise PostgresOperationError(_OPERATION_ERROR) from None
 
 
+def _source_report_checksum(
+    connection: Any,
+    source_report_id: str,
+) -> str:
+    row = connection.execute(
+        f"""
+        SELECT {_ANALYTICS_COLUMNS}
+        FROM m9_teacher_analytics
+        WHERE report_id = %s
+        """,
+        (source_report_id,),
+    ).fetchone()
+    bundle = _analytics_from_row(row)
+    if bundle.report_id != source_report_id:
+        raise PostgresOperationError(_INTEGRITY_ERROR)
+    return bundle.content_checksum()
+
+
 def _model_audit_from_row(
     row: Mapping[str, Any] | None,
+    *,
+    authoritative_source_checksum: str,
 ) -> M9ModelAuditRecord:
     try:
         if row is None or type(row.get("payload")) is not dict:
@@ -416,12 +466,24 @@ def _model_audit_from_row(
         ):
             raise PostgresOperationError(_CHECKSUM_ERROR)
         record = M9ModelAuditRecord.from_dict(payload)
+        stored_source_checksum = _required_checksum(
+            row,
+            "source_report_checksum",
+        )
         if (
             record.invocation_id != _required_text(row, "invocation_id")
             or record.request_id != _required_text(row, "request_id")
             or record.source_report_id != _required_text(
                 row,
                 "source_report_id",
+            )
+            or not hmac.compare_digest(
+                record.source_report_checksum,
+                stored_source_checksum,
+            )
+            or not hmac.compare_digest(
+                stored_source_checksum,
+                authoritative_source_checksum,
             )
             or record.scope != _required_text(row, "scope")
             or record.provider != _required_text(row, "provider")

@@ -38,6 +38,7 @@ from course_insight.modules.m9_teacher_analytics.adapter import (
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
     M9Repository,
+    M9ReviewDecisionConflict,
 )
 from course_insight.modules.m9_teacher_analytics.reports import (
     build_class_report,
@@ -313,6 +314,42 @@ class M9TeacherAnalyticsService:
             policy=policy,
         )
 
+    def build_rejected_score_analytics(
+        self,
+        knowledge_bundle: KnowledgeBundle,
+        scoring_result_bundle: ScoringResultBundle,
+        state_update_result: StateUpdateResult,
+        teacher_threshold_policy_path: Path,
+    ) -> TeacherAnalyticsBundle:
+        """Supersede score fields without treating a rejection as zero."""
+
+        self._require_rejected_score(scoring_result_bundle)
+        return self.build_teacher_analytics(
+            knowledge_bundle=knowledge_bundle,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            teacher_threshold_policy_path=teacher_threshold_policy_path,
+        )
+
+    def build_rejected_score_analytics_with_frozen_policy(
+        self,
+        knowledge_bundle: KnowledgeBundle,
+        scoring_result_bundle: ScoringResultBundle,
+        state_update_result: StateUpdateResult,
+        teacher_threshold_policy_path: Path,
+        expected_policy_checksum: str,
+    ) -> TeacherAnalyticsBundle:
+        """Build a rejection-safe report using the frozen teacher policy."""
+
+        self._require_rejected_score(scoring_result_bundle)
+        return self.build_teacher_analytics_with_frozen_policy(
+            knowledge_bundle=knowledge_bundle,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            teacher_threshold_policy_path=teacher_threshold_policy_path,
+            expected_policy_checksum=expected_policy_checksum,
+        )
+
     def _build_teacher_analytics_with_policy(
         self,
         *,
@@ -346,16 +383,22 @@ class M9TeacherAnalyticsService:
                 ),
             )
             for record in latest_audits(scoring_result_bundle)
-            if record.needs_review()
+            if record.needs_review() and not record.is_rejected()
         ]
         queue.sort(key=lambda item: item.priority_key())
-        bundle = TeacherAnalyticsBundle(
-            report_id=teacher_analytics_report_id(
-                course_id=knowledge_bundle.course_id,
-                class_state_snapshot_id=(
-                    state_update_result.class_state_snapshot.snapshot_id
-                ),
+        report_id = teacher_analytics_report_id(
+            course_id=knowledge_bundle.course_id,
+            class_state_snapshot_id=(
+                state_update_result.class_state_snapshot.snapshot_id
             ),
+        )
+        if scoring_result_bundle.has_rejected_score():
+            report_id = (
+                f"{report_id}_rejected_"
+                f"{scoring_result_bundle.content_checksum()}"
+            )
+        bundle = TeacherAnalyticsBundle(
+            report_id=report_id,
             class_report=class_report,
             individual_reports=[individual],
             review_queue=queue,
@@ -363,7 +406,10 @@ class M9TeacherAnalyticsService:
                 state_update_result,
                 policy,
             ),
-            generated_at=state_update_result.updated_at,
+            generated_at=max(
+                state_update_result.updated_at,
+                scoring_result_bundle.finalized_at,
+            ),
         )
         insert_or_get = getattr(
             self._repository,
@@ -382,6 +428,17 @@ class M9TeacherAnalyticsService:
         if callable(saver):
             saver(bundle.model_copy(deep=True))
         return bundle
+
+    @staticmethod
+    def _require_rejected_score(
+        scoring_result_bundle: ScoringResultBundle,
+    ) -> None:
+        if not scoring_result_bundle.has_rejected_score():
+            raise DomainError(
+                code="REJECTED_SCORE_REQUIRED",
+                module="m9",
+                message="rejection analytics requires a rejected current score",
+            )
 
     def get_analytics(
         self,
@@ -479,21 +536,42 @@ class M9TeacherAnalyticsService:
             decision.audit_id
         )
         decision.assert_matches(current)
-        insert_or_get = getattr(
-            self._repository,
-            "insert_or_get_review_decision",
-            None,
-        )
-        if callable(insert_or_get):
-            authoritative = insert_or_get(decision.model_copy(deep=True))
-            if authoritative != decision:
-                raise RuntimeError(
-                    "M9 persisted teacher review conflicts with result"
+        try:
+            insert_or_get = getattr(
+                self._repository,
+                "insert_or_get_review_decision",
+                None,
+            )
+            if callable(insert_or_get):
+                authoritative = insert_or_get(
+                    decision.model_copy(deep=True)
                 )
-            return authoritative.model_copy(deep=True)
-        saver = getattr(self._repository, "save_review_decision", None)
-        if callable(saver):
-            saver(decision.model_copy(deep=True))
+                if authoritative != decision:
+                    raise M9ReviewDecisionConflict(
+                        audit_id=decision.audit_id,
+                        expected_audit_version=(
+                            decision.expected_audit_version
+                        ),
+                    )
+                return authoritative.model_copy(deep=True)
+            saver = getattr(self._repository, "save_review_decision", None)
+            if callable(saver):
+                saver(decision.model_copy(deep=True))
+        except M9ReviewDecisionConflict as conflict:
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m9",
+                message=(
+                    "another teacher decision already exists for this audit version"
+                ),
+                details={
+                    "audit_id": conflict.audit_id,
+                    "expected_audit_version": (
+                        conflict.expected_audit_version
+                    ),
+                },
+                recoverable=True,
+            ) from None
         return decision
 
     def get_review_decision(

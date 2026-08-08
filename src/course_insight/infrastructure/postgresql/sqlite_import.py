@@ -71,6 +71,7 @@ _TABLE_ORDER = (
     "m6_policy_rewards",
     "m6_policy_evaluations",
     "m7_student_feedback",
+    "m7_model_invocation_audits",
     "m8_assessment_papers",
     "m8_score_audits",
     "m8_scoring_results",
@@ -132,6 +133,9 @@ _SOURCE_SELECTS = {
     "m7_student_feedback": """
         SELECT * FROM m7_student_feedback ORDER BY feedback_id
     """,
+    "m7_model_invocation_audits": """
+        SELECT * FROM m7_model_invocation_audits ORDER BY invocation_id
+    """,
     "m8_assessment_papers": """
         SELECT * FROM m8_assessment_papers ORDER BY paper_id
     """,
@@ -173,6 +177,7 @@ _IDENTITY_COLUMNS = {
     "m6_policy_rewards": ("reward_identity",),
     "m6_policy_evaluations": ("evaluation_identity",),
     "m7_student_feedback": ("feedback_id",),
+    "m7_model_invocation_audits": ("invocation_id",),
     "m8_assessment_papers": ("paper_id",),
     "m8_score_audits": ("audit_id", "audit_version"),
     "m8_scoring_results": ("attempt_id", "result_key"),
@@ -503,6 +508,7 @@ def source_table_columns(table: str) -> tuple[str, ...]:
         "m6_policy_observations",
         "m6_policy_rewards",
         "m6_policy_evaluations",
+        "m7_model_invocation_audits",
         "m9_model_invocation_audits",
     }:
         return _COLUMNS[table]

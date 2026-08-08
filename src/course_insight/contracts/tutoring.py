@@ -28,15 +28,13 @@ _ALLOWED_TRANSITIONS = frozenset(
     }
 )
 _ANSWER_MARKERS = (
-    "final_answer:",
-    "final answer:",
-    "final answer：",
-    "最终答案:",
-    "最终答案：",
-    "标准答案:",
-    "标准答案：",
-    "正确答案:",
-    "正确答案：",
+    "final_answer",
+    "final answer",
+    "最终答案",
+    "标准答案",
+    "正确答案",
+    "参考答案",
+    "参考解答",
 )
 
 
@@ -285,12 +283,11 @@ class RubricFeedback(ContractModel):
 
 
 class EvidenceCitation(ContractModel):
-    """Course-source citation shown with generated feedback."""
+    """Locator-only course citation safe for current learner display."""
 
     evidence_id: str = Field(min_length=1)
     source_id: str = Field(min_length=1)
     locator: str = Field(min_length=1)
-    quote: str = Field(min_length=1)
 
     def label(self) -> str:
         """Return a compact source and locator label."""
@@ -336,11 +333,38 @@ class StudentFeedbackPackage(ContractModel):
         return bool(self.evidence_citations)
 
     def safe_for_student(self) -> bool:
-        """Reject uncited feedback and explicit final-answer disclosure markers."""
+        """Check every learner-visible string for answer disclosure markers."""
 
-        normalized_message = self.message.casefold()
+        visible_text = (
+            self.feedback_id,
+            self.task_id,
+            self.learner_id,
+            self.message,
+            *(
+                value
+                for feedback in self.rubric_feedback
+                for value in (
+                    feedback.criterion_id,
+                    feedback.message,
+                    feedback.student_evidence,
+                )
+            ),
+            *self.missing_concept_ids,
+            *(
+                value
+                for citation in self.evidence_citations
+                for value in (
+                    citation.evidence_id,
+                    citation.source_id,
+                    citation.locator,
+                )
+            ),
+            *self.next_practice_item_ids,
+        )
         return self.has_citations() and not any(
-            marker in normalized_message for marker in _ANSWER_MARKERS
+            marker in value.casefold()
+            for value in visible_text
+            for marker in _ANSWER_MARKERS
         )
 
     def citation_ids(self) -> list[str]:

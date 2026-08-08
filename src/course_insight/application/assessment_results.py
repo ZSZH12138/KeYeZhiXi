@@ -190,6 +190,12 @@ def existing_review(current, decision):
         record.audit_version == decision.expected_audit_version + 1
         and record.scoring_method == "teacher_override"
         and record.total_score == decision.final_total_score
+        and record.review_status
+        == (
+            "rejected_pending_rescore"
+            if decision.is_reject()
+            else "approved"
+        )
     ):
         return current
     raise DomainError(

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta
 from typing import Any, Protocol, runtime_checkable
 
 from course_insight.contracts.assessment import (
@@ -13,6 +14,8 @@ from course_insight.contracts.evidence import EvidenceBundle
 from course_insight.contracts.intelligence import (
     LLMGenerationRequest,
     LLMGenerationResult,
+    ModelInvocationAudit,
+    SafetyCheckResult,
 )
 from course_insight.contracts.tutoring import (
     EvidenceCitation,
@@ -32,7 +35,13 @@ from course_insight.modules.m7_local_model.prompts import (
     SCORING_PROMPT_ID,
     feedback_message,
 )
-from course_insight.modules.m7_local_model.repository import M7Repository
+from course_insight.modules.m7_local_model.repository import (
+    M7ModelAuditRecord,
+    M7Repository,
+)
+
+
+M7_AUDIT_RETENTION_DAYS = 180
 
 
 @runtime_checkable
@@ -154,6 +163,11 @@ class M7LocalModelService:
                 rubric_scoring_task,
                 evidence_bundle,
                 result,
+                student_answer=(
+                    rubric_scoring_task.student_answer
+                    if outcome is None
+                    else outcome.student_answer_for_validation
+                ),
             )
         except DomainError:
             if outcome is not None:
@@ -195,7 +209,6 @@ class M7LocalModelService:
                 evidence_id=chunk.evidence_id,
                 source_id=chunk.source_id,
                 locator=chunk.locator,
-                quote=chunk.text,
             )
             for chunk in evidence_bundle.evidence_chunks
         ]
@@ -266,7 +279,10 @@ class M7LocalModelService:
         if not callable(getter):
             return None
         package = getter(feedback_id)
-        return None if package is None else package.model_copy(deep=True)
+        if package is None:
+            return None
+        self._require_student_safe_feedback(package)
+        return package.model_copy(deep=True)
 
     def get_feedback_for_task(
         self,
@@ -289,7 +305,10 @@ class M7LocalModelService:
         if not callable(getter):
             return None
         package = getter(task_id, learner_id)
-        return None if package is None else package.model_copy(deep=True)
+        if package is None:
+            return None
+        self._require_student_safe_feedback(package)
+        return package.model_copy(deep=True)
 
     def get_feedback_by_task_and_learner(
         self,
@@ -297,6 +316,52 @@ class M7LocalModelService:
         learner_id: str,
     ) -> StudentFeedbackPackage | None:
         return self.get_feedback_for_task(task_id, learner_id)
+
+    def get_model_audit_for_admin(
+        self,
+        invocation_id: str,
+        *,
+        requester_role: str,
+    ) -> M7ModelAuditRecord | None:
+        """Return one privacy-minimized audit only to a system administrator."""
+
+        self._require_system_admin(requester_role)
+        getter = getattr(self._prompt_repository, "get_execution_audit", None)
+        if not callable(getter):
+            raise DomainError(
+                code="MODEL_AUDIT_PERSISTENCE_REQUIRED",
+                module="m7",
+                message="the configured M7 repository cannot read model audits",
+            )
+        record = getter(invocation_id)
+        return record
+
+    def purge_expired_model_audits(
+        self,
+        *,
+        now: datetime,
+        requester_role: str,
+        retention_days: int = M7_AUDIT_RETENTION_DAYS,
+    ) -> int:
+        """Apply the administrator-approved 180-day retention default."""
+
+        self._require_system_admin(requester_role)
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("M7 audit purge time must be timezone-aware")
+        if type(retention_days) is not int or not 1 <= retention_days <= 3650:
+            raise ValueError("M7 audit retention days must be between 1 and 3650")
+        purger = getattr(
+            self._prompt_repository,
+            "purge_execution_audits_before",
+            None,
+        )
+        if not callable(purger):
+            raise DomainError(
+                code="MODEL_AUDIT_PERSISTENCE_REQUIRED",
+                module="m7",
+                message="the configured M7 repository cannot purge model audits",
+            )
+        return int(purger(now - timedelta(days=retention_days)))
 
     @staticmethod
     def _require_aligned_evidence(
@@ -320,6 +385,8 @@ class M7LocalModelService:
         task: RubricScoringTask,
         evidence_bundle: EvidenceBundle,
         result: Any,
+        *,
+        student_answer: str,
     ) -> None:
         if not isinstance(result, RubricScoringResult):
             raise DomainError(
@@ -338,6 +405,7 @@ class M7LocalModelService:
             }
             != task.criterion_ids()
             or result.total_score > task.max_score() + 1e-9
+            or "teacher_review_required" not in result.review_flags
         ):
             raise DomainError(
                 code="INVALID_MODEL_JSON",
@@ -353,7 +421,7 @@ class M7LocalModelService:
                 score.score > criterion.max_score + 1e-9
                 or (
                     score.student_evidence
-                    and score.student_evidence not in task.student_answer
+                    and score.student_evidence not in student_answer
                 )
                 or (
                     score.score > 0.0
@@ -409,12 +477,23 @@ class M7LocalModelService:
                 recoverable=True,
             )
         citation_ids = set(package.citation_ids())
+        evidence_by_id = {
+            chunk.evidence_id: chunk for chunk in evidence_bundle.evidence_chunks
+        }
+        citation_locations_match = all(
+            citation.evidence_id in evidence_by_id
+            and citation.source_id
+            == evidence_by_id[citation.evidence_id].source_id
+            and citation.locator == evidence_by_id[citation.evidence_id].locator
+            for citation in package.evidence_citations
+        )
         if (
             package.feedback_id != f"feedback_{task.feedback_task_id}"
             or package.task_id != task.task_id
             or package.learner_id != task.learner_id
             or not citation_ids
             or not citation_ids <= set(evidence_bundle.citation_ids())
+            or not citation_locations_match
             or not set(package.missing_concept_ids)
             <= set(task.target_concept_ids())
             or not package.safe_for_student()
@@ -431,47 +510,23 @@ class M7LocalModelService:
         self,
         outcome: M7ScoringOutcome,
     ) -> None:
-        self._save_prompt_record(
-            outcome.prompt_record["prompt_template_id"],
-            dict(outcome.prompt_record),
+        self._record_execution_audit(
+            prompt_record=outcome.prompt_record,
+            invocation=outcome.audit,
+            safety=outcome.safety,
+            result=outcome.result,
         )
-        invocation_saver = getattr(
-            self._prompt_repository,
-            "save_invocation_audit",
-            None,
-        )
-        if callable(invocation_saver):
-            invocation_saver(outcome.audit.model_copy(deep=True))
-        safety_saver = getattr(
-            self._prompt_repository,
-            "save_safety_check",
-            None,
-        )
-        if callable(safety_saver):
-            safety_saver(outcome.safety.model_copy(deep=True))
 
     def _record_failed_invocation(
         self,
         failure: M7InvocationFailure,
     ) -> None:
-        self._save_prompt_record(
-            failure.prompt_record["prompt_template_id"],
-            dict(failure.prompt_record),
+        self._record_execution_audit(
+            prompt_record=failure.prompt_record,
+            invocation=failure.audit,
+            safety=failure.safety,
+            result=None,
         )
-        invocation_saver = getattr(
-            self._prompt_repository,
-            "save_invocation_audit",
-            None,
-        )
-        if callable(invocation_saver):
-            invocation_saver(failure.audit.model_copy(deep=True))
-        safety_saver = getattr(
-            self._prompt_repository,
-            "save_safety_check",
-            None,
-        )
-        if callable(safety_saver):
-            safety_saver(failure.safety.model_copy(deep=True))
 
     def _record_rejected_invocation(
         self,
@@ -479,31 +534,74 @@ class M7LocalModelService:
     ) -> None:
         """Record a completed call rejected by the service-level validator."""
 
-        self._save_prompt_record(
-            outcome.prompt_record["prompt_template_id"],
-            dict(outcome.prompt_record),
+        rejected_safety = outcome.safety.model_copy(
+            update={
+                "status": "blocked",
+                "flags": list(
+                    dict.fromkeys(
+                        [*outcome.safety.flags, "invalid_model_output"]
+                    )
+                ),
+            },
+            deep=True,
         )
-        invocation_saver = getattr(
+        self._record_execution_audit(
+            prompt_record=outcome.prompt_record,
+            invocation=outcome.audit,
+            safety=rejected_safety,
+            result=None,
+        )
+
+    def _record_execution_audit(
+        self,
+        *,
+        prompt_record: dict[str, Any],
+        invocation: ModelInvocationAudit,
+        safety: SafetyCheckResult,
+        result: RubricScoringResult | None,
+    ) -> None:
+        saver = getattr(
             self._prompt_repository,
-            "save_invocation_audit",
+            "save_execution_audit",
             None,
         )
-        if callable(invocation_saver):
-            invocation_saver(outcome.audit.model_copy(deep=True))
-        safety_saver = getattr(
-            self._prompt_repository,
-            "save_safety_check",
-            None,
+        if not callable(saver):
+            raise DomainError(
+                code="MODEL_AUDIT_PERSISTENCE_REQUIRED",
+                module="m7",
+                message=(
+                    "governed model scoring requires durable atomic audit storage"
+                ),
+            )
+        saver(
+            M7ModelAuditRecord.from_artifacts(
+                prompt_record=dict(prompt_record),
+                invocation=invocation,
+                safety=safety,
+                result=result,
+            )
         )
-        if callable(safety_saver):
-            safety_saver(
-                outcome.safety.model_copy(
-                    update={
-                        "status": "blocked",
-                        "flags": ["invalid_model_output"],
-                    },
-                    deep=True,
-                )
+
+    @staticmethod
+    def _require_student_safe_feedback(package: Any) -> None:
+        if (
+            not isinstance(package, StudentFeedbackPackage)
+            or not package.safe_for_student()
+        ):
+            raise DomainError(
+                code="MODEL_OUTPUT_BLOCKED",
+                module="m7",
+                message="persisted student feedback failed the learner safety gate",
+                recoverable=True,
+            )
+
+    @staticmethod
+    def _require_system_admin(requester_role: str) -> None:
+        if requester_role != "system_admin":
+            raise DomainError(
+                code="MODEL_AUDIT_ACCESS_DENIED",
+                module="m7",
+                message="M7 model audits are restricted to system administrators",
             )
 
     def _save_prompt_record(

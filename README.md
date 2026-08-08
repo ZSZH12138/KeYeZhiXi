@@ -228,7 +228,7 @@ python -m course_insight.cli export-schemas
 | 类 | 声明字段 | 公开领域方法 |
 |---|---|---|
 | `ClassReport` | `class_id:str; coverage_rate:float; concept_summaries:list[ClassConceptStatus]; misconception_summaries:list[ClassMisconceptionSummary]; score_statistics:dict[str,float]; evidence_status:str` | `is_actionable` |
-| `IndividualReport` | `learner_id:str; overall_mastery:float; weak_concept_ids:list[str]; active_misconception_ids:list[str]; recent_score:float; review_required_count:int` | `needs_follow_up` |
+| `IndividualReport` | `learner_id:str; overall_mastery:float; weak_concept_ids:list[str]; active_misconception_ids:list[str]; recent_score:float\|null; review_required_count:int` | 驳回待重评时 `recent_score=null`；`needs_follow_up` |
 | `ReviewQueueItem` | `audit_id:str; audit_version:int; learner_id:str; item_instance_id:str; recommended_score:float; confidence:float; review_reasons:list[str]` | `priority_key` |
 | `TeachingSuggestion` | `suggestion_id:str; action_type:str; concept_ids:list[str]; content:str; trigger_metrics:dict[str,float]; affected_count:int; affected_rate:float; coverage_rate:float; confidence:float; evidence_ids:list[str]; status:str` | `is_actionable` |
 | `CriterionOverride` | `criterion_id:str; previous_score:float; new_score:float; reason:str` | `delta` |
@@ -639,6 +639,7 @@ Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整�
 | `m6_policy_rewards` | M6 private | execution fingerprint + `m6-reward-v1` |
 | `m6_policy_evaluations` | M6 private | policy_id + canonical JSONL dataset identity |
 | `m7_student_feedback` | M7 | feedback_id |
+| `m7_model_invocation_audits` | M7 | invocation_id、request_id、证据 ID 与隐私最小化调用审计 |
 | `m8_assessment_papers` | M8 | paper_id，并持久化 course/class 执行作用域 |
 | `m8_score_audits` | M8 | audit_id + audit_version；只能追加 |
 | `m8_scoring_results` | M8 | attempt_id + 审计版本集合 |
@@ -646,8 +647,9 @@ Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整�
 | `m9_teacher_analytics` | M9 | course_id + class_id + report_id |
 | `m9_model_invocation_audits` | M9 | invocation_id、request_id、来源报告和通过校验的教师解读 |
 
-M7 的持久表保存现有学生反馈契约，不保存 DeepSeek 密钥、完整提示词或本地模型
-权重。每个仓储只访问本模块前缀。教师确认的 JSON 是只读输入；`runtime/`
+M7 的持久表保存学生反馈及 180 天管理员可读的隐私最小化调用审计，不保存
+DeepSeek 密钥、完整提示词、学生答案、模型响应或本地模型权重。每个仓储只访问
+本模块前缀。教师确认的 JSON 是只读输入；`runtime/`
 保存数据库、JSON 快照、索引、日志和运行清单。运行产物不得回写 `data/` 或
 `contracts/`。
 
@@ -701,7 +703,7 @@ M0 Web 已是真实基础设施；本 legacy 入口仍不需要 pgvector、DeepS
 | M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 84 个公开契约、`TaskPlan` 和八字段业务身份 |
 | M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
 | M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline |
-| M7 | 默认评分占位且零网络；显式 `DeepSeekM7Adapter` 仅支持 V4 主观评分、JSON 校验、有限重试、最小化审计和强制教师复核；反馈按 M6 动作确定性生成 | 在目标环境提供 `DEEPSEEK_API_KEY`，以假传输/沙箱验收后再显式启用评分；个人信息出站规则待负责人确认 |
+| M7 | 默认评分占位且零网络；显式 `DeepSeekM7Adapter` 仅支持 V4 主观评分、出站脱敏/阻断、JSON 校验、有限重试、180 天最小化审计和强制教师复核；反馈按 M6 动作确定性生成 | 在目标环境提供 `DEEPSEEK_API_KEY`，以假传输/沙箱及隐私阻断用例验收后再显式启用评分 |
 | M8 | 固定 anchor/规则评分；IRT 标定与自适应选题为 `empty` | 足量数据下实现 IRT shadow 标定，经 M9 质量/教师审核后启用 |
 | M9 | 阈值统计/规则建议与 `insufficient_data` 质量报告；legacy 叙述入口零网络；显式 `DeepSeekM9NarrativeAdapter` 仅解读达到门槛的匿名班级聚合事实 | 在目标环境以假传输/沙箱验收后再显式启用教师主动触发的解读；模型指标与标定审核仍待实现 |
 
