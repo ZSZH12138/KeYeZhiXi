@@ -1122,7 +1122,12 @@ def test_failed_m2_repository_save_does_not_pollute_live_index(
     "unsafe_ref",
     [
         Path("../outside.json"),
+        Path("/private/course.json"),
         Path("C:/private/course.json"),
+        Path(r"C:\private\course.json"),
+        Path(r"C:private\course.json"),
+        Path(r"\\server\share\course.json"),
+        Path(r"\private\course.json"),
     ],
 )
 def test_runtime_registry_rejects_path_escape_without_leaking_path(

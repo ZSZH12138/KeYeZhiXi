@@ -205,6 +205,133 @@ def test_artifact_loader_requires_a_nonempty_current_safe_action_set(tmp_path) -
         load_policy_artifact(tmp_path, "manifest.json", expected_action_ids=None)
 
 
+def test_artifact_loader_normalizes_invalid_manifest_errors_and_requires_manifest_type(
+    tmp_path,
+) -> None:
+    _write_bundle(tmp_path)
+    (tmp_path / "manifest.json").write_text(
+        _canonical({"allowed_scopes": []}),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="invalid policy manifest"):
+        load_policy_artifact(
+            tmp_path,
+            "manifest.json",
+            expected_action_ids=EXPECTED_ACTION_IDS,
+        )
+
+    _write_bundle(tmp_path)
+    with pytest.raises(TypeError, match="PolicyArtifactManifest"):
+        load_policy_artifact_for_manifest(
+            tmp_path,
+            object(),  # type: ignore[arg-type]
+            expected_action_ids=EXPECTED_ACTION_IDS,
+        )
+
+
+@pytest.mark.parametrize("reference", [None, "", "   "])
+def test_artifact_loader_rejects_blank_or_non_string_references(
+    tmp_path, reference: object
+) -> None:
+    _write_bundle(tmp_path)
+
+    with pytest.raises(ValueError, match="relative path"):
+        load_policy_artifact(
+            tmp_path,
+            reference,  # type: ignore[arg-type]
+            expected_action_ids=EXPECTED_ACTION_IDS,
+        )
+
+
+def test_artifact_loader_rejects_non_json_references(tmp_path) -> None:
+    manifest, _ = _write_bundle(tmp_path)
+    (tmp_path / "manifest.txt").write_text(_canonical(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="must be JSON"):
+        load_policy_artifact(
+            tmp_path,
+            "manifest.txt",
+            expected_action_ids=EXPECTED_ACTION_IDS,
+        )
+
+
+@pytest.mark.parametrize(
+    ("raw", "message"),
+    [
+        (b"\xff", "unable to load JSON artifact"),
+        (b"{", "invalid JSON artifact"),
+        (b"[]", "root must be an object"),
+        (b'{"key":1,"key":2}', "invalid JSON artifact"),
+        (b'{"value":NaN}', "invalid JSON artifact"),
+    ],
+)
+def test_artifact_loader_rejects_unsafe_json_encodings_and_shapes(
+    tmp_path, raw: bytes, message: str
+) -> None:
+    _write_bundle(tmp_path)
+    (tmp_path / "manifest.json").write_bytes(raw)
+
+    with pytest.raises(ValueError, match=message):
+        load_policy_artifact(
+            tmp_path,
+            "manifest.json",
+            expected_action_ids=EXPECTED_ACTION_IDS,
+        )
+
+
+@pytest.mark.parametrize(
+    ("invalid_case", "message"),
+    [
+        ("schema", "invalid schema"),
+        ("dimension", "positive integer"),
+        ("alpha", "finite and non-negative"),
+        ("actions", "non-empty object"),
+        ("action_id", "action is invalid"),
+        ("action_parameters", "action is invalid"),
+        ("parameter_schema", "parameters are invalid"),
+        ("matrix_dimension", "inverse covariance has invalid dimension"),
+        ("vector_number", "theta must be finite"),
+    ],
+)
+def test_artifact_loader_rejects_malformed_model_parameters(
+    tmp_path, invalid_case: str, message: str
+) -> None:
+    _, artifact = _write_bundle(tmp_path)
+    actions = artifact["actions"]
+    assert isinstance(actions, dict)
+    first_parameters = actions[EXPECTED_ACTION_IDS[0]]
+    assert isinstance(first_parameters, dict)
+
+    if invalid_case == "schema":
+        artifact["unexpected"] = True
+    elif invalid_case == "dimension":
+        artifact["dimension"] = 0
+    elif invalid_case == "alpha":
+        artifact["alpha"] = -0.1
+    elif invalid_case == "actions":
+        artifact["actions"] = {}
+    elif invalid_case == "action_id":
+        artifact["actions"] = {"": first_parameters}
+    elif invalid_case == "action_parameters":
+        actions[EXPECTED_ACTION_IDS[0]] = []
+    elif invalid_case == "parameter_schema":
+        actions[EXPECTED_ACTION_IDS[0]] = {"theta": [0.0, 1.0]}
+    elif invalid_case == "matrix_dimension":
+        first_parameters["inverse_covariance"] = [[1.0, 0.0]]
+    else:
+        first_parameters["theta"] = [0.0, "not-a-number"]
+
+    _write_bundle(tmp_path, artifact_overrides=artifact)
+
+    with pytest.raises(ValueError, match=message):
+        load_policy_artifact(
+            tmp_path,
+            "manifest.json",
+            expected_action_ids=EXPECTED_ACTION_IDS,
+        )
+
+
 def test_active_gate_requires_every_approved_condition_and_reports_all_reasons(tmp_path) -> None:
     manifest_data, _ = _write_bundle(tmp_path)
     manifest = PolicyArtifactManifest(
@@ -249,6 +376,151 @@ def test_active_gate_requires_every_approved_condition_and_reports_all_reasons(t
         "scope_not_allowed",
         "rollout_not_selected",
     )
+
+
+@pytest.mark.parametrize(
+    ("overrides", "message"),
+    [
+        ({"gate_policy_version": "   "}, "must not be blank"),
+        ({"minimum_support": True}, "non-negative integer"),
+        ({"maximum_uncertainty": float("nan")}, "finite and non-negative"),
+        ({"rollout_percentage": 1.1}, "must be a probability"),
+        ({"kill_switch": 0}, "must be a bool"),
+    ],
+)
+def test_active_gate_rejects_invalid_configuration(
+    overrides: dict[str, object], message: str
+) -> None:
+    values = {
+        "gate_policy_version": "m6-active-gate-v1",
+        "minimum_support": 0,
+        "maximum_uncertainty": 1.0,
+        "rollout_percentage": 1.0,
+        "kill_switch": False,
+    } | overrides
+
+    with pytest.raises(ValueError, match=message):
+        PolicyGateConfig(**values)  # type: ignore[arg-type]
+
+
+def test_active_gate_requires_a_valid_config_instance() -> None:
+    with pytest.raises(ValueError, match="PolicyGateConfig"):
+        ActivePolicyGate(object())  # type: ignore[arg-type]
+
+
+def test_active_gate_reports_manifest_and_context_identity_mismatches(tmp_path) -> None:
+    manifest_data, _ = _write_bundle(tmp_path)
+    manifest = PolicyArtifactManifest(
+        **(
+            manifest_data
+            | {
+                "allowed_scopes": ("course:course-1", "class:class-1"),
+                "status": "retired",
+                "gate_policy_version": "m6-retired-gate-v1",
+            }
+        )
+    )
+    result = ActivePolicyGate(
+        PolicyGateConfig(
+            gate_policy_version="m6-active-gate-v1",
+            minimum_support=0,
+            maximum_uncertainty=1.0,
+            rollout_percentage=1.0,
+            kill_switch=False,
+        )
+    ).evaluate(
+        manifest=manifest,
+        artifact_sha256=manifest.artifact_sha256,
+        feature_schema_version=manifest.feature_schema_version,
+        action_space_version=manifest.action_space_version,
+        candidate_count=2,
+        support=0,
+        uncertainty=0.0,
+        offline_evaluation_approved=True,
+        allowed_course_ids=("course-1",),
+        allowed_class_ids=("class-1",),
+        request_fingerprint="request-2",
+        context=_context(),
+    )
+
+    assert result.reasons == (
+        "manifest_not_approved",
+        "gate_policy_version_mismatch",
+        "policy_context_mismatch",
+    )
+
+
+def test_active_gate_fails_closed_for_a_structurally_invalid_context(tmp_path) -> None:
+    manifest_data, _ = _write_bundle(tmp_path)
+    manifest = PolicyArtifactManifest(
+        **(
+            manifest_data
+            | {"allowed_scopes": ("course:course-1", "class:class-1")}
+        )
+    )
+
+    class InvalidContext:
+        course_id = "course-1"
+        class_id = "class-1"
+
+    result = ActivePolicyGate(
+        PolicyGateConfig(
+            gate_policy_version="m6-active-gate-v1",
+            minimum_support=0,
+            maximum_uncertainty=1.0,
+            rollout_percentage=1.0,
+            kill_switch=False,
+        )
+    ).evaluate(
+        manifest=manifest,
+        artifact_sha256=manifest.artifact_sha256,
+        feature_schema_version=manifest.feature_schema_version,
+        action_space_version=manifest.action_space_version,
+        candidate_count=2,
+        support=0,
+        uncertainty=0.0,
+        offline_evaluation_approved=True,
+        allowed_course_ids=("course-1",),
+        allowed_class_ids=("class-1",),
+        request_fingerprint="request-1",
+        context=InvalidContext(),  # type: ignore[arg-type]
+    )
+
+    assert result.reasons == ("policy_context_invalid",)
+
+
+def test_active_gate_uses_a_deterministic_partial_rollout_bucket(tmp_path) -> None:
+    manifest_data, _ = _write_bundle(tmp_path)
+    manifest = PolicyArtifactManifest(
+        **(
+            manifest_data
+            | {"allowed_scopes": ("course:course-1", "class:class-1")}
+        )
+    )
+    result = ActivePolicyGate(
+        PolicyGateConfig(
+            gate_policy_version="m6-active-gate-v1",
+            minimum_support=0,
+            maximum_uncertainty=1.0,
+            rollout_percentage=0.5,
+            kill_switch=False,
+        )
+    ).evaluate(
+        manifest=manifest,
+        artifact_sha256=manifest.artifact_sha256,
+        feature_schema_version=manifest.feature_schema_version,
+        action_space_version=manifest.action_space_version,
+        candidate_count=2,
+        support=0,
+        uncertainty=0.0,
+        offline_evaluation_approved=True,
+        allowed_course_ids=("course-1",),
+        allowed_class_ids=("class-1",),
+        request_fingerprint="request-1",
+        context=_context(),
+    )
+
+    assert result.allowed is True
 
 
 def test_active_gate_allows_valid_rollout_and_fails_closed_for_kill_switch_or_missing_manifest(tmp_path) -> None:

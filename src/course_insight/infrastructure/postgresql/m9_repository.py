@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from datetime import datetime
+import hashlib
+import hmac
+import json
 from typing import Any, TypeVar
 
 import psycopg
@@ -19,6 +22,10 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9ModelAuditRecord,
+    M9ReviewDecisionConflict,
+)
 
 
 _OPERATION_ERROR = "PostgreSQL repository operation failed"
@@ -46,6 +53,20 @@ payload,
 payload_checksum,
 schema_version
 """
+_MODEL_AUDIT_COLUMNS = """
+invocation_id,
+request_id,
+source_report_id,
+source_report_checksum,
+scope,
+provider,
+model_name,
+provider_status,
+validation_status,
+created_at,
+payload,
+payload_checksum
+"""
 
 
 class PostgresM9Repository:
@@ -53,6 +74,115 @@ class PostgresM9Repository:
 
     def __init__(self, pool: PostgresPool) -> None:
         self._pool = pool
+
+    def save_model_audit(self, record: M9ModelAuditRecord) -> None:
+        """Persist one idempotent privacy-minimized model-call record."""
+
+        if not isinstance(record, M9ModelAuditRecord):
+            raise TypeError("record must be an M9ModelAuditRecord")
+        payload = record.to_dict()
+        checksum = _model_audit_checksum(payload)
+        try:
+            with self._pool.connection() as connection:
+                with connection.transaction():
+                    authoritative_source_checksum = _source_report_checksum(
+                        connection,
+                        record.source_report_id,
+                    )
+                    if not hmac.compare_digest(
+                        record.source_report_checksum,
+                        authoritative_source_checksum,
+                    ):
+                        raise PostgresOperationError(_CHECKSUM_ERROR)
+                    connection.execute(
+                        """
+                        INSERT INTO m9_model_invocation_audits(
+                            invocation_id,
+                            request_id,
+                            source_report_id,
+                            source_report_checksum,
+                            scope,
+                            provider,
+                            model_name,
+                            provider_status,
+                            validation_status,
+                            created_at,
+                            payload,
+                            payload_checksum
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (
+                            record.invocation_id,
+                            record.request_id,
+                            record.source_report_id,
+                            record.source_report_checksum,
+                            record.scope,
+                            record.provider,
+                            record.model_name,
+                            record.provider_status,
+                            record.validation_status,
+                            record.created_at,
+                            Jsonb(payload),
+                            checksum,
+                        ),
+                    )
+                    row = connection.execute(
+                        f"""
+                        SELECT {_MODEL_AUDIT_COLUMNS}
+                        FROM m9_model_invocation_audits
+                        WHERE invocation_id = %s OR request_id = %s
+                        ORDER BY
+                            CASE WHEN invocation_id = %s THEN 0 ELSE 1 END
+                        LIMIT 1
+                        """,
+                        (
+                            record.invocation_id,
+                            record.request_id,
+                            record.invocation_id,
+                        ),
+                    ).fetchone()
+                    if _model_audit_from_row(
+                        row,
+                        authoritative_source_checksum=authoritative_source_checksum,
+                    ) != record:
+                        raise PostgresOperationError(_CONFLICT_ERROR)
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def get_model_audit(
+        self,
+        invocation_id: str,
+    ) -> M9ModelAuditRecord | None:
+        try:
+            with self._pool.connection() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT {_MODEL_AUDIT_COLUMNS}
+                    FROM m9_model_invocation_audits
+                    WHERE invocation_id = %s
+                    """,
+                    (invocation_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                authoritative_source_checksum = _source_report_checksum(
+                    connection,
+                    _required_text(row, "source_report_id"),
+                )
+                return _model_audit_from_row(
+                    row,
+                    authoritative_source_checksum=authoritative_source_checksum,
+                )
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
 
     def insert_or_get_analytics(
         self,
@@ -150,6 +280,33 @@ class PostgresM9Repository:
         except psycopg.Error:
             raise PostgresOperationError(_OPERATION_ERROR) from None
 
+    def get_scoped_analytics(
+        self,
+        report_id: str,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> TeacherAnalyticsBundle | None:
+        """Load one report only when course and class authorization match."""
+
+        try:
+            with self._pool.connection() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT {_ANALYTICS_COLUMNS}
+                    FROM m9_teacher_analytics
+                    WHERE report_id = %s
+                      AND course_id = %s
+                      AND class_id = %s
+                    """,
+                    (report_id, course_id, class_id),
+                ).fetchone()
+                return None if row is None else _analytics_from_row(row)
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
     def get_latest_analytics(
         self,
         *,
@@ -236,7 +393,12 @@ class PostgresM9Repository:
                     ).fetchone()
                     stored = _review_from_row(row)
                     if stored != candidate:
-                        raise PostgresOperationError(_CONFLICT_ERROR)
+                        raise M9ReviewDecisionConflict(
+                            audit_id=candidate.audit_id,
+                            expected_audit_version=(
+                                candidate.expected_audit_version
+                            ),
+                        )
                     return stored
         except PostgresError:
             raise
@@ -269,6 +431,86 @@ class PostgresM9Repository:
             raise
         except psycopg.Error:
             raise PostgresOperationError(_OPERATION_ERROR) from None
+
+
+def _source_report_checksum(
+    connection: Any,
+    source_report_id: str,
+) -> str:
+    row = connection.execute(
+        f"""
+        SELECT {_ANALYTICS_COLUMNS}
+        FROM m9_teacher_analytics
+        WHERE report_id = %s
+        """,
+        (source_report_id,),
+    ).fetchone()
+    bundle = _analytics_from_row(row)
+    if bundle.report_id != source_report_id:
+        raise PostgresOperationError(_INTEGRITY_ERROR)
+    return bundle.content_checksum()
+
+
+def _model_audit_from_row(
+    row: Mapping[str, Any] | None,
+    *,
+    authoritative_source_checksum: str,
+) -> M9ModelAuditRecord:
+    try:
+        if row is None or type(row.get("payload")) is not dict:
+            raise ValueError
+        payload = row["payload"]
+        if not hmac.compare_digest(
+            _model_audit_checksum(payload),
+            _required_checksum(row, "payload_checksum"),
+        ):
+            raise PostgresOperationError(_CHECKSUM_ERROR)
+        record = M9ModelAuditRecord.from_dict(payload)
+        stored_source_checksum = _required_checksum(
+            row,
+            "source_report_checksum",
+        )
+        if (
+            record.invocation_id != _required_text(row, "invocation_id")
+            or record.request_id != _required_text(row, "request_id")
+            or record.source_report_id != _required_text(
+                row,
+                "source_report_id",
+            )
+            or not hmac.compare_digest(
+                record.source_report_checksum,
+                stored_source_checksum,
+            )
+            or not hmac.compare_digest(
+                stored_source_checksum,
+                authoritative_source_checksum,
+            )
+            or record.scope != _required_text(row, "scope")
+            or record.provider != _required_text(row, "provider")
+            or record.model_name != _required_text(row, "model_name")
+            or record.provider_status
+            != _required_text(row, "provider_status")
+            or record.validation_status
+            != _required_text(row, "validation_status")
+            or record.created_at != _required_datetime(row, "created_at")
+        ):
+            raise ValueError
+        return record
+    except PostgresError:
+        raise
+    except Exception:
+        raise PostgresOperationError(_INTEGRITY_ERROR) from None
+
+
+def _model_audit_checksum(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _analytics_from_row(

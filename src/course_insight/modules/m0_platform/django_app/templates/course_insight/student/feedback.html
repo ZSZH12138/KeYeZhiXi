@@ -2,6 +2,12 @@
 {% block title %}学习反馈 · 课业智析{% endblock %}
 {% block content %}
   <h1>学习反馈</h1>
+  {% if score_pending_rescore %}
+    <section class="card">
+      <h2>反馈待重新生成</h2>
+      <p>教师已驳回本次评分。与该评分关联的反馈暂不显示，请等待重新评分或教师完成改分。</p>
+    </section>
+  {% else %}
   <p>{{ feedback.message }}</p>
   <h2>量规分项</h2>
   <ul>
@@ -18,7 +24,7 @@
   <h2>证据引用</h2>
   <ul>
     {% for citation in feedback.citations %}
-      <li><strong>{{ citation.label }}</strong>：{{ citation.quote }}</li>
+      <li><strong>{{ citation.label }}</strong></li>
     {% empty %}
       <li>暂无可显示证据。</li>
     {% endfor %}
@@ -27,4 +33,5 @@
   <ul>
     {% for item_id in feedback.next_practice_item_ids %}<li>{{ item_id }}</li>{% empty %}<li>暂无</li>{% endfor %}
   </ul>
+  {% endif %}
 {% endblock %}

@@ -2,7 +2,12 @@
 {% block title %}评分复核 · 课业智析{% endblock %}
 {% block content %}
   <h1>评分复核</h1>
-  <p>审计：{{ review.audit.audit_id }} v{{ review.audit.audit_version }}；建议分 {{ review.audit.total_score }} / {{ review.audit.max_score }}</p>
+  {% if review.audit.review_status == "rejected_pending_rescore" or review.audit.review_status == "rejected" %}
+    <p>审计：{{ review.audit.audit_id }} v{{ review.audit.audit_version }}；状态：已驳回，待重新评分或完整改分。</p>
+    <p>下方数字仅为被驳回的历史记录，不是最终成绩。</p>
+  {% else %}
+    <p>审计：{{ review.audit.audit_id }} v{{ review.audit.audit_version }}；建议分 {{ review.audit.total_score }} / {{ review.audit.max_score }}</p>
+  {% endif %}
   <h2>学生答案证据片段</h2>
   <table>
     <thead><tr><th>量规</th><th>当前分</th><th>答案证据</th><th>课程证据</th><th>理由</th></tr></thead>

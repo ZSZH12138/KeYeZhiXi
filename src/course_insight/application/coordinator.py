@@ -346,19 +346,32 @@ class AppCoordinator:
             teacher_review_decision=decision,
         )
         self._m0.append_learning_events(events=reviewed.learning_events)
-        recomputed = self._m5.update_state(
-            scoring_result_bundle=reviewed,
-            knowledge_bundle=knowledge_bundle,
-            previous_learner_state_snapshot=state_update_result.learner_state_snapshot,
-            previous_class_state_snapshot=state_update_result.class_state_snapshot,
-            state_policy_path=state_policy_path,
-        )
-        refreshed = self._m9.build_teacher_analytics(
-            knowledge_bundle=knowledge_bundle,
-            scoring_result_bundle=reviewed,
-            state_update_result=recomputed,
-            teacher_threshold_policy_path=teacher_threshold_policy_path,
-        )
+        if decision.is_reject():
+            recomputed = state_update_result.model_copy(deep=True)
+            refreshed = self._m9.build_rejected_score_analytics(
+                knowledge_bundle=knowledge_bundle,
+                scoring_result_bundle=reviewed,
+                state_update_result=recomputed,
+                teacher_threshold_policy_path=teacher_threshold_policy_path,
+            )
+        else:
+            recomputed = self._m5.update_state(
+                scoring_result_bundle=reviewed,
+                knowledge_bundle=knowledge_bundle,
+                previous_learner_state_snapshot=(
+                    state_update_result.learner_state_snapshot
+                ),
+                previous_class_state_snapshot=(
+                    state_update_result.class_state_snapshot
+                ),
+                state_policy_path=state_policy_path,
+            )
+            refreshed = self._m9.build_teacher_analytics(
+                knowledge_bundle=knowledge_bundle,
+                scoring_result_bundle=reviewed,
+                state_update_result=recomputed,
+                teacher_threshold_policy_path=teacher_threshold_policy_path,
+            )
         return {
             "review_decision": decision,
             "reviewed_scoring_result": reviewed,

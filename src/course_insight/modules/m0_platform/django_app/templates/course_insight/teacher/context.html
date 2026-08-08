@@ -12,14 +12,18 @@
   <section class="card">
     <h2>个体报告</h2>
     {% for report in analytics.individual_reports %}
-      <p>{{ report.learner_id }}：掌握度 {{ report.overall_mastery }}，最近得分 {{ report.recent_score }}，待复核 {{ report.review_required_count }}</p>
+      <p>{{ report.learner_id }}：掌握度 {{ report.overall_mastery }}，最近得分 {% if report.recent_score is None %}待重评{% else %}{{ report.recent_score }}{% endif %}，待复核 {{ report.review_required_count }}</p>
     {% empty %}<p>暂无个体报告。</p>{% endfor %}
   </section>
   <section class="card">
     <h2>复核队列（{{ analytics.review_count }}）</h2>
     <ul>
       {% for audit, href in review_links %}
-        <li><a href="{{ href }}">{{ audit.audit_id }} v{{ audit.audit_version }}</a>：建议分 {{ audit.total_score }}，原因 {{ audit.review_reasons|join:"、" }}</li>
+        {% if audit.review_status == "rejected_pending_rescore" or audit.review_status == "rejected" %}
+          <li><a href="{{ href }}">{{ audit.audit_id }} v{{ audit.audit_version }}</a>：已驳回，待重新评分或完整改分。</li>
+        {% else %}
+          <li><a href="{{ href }}">{{ audit.audit_id }} v{{ audit.audit_version }}</a>：建议分 {{ audit.total_score }}，原因 {{ audit.review_reasons|join:"、" }}</li>
+        {% endif %}
       {% empty %}<li>暂无评分记录。</li>{% endfor %}
     </ul>
   </section>

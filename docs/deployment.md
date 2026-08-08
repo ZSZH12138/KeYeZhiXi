@@ -2,10 +2,13 @@
 
 ## 文档边界
 
-本文件描述截至 `2026-07-27` 已实现的 M0 部署面、M6 私有策略配置与进程角色。它不把未实测的
+本文件描述截至 `2026-07-28` 已实现的 M0 部署面、M6 私有策略配置与进程角色。它不把未实测的
 PostgreSQL 联调写成“已通过”，也不把开发服务器当成生产 WSGI/ASGI 部署。
-M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M7/M9 的 DeepSeek 网络调用仍是
-空实现；部署持久化和 Web 外层不会自动启用这些算法。
+M5 的 DINA/BKT 与 M8 的 IRT/自适应选择仍是空实现。M7/M9 已分别提供显式
+DeepSeek V4 主观评分和教师班级聚合解读适配器，但部署持久化和 Web 外层不会
+自动启用；只有目标环境提供 `DEEPSEEK_API_KEY` 并由调用方显式注入后，相应入口
+才会访问网络。学生反馈始终使用确定性模板，不读取密钥、不访问网络；M9 只允许
+授权教师主动解读达到门槛的匿名班级聚合事实。
 
 M6 已实现 rules/shadow/active runtime、artifact 校验、奖励/OPE 与私有持久化，
 但默认是 `rules`、零 rollout、零探索。本阶段没有真实教学训练、线上 rollout 或
@@ -241,8 +244,9 @@ python -m pytest -q
 常规生产部署应保持示例的 rules-safe 默认值。任何 shadow/active 变更都必须在
 部署变更单中逐项记录：
 
-- [ ] 当前 core ledger 为 v13；确认 M4 intent 使用 v10/0010 与 v11/0011，
-  M6 policy 使用 v12/0012，M0 freeze 使用追加的 v13/0013，未改写已应用 migration；
+- [ ] 当前 core ledger 为 v14；确认 M4 intent 使用 v10/0010 与 v11/0011，
+  M6 policy 使用 v12/0012，M0 freeze 使用 v13/0013，M9 模型调用审计使用追加的
+  v14/0014，未改写已应用 migration；
 - [ ] 使用全新 immutable `policy_id`；manifest 的 state graph/baseline/feature/
   action/reward/gate version 已治理，artifact 与 manifest 重叠的
   policy/adapter/feature/action 字段及 lowercase SHA-256 完全一致；
@@ -287,7 +291,7 @@ Conda 初始化与当前 shell，不要把依赖装入 base。
 命令：
 
 ```shell
-python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
+python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev,intent]"
 python -m pip check
 ```
 
@@ -355,9 +359,10 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --apply
 ```
 
-预期：core schema version 为 13；v10/0010 与 v11/0011 属于 M4 intent，
+预期：core schema version 为 14；v10/0010 与 v11/0011 属于 M4 intent，
 v12/`0012_m6_policy_learning.sql` 新增五张 M6 私有 policy 表，
-v13/`0013_m0_policy_freeze.sql` 为 `m0_assessment_runs` 安全追加七个策略冻结字段。
+v13/`0013_m0_policy_freeze.sql` 为 `m0_assessment_runs` 安全追加七个策略冻结字段，
+v14/`0014_m9_model_invocation_audits.sql` 新增 M9 模型调用审计表。
 报告为 `validated`/`completed`，或在已投递旧事件
 存在时明确为 `*_with_source_limitations`。失败时检查 `error_code`、migration
 checksum、源 schema version、`partial_envelope_rows` 和每表 digest。不要用
@@ -578,7 +583,7 @@ python manage.py check
 python manage.py run_outbox_worker --once
 ```
 
-预期：SQLite migration 仍可前向到 version 11，应用可读取切换前的 SQLite 基线。
+预期：SQLite migration 仍可前向到 version 14，应用可读取切换前的 SQLite 基线。
 失败时检查备份、文件权限和 schema ledger。仓库没有 PostgreSQL→SQLite 自动
 反向迁移；切到 PostgreSQL 后产生的新数据不会出现在旧 SQLite。只有在明确接受
 该数据水位差异、或另行完成受审计的数据回迁后，才能把回切用于生产。

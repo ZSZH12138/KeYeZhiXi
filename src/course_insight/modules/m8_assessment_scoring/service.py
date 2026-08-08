@@ -417,7 +417,7 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
         current_scoring_result_bundle: ScoringResultBundle,
         teacher_review_decision: TeacherReviewDecision,
     ) -> ScoringResultBundle:
-        """Append one teacher override while retaining score history.
+        """Append one teacher review while retaining score history.
 
         原始输入：当前 M8 评分包和 M9 教师复核决定。
         契约来源：finalize_scoring 与 record_teacher_review。
@@ -430,6 +430,7 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
             teacher_review_decision.audit_id
         )
         teacher_review_decision.assert_matches(current)
+        rejected = teacher_review_decision.is_reject()
         override_by_id = {
             override.criterion_id: override
             for override in teacher_review_decision.criterion_overrides
@@ -472,14 +473,16 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
             criterion_scores=reviewed_scores,
             total_score=teacher_review_decision.final_total_score,
             max_score=current.max_score,
-            confidence=1.0,
+            confidence=(current.confidence if rejected else 1.0),
             scoring_method="teacher_override",
             review_status=(
-                "rejected"
-                if teacher_review_decision.decision == "reject"
+                "rejected_pending_rescore"
+                if rejected
                 else "approved"
             ),
-            review_reason=[],
+            review_reason=(
+                ["teacher_rejected_score"] if rejected else []
+            ),
             created_at=teacher_review_decision.reviewed_at,
         )
         reviewed_bundle = ScoringResultBundle(
@@ -514,7 +517,13 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
                 "audit_id": replacement.audit_id,
                 "audit_version": replacement.audit_version,
                 "decision": teacher_review_decision.decision,
-                "total_score": reviewed_bundle.total_score,
+                "decision_id": teacher_review_decision.decision_id,
+                "score_status": replacement.review_status,
+                **(
+                    {}
+                    if rejected
+                    else {"total_score": reviewed_bundle.total_score}
+                ),
             },
             occurred_at=teacher_review_decision.reviewed_at,
         )

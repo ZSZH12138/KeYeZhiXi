@@ -2,13 +2,14 @@
 
 ## 结论先行
 
-截至 `2026-07-27`：
+截至 `2026-07-28`：
 
 - PostgreSQL 仓储、schema migration、SQLite→PostgreSQL 导入器已在代码中实现。
 - 本文档不声称这些能力已经在真实 PostgreSQL 环境中完成联调或验收。
 - 准确表述只能是“代码已落地、可配置、可阅读；真实通过状态须以当次实测为准”。
-- 当前 bundled PostgreSQL/SQLite schema version 是 `13`；M4 intent 占用
-  v10/v11，M6 五张私有 policy 表属于 v12，M0 policy freeze 是后续安全追加的 v13。
+- 当前 bundled PostgreSQL/SQLite schema version 是 `14`；M4 intent 占用
+  v10/v11，M6 五张私有 policy 表属于 v12，M0 policy freeze 属于 v13，
+  M9 模型调用审计是后续安全追加的 v14。
 
 ## 已实现的组件
 
@@ -17,7 +18,7 @@
   - `pg_advisory_xact_lock`
   - `schema_migrations` 校验
 - `src/course_insight/infrastructure/postgresql/migrations/*.sql`
-  - 当前 bundled schema version 为 `13`
+  - 当前 bundled schema version 为 `14`
   - v8 为 `m0_assessment_runs` 增加同一 `paper_id` 只允许一个
     `status <> completed` review 的部分唯一索引（包含 failed）；相同 operation
     可重放，只有完成当前 review 后才允许新的 review operation
@@ -38,7 +39,7 @@
     `feature_schema_version`、`action_space_version`、`gate_policy_version`
     七列和完整性约束
   - 已发布的 M4 v10/v11 migration 保持不变；M6 与 M0 freeze 顺延到 v12/v13，
-    没有回写或重编号已发布 migration
+    M9 审计继续追加为 v14，没有回写或重编号已发布 migration
   - v8 旧行的新字段保持 NULL；首次同 operation 重放时，只有旧 identity、持久化
     TaskPlan 锚点和完整的新依赖形状全部一致才会 CAS 接管。部分填充行、
     `state_inputs_frozen` 旧行，以及 state checkpoint 已越过但缺少
@@ -47,6 +48,10 @@
     `tutoring_saved|feedback_saved|analytics_saved`、已有保存状态和 frozen
     prior-state 标记、七字段全 NULL 时才允许一次 CAS adoption。部分字段、
     `policy_frozen` 或 review 行不会被猜测修复
+  - v14/`0014_m9_model_invocation_audits.sql` 新增 M9 自有的
+    `m9_model_invocation_audits`，以来源报告外键绑定
+    DeepSeek 教师解读的版本、状态、哈希、token、延迟和已通过校验的展示内容；
+    不保存完整提示词、provider 原始响应、思维链或 API key
 - `src/course_insight/infrastructure/postgresql/sqlite_import.py`
   - 显式、可恢复、批量提交的导入编排
 - `src/course_insight/infrastructure/postgresql/sqlite_import_checkpoint.py`
@@ -149,11 +154,12 @@ user 或 service 绑定变化会安全拒绝旧 checkpoint。运维人员应先�
 - `m8_assessment_papers`
 - `m9_teacher_reviews`
 - `m9_teacher_analytics`
+- `m9_model_invocation_audits`
 
 M6 policy 行按各自 canonical payload 与 checksum 验证。observation 的嵌入
 `decision_id` 必须与行主键及父 `m6_tutoring_decisions` 一致；execution 使用
 request first-writer identity；reward 以 execution + reward version 幂等；
-evaluation 以 policy + dataset identity 幂等。v11 M0 七字段随
+evaluation 以 policy + dataset identity 幂等。v13 M0 七字段随
 `m0_assessment_runs` 一并导入并接受同等 all-or-none/operation/checkpoint 校验。
 
 ## outbox 与源数据限制
@@ -185,8 +191,8 @@ PostgreSQL core migration 与 Django migration 分离：
 - `tests/integration/test_postgres_foundation_live.py`
 - 多个 PostgreSQL repository / import 集成测试
 
-这些测试覆盖 0010/0011 ledger/DDL、fake-PostgreSQL 仓储语义和导入校验；本阶段
-未执行真实 PostgreSQL v10→v11 migration。没有受保护 live 数据库时，不能把
+这些测试覆盖 bundled 0001—0014 ledger/DDL、fake-PostgreSQL 仓储语义和导入校验；
+本阶段未执行真实 PostgreSQL 版本升级 migration。没有受保护 live 数据库时，不能把
 单元/fake parity 结果写成真实 PostgreSQL migration 已通过。
 
 真实 PostgreSQL 集成测试现在同时依赖环境变量 `COURSE_INSIGHT_TEST_DATABASE_URL`

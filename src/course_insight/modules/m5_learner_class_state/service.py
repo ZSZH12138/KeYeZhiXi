@@ -288,6 +288,7 @@ class M5StateService:
         previous_class_state_snapshot: ClassStateSnapshot | None,
         policy: StatePolicy,
     ) -> StateUpdateResult:
+        scoring_result_bundle.assert_score_usable(module="m5")
         audits = latest_audits(scoring_result_bundle)
         audit_keys = frozenset(
             audit_version_key(record)

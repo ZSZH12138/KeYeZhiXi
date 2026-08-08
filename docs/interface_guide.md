@@ -6,10 +6,12 @@
 路径 `$` 表示完整契约，`$[]` 表示列表元素，点路径表示组成字段。
 服务之间必须传递契约对象，不得用无类型字典代替。
 
-当前 v2 智能算法边界仍返回空结果：DeepSeek 不发起 API 请求，pgvector
-不建立连接，DINA/BKT/IRT 不运行估计。这些边界仍是 MVP 架构的正式组成部分，
-不是新模块。M0 的 Web、配置、日志、Worker 与数据库适配器不是算法占位，
-已经有真实实现。
+当前 v2 legacy/default 智能算法边界仍返回空结果：M7/M9 默认不发起 DeepSeek
+API 请求，pgvector 不建立连接，DINA/BKT/IRT 不运行估计。M7 的主观评分和
+M9 的教师聚合解读可通过独立服务入口显式配置真实适配器，学生反馈始终零网络。
+这些边界仍是 MVP 架构的
+正式组成部分，不是新模块。M0 的 Web、配置、日志、Worker 与数据库适配器不是
+算法占位，已经有真实实现。
 
 M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默认关闭在
 `rules`/零 rollout/零探索状态。它们不增加公共契约；本阶段也没有真实教学训练、
@@ -66,10 +68,10 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 | `RetrievalPolicy` | M2 检索配置 | M2 检索器 | 允许词法/向量/混合策略 |
 | `RetrievalAudit` | M2 | M7/M9 审计与运维 | `empty`，无证据 ID |
 | `LLMModelRef` | M7/M9 配置 | DeepSeek 适配器 | provider 固定 `deepseek`，密钥名固定 `DEEPSEEK_API_KEY` |
-| `LLMGenerationRequest` | M7 评分/反馈或 M9 叙述 | DeepSeek 适配器 | 只保存输入校验和证据 ID |
-| `LLMGenerationResult` | M7/M9 DeepSeek 适配器 | M7/M9 业务服务 | `empty`，内容/引用为空，`not_run` |
-| `ModelInvocationAudit` | DeepSeek 适配器 | M9 审计 | `not_run`，token/延迟为 0 |
-| `SafetyCheckResult` | M7/M9 安全边界 | DeepSeek 适配器 | `not_run` |
+| `LLMGenerationRequest` | M7 主观评分或 M9 教师解读 | DeepSeek 适配器 | 只保存输入校验和证据 ID |
+| `LLMGenerationResult` | M7/M9 DeepSeek 适配器 | M7/M9 业务服务 | legacy/未配置为 `empty`；真实输出先在模块内严格校验 |
+| `ModelInvocationAudit` | DeepSeek 适配器 | M7/M9 审计 | 记录 token、延迟和稳定状态，不保存提示词、学生答案或 provider 原始正文 |
+| `SafetyCheckResult` | M7/M9 安全边界 | DeepSeek 适配器 | 真实输出为 `passed/blocked`；未运行保持 `not_run` |
 | `LearningObservation`/`LearningObservationBatch` | M8 评分审计转换 | M5 DINA/BKT、M8 IRT | 空 batch 仅携带 learner 和 watermark |
 | `CognitiveDiagnosisResult` | M5 DINA 引擎 | M5 状态、M6、M9 | `empty`，无掌握概率 |
 | `KnowledgeTraceSnapshot` | M5 BKT 引擎 | M5 状态、M6、M9 | `empty`，无追踪概率 |
@@ -135,8 +137,10 @@ M6 的 OPE/approval 尚未正式接入 M9。当前公共
 `AppCoordinator.run_intelligence_architecture(...) -> ArchitectureScaffoldResult`
 保留为 legacy 智能能力脚手架入口。为保持既有
 `ArchitectureScaffoldResult.is_empty()` 公共语义，M0 的
-`prepare_django_frontend()` 继续返回 `skipped`；M2 pgvector、M7/M9 DeepSeek、
-M5 DINA/BKT、M8 IRT/自适应选择和 M9 模型质量也保持空或证据不足状态。
+`prepare_django_frontend()` 继续返回 `skipped`；M2 pgvector、legacy
+M7/M9 DeepSeek、M5 DINA/BKT、M8 IRT/自适应选择和 M9 模型质量也保持空或
+证据不足状态。M7 真实评分和 M9 教师聚合解读通过各自独立公开服务入口显式启用；
+确定性反馈保持零网络，这些路径都不改变 legacy 空入口。
 真实 Django Web/health 由独立进程入口提供，不依赖该脚手架，也不把完整领域契约
 存入 Session。
 

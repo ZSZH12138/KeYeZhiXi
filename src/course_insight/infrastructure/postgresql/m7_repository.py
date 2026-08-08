@@ -3,18 +3,28 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import datetime
+import hashlib
+import hmac
+import json
 from typing import Any
 
 import psycopg
 from psycopg.types.json import Jsonb
 
 from course_insight.contracts.assessment import RubricScoringResult
+from course_insight.contracts.intelligence import (
+    LLMGenerationResult,
+    ModelInvocationAudit,
+    SafetyCheckResult,
+)
 from course_insight.contracts.tutoring import StudentFeedbackPackage
 from course_insight.infrastructure.postgresql.base import (
     PostgresError,
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.modules.m7_local_model.repository import M7ModelAuditRecord
 
 
 _OPERATION_ERROR = "PostgreSQL repository operation failed"
@@ -33,10 +43,23 @@ payload,
 payload_checksum,
 schema_version
 """
+_AUDIT_COLUMNS = """
+invocation_id,
+request_id,
+scoring_task_id,
+provider,
+model_name,
+provider_status,
+validation_status,
+privacy_decision,
+created_at,
+payload,
+payload_checksum
+"""
 
 
 class PostgresM7Repository:
-    """Persist M7 feedback without adding model-execution behavior."""
+    """Persist M7 feedback and privacy-minimized model-call audits."""
 
     def __init__(self, pool: PostgresPool) -> None:
         self._pool = pool
@@ -58,6 +81,136 @@ class PostgresM7Repository:
         """Keep the existing optional hook storage-neutral in this milestone."""
 
         del prompt_id, prompt_payload
+
+    def save_generation_result(
+        self,
+        result: LLMGenerationResult,
+    ) -> None:
+        """Keep sanitized generation persistence optional in this milestone."""
+
+        del result
+
+    def save_invocation_audit(
+        self,
+        audit: ModelInvocationAudit,
+    ) -> None:
+        """Keep sanitized invocation persistence optional in this milestone."""
+
+        del audit
+
+    def save_safety_check(
+        self,
+        result: SafetyCheckResult,
+    ) -> None:
+        """Keep sanitized safety persistence optional in this milestone."""
+
+        del result
+
+    def save_execution_audit(self, record: M7ModelAuditRecord) -> None:
+        """Atomically insert or verify one idempotent model-call audit."""
+
+        if not isinstance(record, M7ModelAuditRecord):
+            raise TypeError("record must be an M7ModelAuditRecord")
+        payload = record.to_dict()
+        checksum = _json_payload_checksum(payload)
+        try:
+            with self._pool.connection() as connection:
+                with connection.transaction():
+                    connection.execute(
+                        """
+                        INSERT INTO m7_model_invocation_audits(
+                            invocation_id,
+                            request_id,
+                            scoring_task_id,
+                            provider,
+                            model_name,
+                            provider_status,
+                            validation_status,
+                            privacy_decision,
+                            created_at,
+                            payload,
+                            payload_checksum
+                        ) VALUES (
+                            %s, %s, %s, %s, %s, %s,
+                            %s, %s, %s, %s, %s
+                        )
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (
+                            record.invocation_id,
+                            record.request_id,
+                            record.scoring_task_id,
+                            record.provider,
+                            record.model_name,
+                            record.provider_status,
+                            record.validation_status,
+                            record.privacy_decision,
+                            record.created_at,
+                            Jsonb(payload),
+                            checksum,
+                        ),
+                    )
+                    row = connection.execute(
+                        f"""
+                        SELECT {_AUDIT_COLUMNS}
+                        FROM m7_model_invocation_audits
+                        WHERE invocation_id = %s OR request_id = %s
+                        ORDER BY
+                            CASE WHEN invocation_id = %s THEN 0 ELSE 1 END
+                        LIMIT 1
+                        """,
+                        (
+                            record.invocation_id,
+                            record.request_id,
+                            record.invocation_id,
+                        ),
+                    ).fetchone()
+                    if _execution_audit_from_row(row) != record:
+                        raise PostgresOperationError(_CONFLICT_ERROR)
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def get_execution_audit(
+        self,
+        invocation_id: str,
+    ) -> M7ModelAuditRecord | None:
+        try:
+            with self._pool.connection() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT {_AUDIT_COLUMNS}
+                    FROM m7_model_invocation_audits
+                    WHERE invocation_id = %s
+                    """,
+                    (invocation_id,),
+                ).fetchone()
+                return None if row is None else _execution_audit_from_row(row)
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def purge_execution_audits_before(self, cutoff: datetime) -> int:
+        if cutoff.tzinfo is None or cutoff.utcoffset() is None:
+            raise ValueError("M7 audit purge cutoff must be timezone-aware")
+        try:
+            with self._pool.connection() as connection:
+                with connection.transaction():
+                    rows = connection.execute(
+                        """
+                        DELETE FROM m7_model_invocation_audits
+                        WHERE created_at < %s
+                        RETURNING invocation_id
+                        """,
+                        (cutoff,),
+                    ).fetchall()
+                    return len(rows)
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
 
     def insert_or_get_feedback(
         self,
@@ -195,18 +348,23 @@ def _feedback_from_row(
     try:
         if row is None or type(row.get("payload")) is not dict:
             raise ValueError
-        package = StudentFeedbackPackage.model_validate(row["payload"])
+        raw_payload = row["payload"]
+        if not hmac.compare_digest(
+            _feedback_payload_checksum(raw_payload),
+            _required_checksum(row, "payload_checksum"),
+        ):
+            raise PostgresOperationError(_CHECKSUM_ERROR)
+        payload = json.loads(
+            json.dumps(raw_payload, ensure_ascii=False, allow_nan=False)
+        )
+        _strip_legacy_quotes(payload)
+        package = StudentFeedbackPackage.model_validate(payload)
         stored_schema = _required_text(row, "schema_version")
         if (
             package.schema_version != _EXPECTED_SCHEMA_VERSION
             or stored_schema != _EXPECTED_SCHEMA_VERSION
         ):
             raise PostgresOperationError(_SCHEMA_ERROR)
-        if package.content_checksum() != _required_checksum(
-            row,
-            "payload_checksum",
-        ):
-            raise PostgresOperationError(_CHECKSUM_ERROR)
         if (
             package.feedback_id != _required_text(row, "feedback_id")
             or package.task_id != _required_text(row, "task_id")
@@ -218,6 +376,77 @@ def _feedback_from_row(
         raise
     except Exception:
         raise PostgresOperationError(_INTEGRITY_ERROR) from None
+
+
+def _execution_audit_from_row(
+    row: Mapping[str, Any] | None,
+) -> M7ModelAuditRecord:
+    try:
+        if row is None or type(row.get("payload")) is not dict:
+            raise ValueError
+        payload = row["payload"]
+        if not hmac.compare_digest(
+            _json_payload_checksum(payload),
+            _required_checksum(row, "payload_checksum"),
+        ):
+            raise PostgresOperationError(_CHECKSUM_ERROR)
+        record = M7ModelAuditRecord.from_dict(payload)
+        if (
+            record.invocation_id != _required_text(row, "invocation_id")
+            or record.request_id != _required_text(row, "request_id")
+            or record.scoring_task_id != _required_text(row, "scoring_task_id")
+            or record.provider != _required_text(row, "provider")
+            or record.model_name != _required_text(row, "model_name")
+            or record.provider_status != _required_text(
+                row,
+                "provider_status",
+            )
+            or record.validation_status != _required_text(
+                row,
+                "validation_status",
+            )
+            or record.privacy_decision != _required_text(
+                row,
+                "privacy_decision",
+            )
+            or record.created_at != _required_datetime(row, "created_at")
+        ):
+            raise ValueError
+        return record
+    except PostgresError:
+        raise
+    except Exception:
+        raise PostgresOperationError(_INTEGRITY_ERROR) from None
+
+
+def _json_payload_checksum(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _feedback_payload_checksum(payload: dict[str, Any]) -> str:
+    encoded = json.dumps(
+        payload,
+        ensure_ascii=False,
+        allow_nan=False,
+        sort_keys=True,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _strip_legacy_quotes(payload: dict[str, Any]) -> None:
+    citations = payload.get("evidence_citations")
+    if type(citations) is not list:
+        return
+    for citation in citations:
+        if type(citation) is dict:
+            citation.pop("quote", None)
 
 
 def _required_text(row: Mapping[str, Any], field: str) -> str:
@@ -232,6 +461,17 @@ def _required_checksum(row: Mapping[str, Any], field: str) -> str:
     if (
         len(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError
+    return value
+
+
+def _required_datetime(row: Mapping[str, Any], field: str) -> datetime:
+    value = row[field]
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
     ):
         raise ValueError
     return value

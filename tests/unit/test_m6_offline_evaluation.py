@@ -93,6 +93,84 @@ def _relaxed_config(**overrides: object) -> OPEConfig:
     return OPEConfig(**values)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"event_time": -1}, "event_time"),
+        ({"state": "S9"}, "tutoring state"),
+        ({"selected_action": "action-c"}, "must be a candidate"),
+        (
+            {"target_propensities": {"action-a": 0.4, "action-b": 0.4}},
+            "sum to one",
+        ),
+        ({"reward_status": "unsupported"}, "reward_status"),
+        ({"reward": None}, "requires reward"),
+        ({"reward_status": "pending"}, "must not set reward"),
+    ],
+)
+def test_offline_row_rejects_invalid_core_fields(
+    changes: dict[str, object],
+    message: str,
+) -> None:
+    """Keep malformed chronology, action, propensity, and reward data out."""
+
+    row = _row(
+        fingerprint="invalid-core-field",
+        raw_group_id="group-1",
+        raw_session_id="session-1",
+        event_time=1,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        replace(row, **changes)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("changes", "message"),
+    [
+        ({"candidate_actions": ()}, "non-empty"),
+        ({"candidate_actions": ("action-a", "action-a")}, "duplicates"),
+        ({"target_propensities": "invalid"}, "action values"),
+        (
+            {"target_propensities": [("action-a", 0.5), ("action-b",)]},
+            "action values",
+        ),
+        (
+            {"target_propensities": [("action-a", 0.5), ("action-a", 0.5)]},
+            "duplicate actions",
+        ),
+        ({"direct_estimates": {"action-a": 0.5}}, "exactly the candidates"),
+        ({"context": [("state",)]}, "context must contain"),
+        ({"context": {}}, "context must contain"),
+        (
+            {"context": {"context_checksum": "0" * 64, "state": "S9"}},
+            "tutoring state",
+        ),
+        ({"group_id": "not-a-digest"}, "lowercase SHA-256"),
+        (
+            {"direct_estimates": {"action-a": float("nan"), "action-b": 0.2}},
+            "finite",
+        ),
+        ({"logging_propensity": 2.0}, "probability"),
+    ],
+)
+def test_offline_row_rejects_malformed_export_shapes(
+    changes: dict[str, object],
+    message: str,
+) -> None:
+    """Reject malformed allowlisted collections before canonical export."""
+
+    row = _row(
+        fingerprint="malformed-export-shape",
+        raw_group_id="group-1",
+        raw_session_id="session-1",
+        event_time=1,
+    )
+
+    with pytest.raises(ValueError, match=message):
+        replace(row, **changes)  # type: ignore[arg-type]
+
+
 def test_jsonl_export_has_an_exact_allowlist_and_no_raw_identity_or_text() -> None:
     """Catch raw identity, host paths, free text, or accidental fields in export."""
 

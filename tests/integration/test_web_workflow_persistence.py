@@ -33,6 +33,7 @@ from course_insight.contracts.state import (
     StateUpdateResult,
 )
 from course_insight.contracts.tasking import TaskPlan
+from course_insight.contracts.platform import TeacherReviewSubmission
 from course_insight.contracts.tutoring import (
     EvidenceCitation,
     StudentFeedbackPackage,
@@ -59,6 +60,9 @@ from course_insight.modules.m8_assessment_scoring.service import (
 )
 from course_insight.modules.m9_teacher_analytics.service import (
     M9TeacherAnalyticsService,
+)
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9ReviewDecisionConflict,
 )
 
 
@@ -410,7 +414,6 @@ def _feedback() -> StudentFeedbackPackage:
                 evidence_id="evidence_1",
                 source_id="source_1",
                 locator="p.1",
-                quote="Governed evidence.",
             )
         ],
         next_practice_item_ids=[],
@@ -662,7 +665,7 @@ def test_m5_forward_migration_preserves_all_legacy_v3_state_versions(
 
         migrate(connection)
         migrate(connection)
-        assert SCHEMA_VERSION == 13
+        assert SCHEMA_VERSION == 16
         assert current_schema_version(connection) == SCHEMA_VERSION
         assert (
             connection.execute(
@@ -1044,9 +1047,46 @@ def test_m9_persists_analytics_scope_and_idempotent_review(
     )
     assert reloaded.get_review_decision("decision_1") == review
 
-    conflict = review.model_copy(update={"teacher_comment": "Different decision."})
-    with pytest.raises(RuntimeError, match="conflict"):
+    conflict = review.model_copy(
+        update={
+            "decision_id": "decision_2",
+            "teacher_comment": "Different decision.",
+        }
+    )
+    with pytest.raises(M9ReviewDecisionConflict) as raised:
         reloaded.insert_or_get_review_decision(conflict)
+    assert raised.value.audit_id == review.audit_id
+    assert raised.value.expected_audit_version == 1
+
+    service = M9TeacherAnalyticsService(reloaded, object(), object())
+    submission = TeacherReviewSubmission(
+        submission_id="decision_3",
+        audit_id=review.audit_id,
+        expected_audit_version=review.expected_audit_version,
+        reviewer_id="teacher_2",
+        decision="confirm",
+        final_total_score=review.final_total_score,
+        criterion_overrides=[],
+        teacher_comment="Competing review decision.",
+        submitted_at=NOW + timedelta(minutes=1),
+    )
+    current = _m5_scoring_bundle(
+        attempt_id="attempt_1",
+        course_id="course_1",
+        class_id="class_1",
+        latest_audit_version=1,
+    )
+
+    with pytest.raises(DomainError) as domain_conflict:
+        service.record_teacher_review(submission, current)
+
+    assert domain_conflict.value.code == "REVIEW_VERSION_CONFLICT"
+    assert domain_conflict.value.module == "m9"
+    assert domain_conflict.value.recoverable is True
+    assert domain_conflict.value.details == {
+        "audit_id": review.audit_id,
+        "expected_audit_version": 1,
+    }
 
 
 def test_m9_latest_analytics_orders_mixed_offsets_by_actual_time(

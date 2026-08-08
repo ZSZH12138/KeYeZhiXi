@@ -570,6 +570,9 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
         "0011_m4_intent_runtime_statuses.sql",
         "0012_m6_policy_learning.sql",
         "0013_m0_policy_freeze.sql",
+        "0014_m9_model_invocation_audits.sql",
+        "0015_m9_source_report_checksum.sql",
+        "0016_m7_model_invocation_audits.sql",
     )
     all_sql = "\n".join(migration.sql for migration in migrations)
     for table_name in CORE_TABLES:
@@ -583,6 +586,12 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
     assert "TEXT" in all_sql
     assert "CHAR(64)" in all_sql
     assert "BOOLEAN" in MIGRATION_TABLE_SQL
+    source_binding_sql = next(
+        migration.sql for migration in migrations if migration.version == 15
+    )
+    assert "LEFT JOIN m9_teacher_analytics" in source_binding_sql
+    assert "IS DISTINCT FROM report.payload_checksum" in source_binding_sql
+    assert "M9 model audit source report checksum mismatch" in source_binding_sql
 
 
 def test_m4_intent_migration_is_checksum_locked_and_constraint_complete() -> None:

@@ -1,6 +1,6 @@
 {
   "additionalProperties": false,
-  "description": "Course-source citation shown with generated feedback.",
+  "description": "Locator-only course citation safe for current learner display.",
   "properties": {
     "evidence_id": {
       "minLength": 1,
@@ -10,11 +10,6 @@
     "locator": {
       "minLength": 1,
       "title": "Locator",
-      "type": "string"
-    },
-    "quote": {
-      "minLength": 1,
-      "title": "Quote",
       "type": "string"
     },
     "schema_version": {
@@ -31,8 +26,7 @@
   "required": [
     "evidence_id",
     "source_id",
-    "locator",
-    "quote"
+    "locator"
   ],
   "title": "EvidenceCitation",
   "type": "object"

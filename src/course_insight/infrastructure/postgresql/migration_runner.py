@@ -18,7 +18,7 @@ from course_insight.infrastructure.postgresql.base import (
 )
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 16
 MIGRATION_LOCK_ID = 0x434F55525345494E
 MIGRATIONS_DIRECTORY = Path(__file__).with_name("migrations")
 
@@ -34,6 +34,8 @@ CREATE TABLE IF NOT EXISTS schema_migrations (
 """
 
 CORE_TABLES = (
+    "m7_model_invocation_audits",
+    "m9_model_invocation_audits",
     "m0_event_outbox",
     "m0_assessment_runs",
     "m0_learning_events",
@@ -58,6 +60,8 @@ CORE_TABLES = (
 )
 
 _DROP_TABLE_STATEMENTS = (
+    "DROP TABLE IF EXISTS m7_model_invocation_audits",
+    "DROP TABLE IF EXISTS m9_model_invocation_audits",
     "DROP TABLE IF EXISTS m0_event_outbox",
     "DROP TABLE IF EXISTS m0_assessment_runs",
     "DROP TABLE IF EXISTS m0_learning_events",

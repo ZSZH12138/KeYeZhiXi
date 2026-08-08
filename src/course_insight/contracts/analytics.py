@@ -104,7 +104,10 @@ class IndividualReport(ContractModel):
     overall_mastery: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
     weak_concept_ids: list[str]
     active_misconception_ids: list[str]
-    recent_score: float = Field(ge=0.0, allow_inf_nan=False)
+    recent_score: float | None = Field(
+        ge=0.0,
+        allow_inf_nan=False,
+    )
     review_required_count: int = Field(ge=0)
 
     def validate_business_rules(self) -> None:
@@ -327,6 +330,11 @@ class TeacherReviewDecision(ContractModel):
 
         return self.decision == "override"
 
+    def is_reject(self) -> bool:
+        """Return whether the audited score is invalidated pending rescore."""
+
+        return self.decision == "reject"
+
     def override_score_sum(self) -> float:
         """Return a stable finite sum of replacement criterion scores."""
 
@@ -367,8 +375,18 @@ class TeacherReviewDecision(ContractModel):
                 message="teacher decision total cannot exceed the audit maximum",
                 details={"audit_id": record.audit_id},
             )
+        if record.is_rejected() and not self.is_override():
+            raise DomainError(
+                code="REJECTED_SCORE_REQUIRES_OVERRIDE",
+                module="m9",
+                message=(
+                    "a rejected score requires rescore or a complete teacher override"
+                ),
+                details={"audit_id": record.audit_id},
+                recoverable=True,
+            )
         if not self.is_override():
-            if self.decision == "confirm" and not math.isclose(
+            if not math.isclose(
                 self.final_total_score,
                 record.total_score,
                 rel_tol=0.0,
@@ -377,7 +395,7 @@ class TeacherReviewDecision(ContractModel):
                 raise DomainError(
                     code="REVIEW_TOTAL_MISMATCH",
                     module="m9",
-                    message="confirmed total must retain the audited score",
+                    message="non-override review must retain the audited score",
                     details={"audit_id": record.audit_id},
                 )
             return

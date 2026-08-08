@@ -28,16 +28,58 @@ from course_insight.infrastructure.postgresql.sqlite_import_cli import (
     main as migration_cli_main,
 )
 from course_insight.infrastructure.sqlite import SCHEMA_VERSION
+from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.m4_repository import SQLiteM4Repository
 from course_insight.infrastructure.sqlite.m0_repository import SQLiteM0Repository
+from course_insight.infrastructure.sqlite.m7_repository import SQLiteM7Repository
+from course_insight.infrastructure.sqlite.m9_repository import SQLiteM9Repository
 from course_insight.modules.m0_platform.workflow import AssessmentRun
 from course_insight.modules.m4_task_orchestration.intent import IntentStatus
 from course_insight.modules.m4_task_orchestration.intent_service import (
     StoredIntentDecision,
 )
+from course_insight.modules.m7_local_model.repository import M7ModelAuditRecord
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9ModelAuditRecord,
+)
+from tests.integration.test_web_workflow_persistence import _analytics, _feedback
 
 
 NOW = datetime(2026, 7, 25, 8, 0, tzinfo=timezone.utc)
+
+
+def _m7_audit_record() -> M7ModelAuditRecord:
+    return M7ModelAuditRecord(
+        invocation_id="invocation_m7_import",
+        request_id="request_m7_import",
+        scoring_task_id="scoring_task_m7_import",
+        provider="deepseek",
+        model_name="deepseek-v4-flash",
+        model_version="deepseek-v4-flash",
+        provider_status="succeeded",
+        validation_status="passed",
+        prompt_template_id="m7-rubric-scoring-json",
+        prompt_template_version="4.0.0",
+        execution_policy_version="m7-execution-v1",
+        privacy_policy_version="m7-privacy-v1",
+        privacy_decision="redacted",
+        student_answer_checksum="a" * 64,
+        outbound_answer_checksum="b" * 64,
+        prompt_input_checksum="c" * 64,
+        result_checksum="d" * 64,
+        evidence_ids=("evidence_m7_import",),
+        safety_flags=(
+            "outbound_privacy_redacted",
+            "pii_email_redacted",
+        ),
+        safety_checked_at=NOW,
+        redaction_count=1,
+        input_tokens=20,
+        output_tokens=10,
+        latency_ms=5,
+        error_code=None,
+        created_at=NOW,
+    )
 
 
 def _plan(seed: str) -> tuple[TaskPlan, str]:
@@ -189,6 +231,46 @@ class _MemoryDestination:
 
 def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def _m9_audit_record(source_report_checksum: str) -> M9ModelAuditRecord:
+    validated_output = {
+        "scope": "class_aggregate",
+        "ai_notice": "仅供教师核查",
+    }
+    output_checksum = hashlib.sha256(
+        json.dumps(
+            validated_output,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+    return M9ModelAuditRecord(
+        invocation_id="invocation_m9_import",
+        request_id="request_m9_import",
+        source_report_id="report_1",
+        source_report_checksum=source_report_checksum,
+        scope="class_aggregate",
+        prompt_template_id="m9-teacher-interpretation-json",
+        prompt_template_version="3.0.0",
+        output_schema_version="m9_teacher_interpretation_v2",
+        policy_version="m9-teacher-interpretation-v2",
+        input_checksum="a" * 64,
+        source_digest="b" * 64,
+        provider="deepseek",
+        model_name="deepseek-v4-flash",
+        provider_status="succeeded",
+        validation_status="passed",
+        safety_flags=(),
+        input_tokens=20,
+        output_tokens=10,
+        latency_ms=5,
+        error_code=None,
+        output_checksum=output_checksum,
+        validated_output=validated_output,
+        created_at=NOW,
+    )
 
 
 def test_dry_run_validates_without_writing_and_writes_safe_report(
@@ -722,6 +804,182 @@ def test_policy_source_rejects_embedded_observation_decision_id_corruption(
         ).run(mode="dry-run")
 
 
+def test_sqlite_to_postgres_import_preserves_m9_model_audit(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "")
+    analytics = _analytics()
+    repository = SQLiteM9Repository(source)
+    repository.initialize()
+    repository.insert_or_get_analytics(analytics, course_id="course_1")
+    audit = _m9_audit_record(analytics.content_checksum())
+    repository.save_model_audit(audit)
+    destination = _MemoryDestination()
+
+    report = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=destination,
+    ).run(mode="apply")
+
+    audit_report = next(
+        item
+        for item in report.tables
+        if item.table == "m9_model_invocation_audits"
+    )
+    assert audit_report.source_count == audit_report.verified_count == 1
+    prepared = destination.rows[
+        ("m9_model_invocation_audits", (audit.invocation_id,))
+    ]
+    assert prepared.value_for("source_report_id") == "report_1"
+    assert prepared.value_for(
+        "source_report_checksum"
+    ) == analytics.content_checksum()
+    assert prepared.value_for("validation_status") == "passed"
+    assert "messages" not in prepared.value_for("payload")
+    assert "reasoning_content" not in prepared.value_for("payload")
+
+
+def test_sqlite_to_postgres_import_preserves_m7_model_audit(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "")
+    repository = SQLiteM7Repository(source)
+    repository.initialize()
+    audit = _m7_audit_record()
+    repository.save_execution_audit(audit)
+    destination = _MemoryDestination()
+
+    report = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=destination,
+    ).run(mode="apply")
+
+    audit_report = next(
+        item
+        for item in report.tables
+        if item.table == "m7_model_invocation_audits"
+    )
+    assert audit_report.source_count == audit_report.verified_count == 1
+    prepared = destination.rows[
+        ("m7_model_invocation_audits", (audit.invocation_id,))
+    ]
+    assert prepared.value_for("privacy_decision") == "redacted"
+    assert prepared.value_for("validation_status") == "passed"
+    payload = json.loads(prepared.value_for("payload"))
+    assert payload["student_answer_checksum"] == "a" * 64
+    assert "student_answer" not in payload
+    assert "prompt" not in payload
+
+
+def test_sqlite_to_postgres_import_strips_legacy_feedback_quotes(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "")
+    repository = SQLiteM7Repository(source)
+    repository.initialize()
+    feedback = _feedback()
+    repository.save_feedback(feedback)
+    legacy_payload = feedback.to_dict()
+    legacy_payload["evidence_citations"][0]["quote"] = (
+        "Historical course evidence that is no longer student-visible."
+    )
+    with connect_sqlite(source) as connection:
+        connection.execute(
+            "UPDATE m7_student_feedback SET payload = ? WHERE feedback_id = ?",
+            (
+                json.dumps(
+                    legacy_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                feedback.feedback_id,
+            ),
+        )
+    destination = _MemoryDestination()
+
+    report = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=destination,
+    ).run(mode="apply")
+
+    feedback_report = next(
+        item for item in report.tables if item.table == "m7_student_feedback"
+    )
+    assert feedback_report.source_count == feedback_report.verified_count == 1
+    prepared = destination.rows[
+        ("m7_student_feedback", (feedback.feedback_id,))
+    ]
+    payload = json.loads(prepared.value_for("payload"))
+    assert "quote" not in payload["evidence_citations"][0]
+    assert prepared.value_for("payload_checksum") == feedback.content_checksum()
+
+
+def test_sqlite_to_postgres_import_rejects_mixed_legacy_feedback_shape(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "")
+    repository = SQLiteM7Repository(source)
+    repository.initialize()
+    feedback = _feedback()
+    repository.save_feedback(feedback)
+    mixed_payload = feedback.to_dict()
+    mixed_payload["evidence_citations"][0]["quote"] = "Legacy excerpt."
+    mixed_payload["evidence_citations"].append(
+        {
+            "evidence_id": "evidence_2",
+            "source_id": "source_2",
+            "locator": "p.2",
+        }
+    )
+    with connect_sqlite(source) as connection:
+        connection.execute(
+            "UPDATE m7_student_feedback SET payload = ? WHERE feedback_id = ?",
+            (
+                json.dumps(
+                    mixed_payload,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ),
+                feedback.feedback_id,
+            ),
+        )
+
+    with pytest.raises(MigrationError, match="SOURCE_VALIDATION_FAILED"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=_MemoryDestination(),
+        ).run(mode="dry-run")
+
+
+def test_sqlite_to_postgres_import_rejects_tampered_m9_source_binding(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "")
+    analytics = _analytics()
+    repository = SQLiteM9Repository(source)
+    repository.initialize()
+    repository.insert_or_get_analytics(analytics, course_id="course_1")
+    audit = _m9_audit_record(analytics.content_checksum())
+    repository.save_model_audit(audit)
+    with connect_sqlite(source) as connection:
+        connection.execute(
+            """
+            UPDATE m9_model_invocation_audits
+            SET source_report_checksum = ?
+            WHERE invocation_id = ?
+            """,
+            ("0" * 64, audit.invocation_id),
+        )
+
+    with pytest.raises(MigrationError, match="SOURCE_VALIDATION_FAILED"):
+        SQLiteToPostgresMigrator(
+            source_path=source,
+            destination=_MemoryDestination(),
+        ).run(mode="dry-run")
+
+
 def test_failed_batch_rolls_back_and_report_redacts_exception(
     tmp_path: Path,
 ) -> None:
@@ -784,11 +1042,13 @@ def test_apply_uses_snapshot_checksum_from_reader_not_pre_read_file_hash(
                 "m6_policy_rewards",
                 "m6_policy_evaluations",
                 "m7_student_feedback",
+                "m7_model_invocation_audits",
                 "m8_assessment_papers",
                 "m8_score_audits",
                 "m8_scoring_results",
                 "m9_teacher_reviews",
                 "m9_teacher_analytics",
+                "m9_model_invocation_audits",
             )},
             0,
             expected_checksum,

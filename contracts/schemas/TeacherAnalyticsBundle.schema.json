@@ -183,9 +183,16 @@
           "type": "number"
         },
         "recent_score": {
-          "minimum": 0.0,
-          "title": "Recent Score",
-          "type": "number"
+          "anyOf": [
+            {
+              "minimum": 0.0,
+              "type": "number"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Recent Score"
         },
         "review_required_count": {
           "minimum": 0,

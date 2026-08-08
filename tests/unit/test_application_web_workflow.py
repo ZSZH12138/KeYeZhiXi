@@ -1032,6 +1032,7 @@ def _coordinator(
     *,
     m6: Any | None = None,
     m5: Any | None = None,
+    m9: Any | None = None,
 ) -> AppCoordinator:
     _ensure_policy_files(tmp_path)
     m0 = M0PlatformService(
@@ -1051,7 +1052,7 @@ def _coordinator(
         m6_service=m6 or _M6(store),
         m7_service=_M7(store),
         m8_service=_M8(store),
-        m9_service=_M9(store),
+        m9_service=m9 or _M9(store),
     )
 
 
@@ -1825,6 +1826,64 @@ def test_new_review_is_blocked_while_prior_review_for_same_paper_is_incomplete(
         )
 
     assert blocked.value.code == "WORKFLOW_BUSY"
+
+
+def test_review_workflow_preserves_m9_version_conflict(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    initial = _coordinator(tmp_path, store)
+    knowledge, _, submit_arguments = _start_and_submission(initial, tmp_path)
+    initial.submit_assessment(**submit_arguments)
+
+    class _ConflictingM9(_M9):
+        def record_teacher_review(self, raw_review_path, **_: Any):
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m9",
+                message="another decision exists for this audit version",
+                details={
+                    "audit_id": raw_review_path.audit_id,
+                    "expected_audit_version": (
+                        raw_review_path.expected_audit_version
+                    ),
+                },
+                recoverable=True,
+            )
+
+    coordinator = _coordinator(
+        tmp_path,
+        store,
+        m9=_ConflictingM9(store),
+    )
+    submission = _review_submission(
+        decision_id="decision_conflict",
+        expected_version=1,
+    )
+
+    with pytest.raises(DomainError) as raised:
+        coordinator.review_assessment(
+            paper_id="paper_1",
+            review_submission=submission,
+            request_id="review_request_conflict",
+            knowledge_bundle=knowledge,
+            state_policy_path=tmp_path / "state.json",
+            teacher_threshold_policy_path=tmp_path / "teacher.json",
+            course_id="course_1",
+            class_id="class_1",
+        )
+
+    assert raised.value.code == "REVIEW_VERSION_CONFLICT"
+    assert raised.value.recoverable is True
+    assert raised.value.details == {
+        "audit_id": "audit_attempt_1",
+        "expected_audit_version": 1,
+    }
+    failed = coordinator._m0.get_assessment_run(
+        "review:decision_conflict"
+    )
+    assert failed.status == "failed"
+    assert failed.error_code == "REVIEW_VERSION_CONFLICT"
 
 
 def test_submit_replay_rejects_changed_policy_dependency(
