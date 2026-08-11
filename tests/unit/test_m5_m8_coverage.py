@@ -517,16 +517,13 @@ class TestM5Coverage:
         assert result.knowledge_trace.observation_count == 2
         # 原子绑定：learner_id 一致
         assert result.diagnosis.learner_id == result.knowledge_trace.learner_id
-        # 原子绑定：status 一致（有观测 → estimated/completed）
-        assert result.status == "completed"
-        assert result.diagnosis.status == "estimated"
-        assert result.knowledge_trace.status == "estimated"
-        # 原子绑定：estimated 状态携带概率
-        assert result.diagnosis.concept_mastery != {}
-        assert result.knowledge_trace.concept_probabilities != {}
-        # concept_1: score=5/5=1.0, concept_2: score=3/5=0.6
-        assert result.diagnosis.concept_mastery["concept_1"] == 1.0
-        assert abs(result.diagnosis.concept_mastery["concept_2"] - 0.6) < 1e-9
+        # 原子绑定：status 一致（D-02 修复后，有观测也返回 empty）
+        assert result.status == "empty"
+        assert result.diagnosis.status == "empty"
+        assert result.knowledge_trace.status == "empty"
+        # empty 状态不携带概率
+        assert result.diagnosis.concept_mastery == {}
+        assert result.knowledge_trace.concept_probabilities == {}
 
     def test_m5_6_state_reference_mismatch(self, tmp_path: Path) -> None:
         """M5-6: remediation targets 引用不存在的 concept 时抛出 STATE_REFERENCE_MISMATCH。"""

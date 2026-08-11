@@ -37,8 +37,6 @@ class ItemInstance(ContractModel):
     parameters: dict[str, Any]
     concept_ids: list[str] = Field(min_length=1)
     rubric_id: str | None = Field(min_length=1)
-    # M8-01: freeze rubric version at paper generation time
-    rubric_version: str | None = Field(default=None, min_length=1)
     max_score: float = Field(ge=0.0, allow_inf_nan=False)
     source_evidence_ids: list[str]
 
@@ -135,9 +133,6 @@ class AssessmentPaper(ContractModel):
     sections: list[PaperSection] = Field(min_length=1)
     generated_at: datetime
     immutable_checksum: str = Field(min_length=1)
-    # M8-07: freeze course/class identity into the paper for cross-instance recovery
-    course_id: str = Field(min_length=1)
-    class_id: str = Field(min_length=1)
 
     def validate_business_rules(self) -> None:
         """Require unique sections and globally unique item instances."""
@@ -277,9 +272,6 @@ class ScoreAuditRecord(ContractModel):
     audit_version: int = Field(ge=1)
     attempt_id: str = Field(min_length=1)
     item_instance_id: str = Field(min_length=1)
-    # M5-05: carry item identity for Q-matrix-based per-item diagnosis
-    item_id: str | None = Field(default=None, min_length=1)
-    item_version: str | None = Field(default=None, min_length=1)
     criterion_scores: list[CriterionScore]
     total_score: float = Field(ge=0.0, allow_inf_nan=False)
     max_score: float = Field(ge=0.0, allow_inf_nan=False)
@@ -360,12 +352,6 @@ class ScoringPreparationResult(ContractModel):
     evidence_queries: list[EvidenceQuery]
     raw_answer_checksum: str = Field(min_length=1)
     prepared_at: datetime
-    # M8-07: carry course/class identity from the frozen paper
-    course_id: str = Field(min_length=1)
-    class_id: str = Field(min_length=1)
-    # M8-06: retain submission identity when answers arrive via M0 contract
-    submission_id: str | None = Field(default=None, min_length=1)
-    submitted_at: datetime | None = None
 
     def validate_business_rules(self) -> None:
         """Require aligned attempt, paper, scoring-task, and query references."""

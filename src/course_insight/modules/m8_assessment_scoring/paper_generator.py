@@ -85,8 +85,6 @@ class PaperGenerator:
             "sections": sections,
             "generated_at": self._now(),
             "immutable_checksum": "pending",
-            "course_id": task_plan.course_id,
-            "class_id": task_plan.class_id,
         }
         paper = AssessmentPaper(**paper_payload)
         frozen = AssessmentPaper(
@@ -278,11 +276,6 @@ class PaperGenerator:
             parameters=parameters,
             concept_ids=list(item.concept_ids),
             rubric_id=item.rubric_id,
-            rubric_version=(
-                knowledge_bundle.get_rubric(item.rubric_id).version
-                if item.rubric_id is not None
-                else None
-            ),
             max_score=item.max_score(knowledge_bundle),
             source_evidence_ids=list(item.source_evidence_ids),
         )

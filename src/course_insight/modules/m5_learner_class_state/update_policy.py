@@ -94,7 +94,7 @@ class DeterministicStateUpdatePolicy:
         bundle: ScoringResultBundle,
         knowledge: KnowledgeBundle,
     ) -> DiagnosisResult:
-        """Diagnose latest audits using Q-matrix per-item concept lookup."""
+        """Diagnose latest audits using governed remediation references."""
 
         audits = latest_audits(bundle)
         if not audits:
@@ -104,7 +104,6 @@ class DeterministicStateUpdatePolicy:
                 message="at least one score audit is required for state updating",
                 recoverable=True,
             )
-        # Validate remediation targets still exist in the knowledge bundle
         target_concepts = _unique(
             [target.concept_id for target in bundle.remediation_plan.targets]
         ) or [knowledge.concepts[0].concept_id]
@@ -127,66 +126,29 @@ class DeterministicStateUpdatePolicy:
                 module="m5",
                 message="remediation targets must exist in the knowledge bundle",
             )
-        # M5-05: build Q-matrix lookup for per-item concept diagnosis
-        q_lookup: dict[tuple[str, str], list[str]] = {}
-        for entry in knowledge.q_matrix:
-            if entry.is_active():
-                q_lookup.setdefault(
-                    (entry.item_id, entry.item_version), []
-                ).append(entry.concept_id)
-        diagnoses = []
-        for audit in audits:
-            # Query per-item concepts from Q-matrix
-            if audit.item_id is not None and audit.item_version is not None:
-                item_concepts = q_lookup.get(
-                    (audit.item_id, audit.item_version),
-                    [],
-                )
-                if not item_concepts:
-                    raise DomainError(
-                        code="STATE_REFERENCE_MISMATCH",
-                        module="m5",
-                        message="no Q-matrix entry found for audit item",
-                        details={
-                            "item_id": audit.item_id,
-                            "item_version": audit.item_version,
-                        },
-                    )
-            else:
-                # Fallback for legacy audits without item identity
-                item_concepts = target_concepts
-            # Query per-item misconceptions from knowledge bundle
-            item_misconceptions = _unique(
-                [
-                    tag.misconception_id
-                    for tag in knowledge.misconception_tags
-                    for concept_id in item_concepts
-                    if concept_id in tag.concept_ids
-                ]
+        prerequisite_ids = _unique(
+            [
+                relation.from_concept_id
+                for relation in knowledge.prerequisite_relations
+                if relation.to_concept_id in target_concepts
+            ]
+        )
+        diagnoses = [
+            ItemDiagnosis(
+                item_instance_id=audit.item_instance_id,
+                concept_ids=target_concepts,
+                misconception_ids=target_misconceptions,
+                error_type=(
+                    "misconception_or_low_confidence"
+                    if audit.needs_review() or audit.total_score < audit.max_score
+                    else "correct_with_review_evidence"
+                ),
+                confidence=audit.confidence,
+                evidence_audit_ids=[audit_version_key(audit)],
+                prerequisite_gap_ids=prerequisite_ids,
             )
-            # Prerequisite gaps for this item's concepts
-            item_prerequisites = _unique(
-                [
-                    relation.from_concept_id
-                    for relation in knowledge.prerequisite_relations
-                    if relation.to_concept_id in item_concepts
-                ]
-            )
-            diagnoses.append(
-                ItemDiagnosis(
-                    item_instance_id=audit.item_instance_id,
-                    concept_ids=item_concepts,
-                    misconception_ids=item_misconceptions,
-                    error_type=(
-                        "misconception_or_low_confidence"
-                        if audit.needs_review() or audit.total_score < audit.max_score
-                        else "correct_with_review_evidence"
-                    ),
-                    confidence=audit.confidence,
-                    evidence_audit_ids=[audit_version_key(audit)],
-                    prerequisite_gap_ids=item_prerequisites,
-                )
-            )
+            for audit in audits
+        ]
         return DiagnosisResult(
             diagnosis_id=f"{bundle.attempt_id}_diagnosis_v{max(a.audit_version for a in audits)}",
             attempt_id=bundle.attempt_id,

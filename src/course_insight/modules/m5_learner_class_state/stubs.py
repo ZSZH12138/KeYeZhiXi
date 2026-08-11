@@ -25,9 +25,14 @@ class InMemoryM5Repository:
         self._processed_audits: dict[str, frozenset[str]] = {}
 
     def save_learner_state(self, snapshot: LearnerStateSnapshot) -> None:
-        self._learner_states[
-            (snapshot.learner_id, snapshot.state_version)
-        ] = snapshot.model_copy(deep=True)
+        key = (snapshot.learner_id, snapshot.state_version)
+        if key in self._learner_states:
+            raise ValueError(
+                f"learner state version conflict: "
+                f"learner_id={snapshot.learner_id}, "
+                f"state_version={snapshot.state_version}"
+            )
+        self._learner_states[key] = snapshot.model_copy(deep=True)
 
     def get_learner_state(
         self,
@@ -39,12 +44,16 @@ class InMemoryM5Repository:
 
     def get_latest_learner_state(
         self,
+        course_id: str,
+        class_id: str,
         learner_id: str,
     ) -> LearnerStateSnapshot | None:
         candidates = [
             snap
             for (lid, _ver), snap in self._learner_states.items()
             if lid == learner_id
+            and snap.course_id == course_id
+            and snap.class_id == class_id
         ]
         if not candidates:
             return None
@@ -60,12 +69,14 @@ class InMemoryM5Repository:
 
     def get_latest_class_state(
         self,
+        course_id: str,
         class_id: str,
     ) -> ClassStateSnapshot | None:
         candidates = [
             snap
             for snap in self._class_states.values()
             if snap.class_id == class_id
+            and snap.course_id == course_id
         ]
         if not candidates:
             return None

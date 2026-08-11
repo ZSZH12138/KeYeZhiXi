@@ -30,6 +30,8 @@ class M5Repository(Protocol):
 
     def get_latest_learner_state(
         self,
+        course_id: str,
+        class_id: str,
         learner_id: str,
     ) -> LearnerStateSnapshot | None:
         """Load the highest-version learner-state snapshot for restart recovery."""
@@ -42,6 +44,7 @@ class M5Repository(Protocol):
 
     def get_latest_class_state(
         self,
+        course_id: str,
         class_id: str,
     ) -> ClassStateSnapshot | None:
         """Load the most recent class-state aggregate for restart recovery."""

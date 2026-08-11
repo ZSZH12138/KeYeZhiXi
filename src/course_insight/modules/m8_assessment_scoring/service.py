@@ -134,17 +134,6 @@ class M8AssessmentService:
         attempt_id = self._required_text(payload, "attempt_id")
         paper_id = self._required_text(payload, "paper_id")
         learner_id = self._required_text(payload, "learner_id")
-        # M8-06: retain submission identity when answers arrive via M0 contract
-        submission_id = (
-            raw_answer_path.submission_id
-            if isinstance(raw_answer_path, AssessmentSubmission)
-            else None
-        )
-        submitted_at = (
-            raw_answer_path.submitted_at
-            if isinstance(raw_answer_path, AssessmentSubmission)
-            else None
-        )
         if (
             paper_id != assessment_paper.paper_id
             or learner_id != assessment_paper.learner_id
@@ -212,14 +201,6 @@ class M8AssessmentService:
             if instance.rubric_id is None:
                 self._raise_answer_error("subjective paper item has no rubric")
             rubric = knowledge_bundle.get_rubric(instance.rubric_id)
-            # M8-01: verify the rubric version matches the frozen paper
-            if (
-                instance.rubric_version is not None
-                and rubric.version != instance.rubric_version
-            ):
-                self._raise_answer_error(
-                    "rubric version mismatch: paper was frozen with a different rubric version"
-                )
             scoring_task_id = (
                 f"scoring_{attempt_id}_{instance.item_instance_id}"
             )
@@ -259,10 +240,6 @@ class M8AssessmentService:
             evidence_queries=evidence_queries,
             raw_answer_checksum=hashlib.sha256(raw_bytes).hexdigest(),
             prepared_at=self._clock.now(),
-            course_id=assessment_paper.course_id,
-            class_id=assessment_paper.class_id,
-            submission_id=submission_id,
-            submitted_at=submitted_at,
         )
 
     def finalize_scoring(
@@ -339,8 +316,6 @@ class M8AssessmentService:
                     audit_version=1,
                     attempt_id=task.attempt_id,
                     item_instance_id=task.item_instance.item_instance_id,
-                    item_id=task.item_instance.item_id,
-                    item_version=task.item_instance.item_version,
                     criterion_scores=[
                         score.model_copy(deep=True)
                         for score in result.criterion_scores
@@ -383,9 +358,18 @@ class M8AssessmentService:
             [record.max_score for record in audits],
             "scoring maxima must remain finite",
         )
-        # M8-07: recover course/class from the frozen preparation, not process memory
-        course_id = scoring_preparation_result.course_id
-        class_id = scoring_preparation_result.class_id
+        # Recover course/class from the paper event context (set during generate_paper)
+        context = self._paper_event_context.get(
+            scoring_preparation_result.paper_id
+        )
+        if context is None:
+            raise DomainError(
+                code="SCORING_REFERENCE_MISMATCH",
+                module="m8",
+                message="paper course/class context was not found for scoring",
+                details={"paper_id": scoring_preparation_result.paper_id},
+            )
+        course_id, class_id = context
         # M8-08: include content checksum in event ID to prevent silent collisions
         content_checksum = hashlib.sha256(
             json.dumps(
@@ -534,7 +518,12 @@ class M8AssessmentService:
             course_id = context_event.course_id
             class_id = context_event.class_id
         else:
-            course_id, class_id = ("course_unavailable", "class_unavailable")
+            raise DomainError(
+                code="SCORING_REFERENCE_MISMATCH",
+                module="m8",
+                message="cannot recover course/class identity without learning events",
+                details={"attempt_id": reviewed_bundle.attempt_id},
+            )
         review_event = LearningEvent(
             event_id=(
                 f"event_{teacher_review_decision.decision_id}_"
@@ -694,44 +683,16 @@ class M8AssessmentService:
             )
 
         # ── M8-12: 自适应选题基础框架 ──
-        # 当策略已配置且能力已估计时，计算目标难度和信息量门限
-        theta = ability_estimate.theta
-        se = ability_estimate.standard_error or 1.0
-
-        # 目标难度区间：θ ± 1.96*SE（95% 置信区间内信息量最大）
-        # 对于 2PL 模型，Fisher 信息量 I(θ) = a²P(1-P)，在 θ=b 时最大
-        # 因此目标难度 b ≈ θ，在此附近选题信息量最大化
-        target_difficulty_low = theta - 1.96 * se
-        target_difficulty_high = theta + 1.96 * se
-
-        # 计算各概念配额总和
-        total_quota = sum(
-            q for q in policy.concept_quotas.values() if q > 0
-        )
-        # 实际选题数不超过 max_items 和配额总和
-        target_count = min(policy.max_items, total_quota if total_quota > 0 else policy.max_items)
-
-        # 当前方法签名不含题目池参数，框架阶段返回已就绪状态
-        # 实际选题将在题目池接入后基于 Fisher 信息量排序完成
-        # 将能力估计传递给下游消费者
-        result_ability = AbilityEstimate(
-            estimate_id=f"ability_refined_{ability_estimate.estimate_id}",
-            learner_id=ability_estimate.learner_id,
-            parameter_set_id=ability_estimate.parameter_set_id,
-            theta=theta,
-            standard_error=se,
-            status="estimated",
-            estimated_at=requested_at,
-        )
-
+        # 当策略已配置且能力已估计时，计算目标难度和信息量门限。
+        # 但当前方法签名不含题目池参数，尚未接入真实选题，
+        # 证据不足不伪造——继续返回 empty 而非假完成。
         return AdaptiveSelectionResult(
-            selection_id=f"selection_{policy.policy_id}_"
-            f"{ability_estimate.learner_id}",
+            selection_id=f"selection_empty_{policy.policy_id}",
             policy_id=policy.policy_id,
             learner_id=ability_estimate.learner_id,
-            item_ids=[],  # 题目池接入后填充
-            ability_estimate=result_ability,
-            status="selected",
+            item_ids=[],
+            ability_estimate=None,
+            status="empty",
             selected_at=requested_at,
         )
 

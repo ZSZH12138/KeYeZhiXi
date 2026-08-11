@@ -33,7 +33,11 @@ class SQLiteM5Repository:
     # ── learner state ──
 
     def save_learner_state(self, snapshot: LearnerStateSnapshot) -> None:
-        """Persist one versioned learner-state snapshot."""
+        """Persist one versioned learner-state snapshot.
+
+        D-09 修复：同 (learner_id, state_version) 冲突时不覆盖 payload，
+        让 IntegrityError 自然抛出，而非静默 DO UPDATE。
+        """
 
         payload = dumps_json(snapshot.model_dump(mode="json"))
         connection = connect_sqlite(self._database_path)
@@ -44,9 +48,6 @@ class SQLiteM5Repository:
                 INSERT INTO m5_learner_states
                     (snapshot_id, learner_id, state_version, payload)
                 VALUES (?, ?, ?, ?)
-                ON CONFLICT(learner_id, state_version) DO UPDATE SET
-                    snapshot_id = excluded.snapshot_id,
-                    payload = excluded.payload
                 """,
                 (
                     snapshot.snapshot_id,
@@ -87,9 +88,14 @@ class SQLiteM5Repository:
 
     def get_latest_learner_state(
         self,
+        course_id: str,
+        class_id: str,
         learner_id: str,
     ) -> LearnerStateSnapshot | None:
-        """Load the highest-version learner-state snapshot for restart recovery."""
+        """Load the highest-version learner-state snapshot for restart recovery.
+
+        D-06 修复：按 course+class+learner 作用域查询，而非仅按 learner_id。
+        """
 
         connection = connect_sqlite(self._database_path)
         try:
@@ -97,10 +103,12 @@ class SQLiteM5Repository:
                 """
                 SELECT payload FROM m5_learner_states
                 WHERE learner_id = ?
+                  AND json_extract(payload, '$.course_id') = ?
+                  AND json_extract(payload, '$.class_id') = ?
                 ORDER BY state_version DESC
                 LIMIT 1
                 """,
-                (learner_id,),
+                (learner_id, course_id, class_id),
             ).fetchone()
             return None if row is None else LearnerStateSnapshot.model_validate_json(
                 str(row["payload"])
@@ -156,9 +164,13 @@ class SQLiteM5Repository:
 
     def get_latest_class_state(
         self,
+        course_id: str,
         class_id: str,
     ) -> ClassStateSnapshot | None:
-        """Load the most recent class-state aggregate for restart recovery."""
+        """Load the most recent class-state aggregate for restart recovery.
+
+        D-05 修复：按 course+class 作用域查询，而非仅按 class_id。
+        """
 
         connection = connect_sqlite(self._database_path)
         try:
@@ -166,10 +178,11 @@ class SQLiteM5Repository:
                 """
                 SELECT payload FROM m5_class_states
                 WHERE class_id = ?
+                  AND json_extract(payload, '$.course_id') = ?
                 ORDER BY rowid DESC
                 LIMIT 1
                 """,
-                (class_id,),
+                (class_id, course_id),
             ).fetchone()
             return None if row is None else ClassStateSnapshot.model_validate_json(
                 str(row["payload"])

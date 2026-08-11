@@ -57,8 +57,6 @@ def _objective_paper() -> AssessmentPaper:
         ],
         generated_at=NOW,
         immutable_checksum="pending",
-        course_id="course_1",
-        class_id="class_1",
     )
     paper.immutable_checksum = paper.freeze()
     return paper

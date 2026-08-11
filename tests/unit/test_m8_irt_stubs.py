@@ -184,10 +184,10 @@ class TestM8AdaptiveSelectionEmpty:
 
 
 class TestM8AdaptiveSelectionSelected:
-    """策略已配置且能力已估计时应返回 selected。"""
+    """自适应选题尚未实现，即使策略 configured + 能力 estimated 也返回 empty。"""
 
     def test_select_adaptive_selected_status(self, m8_service):
-        """策略 configured + 能力 estimated → 返回 selected。"""
+        """策略 configured + 能力 estimated → 自适应选题未实现，返回 empty。"""
         policy = AdaptiveSelectionPolicy(
             policy_id="policy_3",
             version="1.0.0",
@@ -207,7 +207,7 @@ class TestM8AdaptiveSelectionSelected:
         )
         result = m8_service.select_adaptive_items(policy, ability, FIXED_DT)
         assert isinstance(result, AdaptiveSelectionResult)
-        assert result.status == "selected"
+        assert result.status == "empty"
 
     def test_select_adaptive_preserves_learner(self, m8_service):
         """返回结果应保留学习者身份。"""
@@ -232,7 +232,7 @@ class TestM8AdaptiveSelectionSelected:
         assert result.learner_id == "learner_42"
 
     def test_select_adaptive_passes_ability(self, m8_service):
-        """selected 状态应传递能力估计。"""
+        """empty 状态下能力估计不传递（选题未实现）。"""
         policy = AdaptiveSelectionPolicy(
             policy_id="policy_5",
             version="1.0.0",
@@ -251,9 +251,7 @@ class TestM8AdaptiveSelectionSelected:
             estimated_at=FIXED_DT,
         )
         result = m8_service.select_adaptive_items(policy, ability, FIXED_DT)
-        assert result.ability_estimate is not None
-        assert result.ability_estimate.theta == 0.8
-        assert result.ability_estimate.status == "estimated"
+        assert result.ability_estimate is None
 
     def test_select_adaptive_preserves_policy_id(self, m8_service):
         """返回结果应保留策略 ID。"""
