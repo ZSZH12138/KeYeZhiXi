@@ -9,6 +9,9 @@ from course_insight.contracts.assessment import (
     ScoreAuditRecord,
     ScoringResultBundle,
 )
+from course_insight.modules.m8_assessment_scoring.paper_record import (
+    FrozenAssessmentRecord,
+)
 
 
 _AUDIT_TABLE = "m8_score_audits"
@@ -19,6 +22,18 @@ class M8Repository(Protocol):
 
     def save_paper(self, paper: AssessmentPaper) -> None:
         """Persist one immutable generated assessment paper."""
+
+    def insert_or_get_paper_record(
+        self,
+        record: FrozenAssessmentRecord,
+    ) -> FrozenAssessmentRecord:
+        """Persist or recover one identical paper, scope, and rubric record."""
+
+    def get_paper_record(
+        self,
+        paper_id: str,
+    ) -> FrozenAssessmentRecord | None:
+        """Load the authoritative frozen record for a generated paper."""
 
     def insert_or_get_paper(
         self,

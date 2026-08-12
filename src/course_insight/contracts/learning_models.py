@@ -24,6 +24,8 @@ class LearningObservation(ContractModel):
     concept_ids: list[str] = Field(min_length=1)
     score: float = Field(ge=0.0, allow_inf_nan=False)
     max_score: float = Field(gt=0.0, allow_inf_nan=False)
+    response_outcome: Literal["correct", "incorrect"]
+    outcome_policy_version: str = Field(min_length=1)
     source_audit_id: str = Field(min_length=1)
     source_audit_version: int = Field(ge=1)
     occurred_at: datetime
