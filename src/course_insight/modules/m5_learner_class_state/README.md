@@ -6,26 +6,35 @@
 
 ## 职责
 
-从版本化评分审计形成学习观测，执行认知诊断、知识追踪、个体状态更新和
-透明班级聚合。认知诊断的规定模型族包含 DINA，知识追踪的规定模型族
-包含 BKT。当前 `run_learning_models` 是空实现：产生空 DINA 掌握概率和空
-BKT 追踪概率，不运行拟合或伪造参数。
+M5 从 M8 的最终评分审计形成学习历史，运行 DINA 认知诊断和 BKT 知识追踪，
+再更新学生状态与班级汇总。历史按课程、班级、学生、审计编号和审计版本去重，
+服务重启后会从仓储恢复完整历史，不会从零重新判断。
 
 ## 输入来源
 
-- M8 `ScoringResultBundle` 与由其审计转换的 `LearningObservationBatch`。
-- M3 `KnowledgeBundle` 和 Q 矩阵。
-- 前版 `LearnerStateSnapshot`/`ClassStateSnapshot` 与版本化状态策略。
-- 当前空架构允许观测列表为空，但 learner 和 watermark 仍必须明确。
+- M8 最终有效评分转换出的 `LearningObservationBatch`。
+- M3 `KnowledgeBundle`、题目版本和 Q 矩阵。
+- 前版 `LearnerStateSnapshot`、`ClassStateSnapshot` 和状态策略。
+- DINA 默认至少需要 200 名学生、每题至少 50 个同时含对错的作答。
+- BKT 默认至少需要 100 名学生、每名学生至少 5 次有序作答。
+
+数据不足时返回稳定的 `INSUFFICIENT_MODEL_DATA`，不会用普通答对率冒充模型结果。
 
 ## 输出
 
-- `StateUpdateResult`：现有可解释状态更新，供 M6/M9。
-- `CognitiveDiagnosisResult`：DINA 系模型的版本化认知诊断输出。
-- `KnowledgeTraceSnapshot`：BKT 系模型的版本化知识追踪输出。
-- `LearningModelRun`：将 DINA/BKT 两个结果、观测数和水位绑定为原子运行。
+- `CognitiveDiagnosisResult`：DINA 给出的知识属性掌握概率。
+- `KnowledgeTraceSnapshot`：BKT 给出的随学习顺序更新的掌握概率。
+- `LearningModelRun`：绑定模型版本、观测数量和数据水位。
+- `StateUpdateResult`：带模型运行证据的学生状态和班级状态，供 M6/M9 使用。
+
+## 数据与恢复规则
+
+- 同一审计版本只消费一次；同一身份但内容不同会报冲突。
+- 教师复核后只消费最新有效版本；被拒绝的评分不更新学习状态。
+- 学生与班级状态追加保存，完整状态更新在一个事务中完成。
+- DINA/BKT 模型、观测和追踪结果均可在 SQLite/PostgreSQL 中恢复。
 
 ## 禁止事项
 
-不得重复消费同一审计版本、覆盖旧状态、混用学习者、在证据不足时伪造
-DINA/BKT 结论、在 M5 中做 IRT 选题，或跨模块读表。
+不得重复消费审计、覆盖旧状态、混用不同学生或班级、在证据不足时伪造结论、
+在 M5 中执行 IRT 选题，或绕过仓储跨模块读表。

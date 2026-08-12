@@ -322,7 +322,7 @@ def test_stage1_public_factory_keeps_all_five_task_workflows(
 
 def test_stage1_public_schema_and_task_plan_fields_are_unchanged() -> None:
     public_contracts = public_contract_types()
-    assert len(public_contracts) == 90
+    assert len(public_contracts) == 91
     assert {
         "BktConceptParameters",
         "BktModelArtifact",
@@ -330,6 +330,7 @@ def test_stage1_public_schema_and_task_plan_fields_are_unchanged() -> None:
         "ConceptResponseSequence",
         "DinaItemParameters",
         "DinaModelArtifact",
+        "ItemExposureSnapshot",
     } <= public_contracts.keys()
     assert tuple(TaskPlan.model_fields) == _TASK_PLAN_FIELDS
 

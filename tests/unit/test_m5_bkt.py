@@ -306,3 +306,50 @@ def test_m5_service_persists_bkt_model_and_recovers_trace_after_restart(
     assert repository.get_knowledge_trace(
         trace_id=continued_after_restart.trace_id
     ) == continued_after_restart
+
+
+def test_sqlite_bkt_history_rejects_identity_conflicts_and_missing_scope(
+    tmp_path: Path,
+) -> None:
+    """Append-only BKT history must roll back changed retries."""
+
+    from course_insight.infrastructure.sqlite.m5_repository import SQLiteM5Repository
+
+    repository = SQLiteM5Repository(tmp_path / "m5-bkt-conflicts.sqlite3")
+    repository.initialize()
+    model = _model()
+    trace = _engine().update(
+        model,
+        _sequence("learner_1", [True, False, True, True, False]),
+    )
+
+    assert repository.insert_or_get_bkt_model(model) == model
+    assert repository.get_latest_bkt_model(
+        course_id=model.course_id,
+        class_id=model.class_id,
+    ) == model
+    assert repository.get_latest_bkt_model(
+        course_id=model.course_id,
+        class_id="missing_class",
+    ) is None
+    assert repository.get_bkt_model(
+        course_id=model.course_id,
+        model_version="missing_version",
+    ) is None
+    with pytest.raises(RuntimeError, match="BKT model conflict"):
+        repository.insert_or_get_bkt_model(
+            model.model_copy(update={"log_likelihood": -999.0})
+        )
+
+    assert repository.insert_or_get_knowledge_trace(trace) == trace
+    assert repository.get_knowledge_trace(trace_id="missing_trace") is None
+    with pytest.raises(RuntimeError, match="BKT trace conflict"):
+        repository.insert_or_get_knowledge_trace(
+            trace.model_copy(
+                update={"concept_probabilities": {"concept_1": 0.123}}
+            )
+        )
+    with pytest.raises(ValueError, match="course and class scope"):
+        repository.insert_or_get_knowledge_trace(
+            trace.model_copy(update={"course_id": None, "class_id": None})
+        )

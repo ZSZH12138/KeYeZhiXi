@@ -4,8 +4,9 @@
 
 本文件描述截至 `2026-07-27` 已实现的 M0 部署面、M6 私有策略配置与进程角色。它不把未实测的
 PostgreSQL 联调写成“已通过”，也不把开发服务器当成生产 WSGI/ASGI 部署。
-M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M7/M9 的 DeepSeek 网络调用仍是
-空实现；部署持久化和 Web 外层不会自动启用这些算法。
+M5 的 DINA/BKT、M8 的 2PL IRT/能力估计/自适应选择以及 M9 的本地模型质量
+已经实现。它们仍受数据门槛、shadow 质量审核和教师批准约束；部署持久化不会
+绕过这些门槛。M7/M9 的 DeepSeek 网络调用仍未启用。
 
 M6 已实现 rules/shadow/active runtime、artifact 校验、奖励/OPE 与私有持久化，
 但默认是 `rules`、零 rollout、零探索。本阶段没有真实教学训练、线上 rollout 或
@@ -241,8 +242,9 @@ python -m pytest -q
 常规生产部署应保持示例的 rules-safe 默认值。任何 shadow/active 变更都必须在
 部署变更单中逐项记录：
 
-- [ ] 当前 core ledger 为 v13；确认 M4 intent 使用 v10/0010 与 v11/0011，
-  M6 policy 使用 v12/0012，M0 freeze 使用追加的 v13/0013，未改写已应用 migration；
+- [ ] 当前 core ledger 为 v15；确认 M4 intent 使用 v10/v11，M6 policy 使用 v12，
+  M0 freeze 使用 v13，M5/M8 model runtime 使用 v14，观测审计身份使用 v15，
+  且未改写已应用 migration；
 - [ ] 使用全新 immutable `policy_id`；manifest 的 state graph/baseline/feature/
   action/reward/gate version 已治理，artifact 与 manifest 重叠的
   policy/adapter/feature/action 字段及 lowercase SHA-256 完全一致；
@@ -355,9 +357,9 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --apply
 ```
 
-预期：core schema version 为 13；v10/0010 与 v11/0011 属于 M4 intent，
-v12/`0012_m6_policy_learning.sql` 新增五张 M6 私有 policy 表，
-v13/`0013_m0_policy_freeze.sql` 为 `m0_assessment_runs` 安全追加七个策略冻结字段。
+预期：core schema version 为 15；v10/v11 属于 M4 intent，v12 新增 M6 私有
+policy 表，v13 为 `m0_assessment_runs` 追加策略冻结字段，v14 新增 M5/M8 模型
+运行历史，v15 为学习观测追加权威评分审计身份。
 报告为 `validated`/`completed`，或在已投递旧事件
 存在时明确为 `*_with_source_limitations`。失败时检查 `error_code`、migration
 checksum、源 schema version、`partial_envelope_rows` 和每表 digest。不要用

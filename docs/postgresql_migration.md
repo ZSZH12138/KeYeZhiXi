@@ -2,13 +2,14 @@
 
 ## 结论先行
 
-截至 `2026-07-27`：
+截至 `2026-08-13`：
 
 - PostgreSQL 仓储、schema migration、SQLite→PostgreSQL 导入器已在代码中实现。
 - 本文档不声称这些能力已经在真实 PostgreSQL 环境中完成联调或验收。
 - 准确表述只能是“代码已落地、可配置、可阅读；真实通过状态须以当次实测为准”。
-- 当前 bundled PostgreSQL/SQLite schema version 是 `13`；M4 intent 占用
-  v10/v11，M6 五张私有 policy 表属于 v12，M0 policy freeze 是后续安全追加的 v13。
+- 当前 bundled PostgreSQL/SQLite schema version 是 `15`；M4 intent 占用 v10/v11，
+  M6 policy 属于 v12，M0 policy freeze 属于 v13，M5/M8 模型运行历史属于 v14，
+  M5 学习观测审计身份属于 v15。
 
 ## 已实现的组件
 
@@ -17,7 +18,7 @@
   - `pg_advisory_xact_lock`
   - `schema_migrations` 校验
 - `src/course_insight/infrastructure/postgresql/migrations/*.sql`
-  - 当前 bundled schema version 为 `13`
+  - 当前 bundled schema version 为 `15`
   - v8 为 `m0_assessment_runs` 增加同一 `paper_id` 只允许一个
     `status <> completed` review 的部分唯一索引（包含 failed）；相同 operation
     可重放，只有完成当前 review 后才允许新的 review operation
@@ -37,6 +38,10 @@
     `policy_id`、`adapter_id`、`adapter_version`、`artifact_sha256`、
     `feature_schema_version`、`action_space_version`、`gate_policy_version`
     七列和完整性约束
+  - v14/`0014_m5_m8_model_runtime.sql` 追加 M5 观测、DINA/BKT 模型、知识追踪，
+    以及 M8 IRT 标定、参数、能力、自适应选择和标定审核历史
+  - v15/`0015_m5_learning_observation_audit_identity.sql` 为 M5 学习观测追加
+    权威评分审计身份和唯一性约束
   - 已发布的 M4 v10/v11 migration 保持不变；M6 与 M0 freeze 顺延到 v12/v13，
     没有回写或重编号已发布 migration
   - v8 旧行的新字段保持 NULL；首次同 operation 重放时，只有旧 identity、持久化
@@ -79,9 +84,9 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 成功后更新 `completed_batches`，重复执行使用相同权威身份并校验 payload，
 同 ID 不同内容会失败而不是静默覆盖。
 
-当前导入器要求源 SQLite ledger 精确为 1—13 连续版本，并验证 v13
-`m0_assessment_runs` 列/约束、M4 intent 表以及五张 M6 policy 表。它不会把旧源在导入
-过程中自动升级；先在应用备份和停写边界内运行 SQLite `migrate()` 到 v13，再
+当前导入器要求源 SQLite ledger 精确为 1—15 连续版本，并验证 v13
+`m0_assessment_runs`、M4 intent、M6 policy、v14 模型历史和 v15 观测审计身份。
+它不会把旧源在导入过程中自动升级；先在应用备份和停写边界内运行 SQLite `migrate()` 到 v15，再
 执行 dry-run。
 
 ### checkpoint 与跨进程恢复

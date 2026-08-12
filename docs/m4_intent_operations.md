@@ -4,7 +4,7 @@
 
 M4 的唯一公共规划入口仍是
 `M4TaskOrchestrationService.create_task_plan(...) -> TaskPlan`。本能力不增加
-公开 Pydantic 契约、不改变 84 个 Schema，也不改变 `TaskPlan` 字段、五类任务或
+公开 Pydantic 契约、不改变当前 91 个 Schema，也不改变 `TaskPlan` 字段、五类任务或
 冻结工作流：`qa` 为 `M2 → M7 → M6`，其余四类为
 `M8 → M2 → M7 → M5 → M6 → M9`。
 

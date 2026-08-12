@@ -316,3 +316,81 @@ def test_policy_defaults_preserve_existing_callers() -> None:
 
     assert policy.max_item_exposure_rate == pytest.approx(0.20)
     assert policy.difficulty_range == (-4.0, 4.0)
+
+
+def test_service_adaptive_runtime_guards_and_lightweight_repository_paths(
+    tmp_path: Path,
+) -> None:
+    """Configured selection fails closed, while legacy empty probes stay empty."""
+
+    repository = SQLiteM8Repository(tmp_path / "adaptive-guards.sqlite3")
+    repository.initialize()
+    service = M8AssessmentService(repository, object(), object())
+    configured = _policy()
+    parameters = _parameter_set(("item_1", 1.0, 0.0))
+
+    with pytest.raises(ValueError, match="requested_at"):
+        service.select_adaptive_items(configured, _ability())
+
+    empty = service.select_adaptive_items(
+        AdaptiveSelectionPolicy(
+            policy_id="empty_policy",
+            version="1.0.0",
+            parameter_set_id=None,
+            max_items=1,
+            concept_quotas={},
+            status="empty",
+        ),
+        _ability(),
+        requested_at=NOW,
+    )
+    assert empty.status == "empty"
+
+    with pytest.raises(DomainError) as missing_inputs:
+        service.select_adaptive_items(
+            configured,
+            _ability(),
+            requested_at=NOW,
+        )
+    assert missing_inputs.value.code == "ADAPTIVE_INPUT_MISSING"
+
+    with pytest.raises(DomainError) as missing_parameters:
+        service.select_adaptive_items(
+            configured,
+            _ability(),
+            parameter_set=parameters,
+            candidate_items=[_item("item_1")],
+            exposure_snapshot=_exposure(),
+            requested_at=NOW,
+        )
+    assert missing_parameters.value.code == "IRT_PARAMETER_SET_NOT_FOUND"
+
+    class ReadOnlyRuntimeRepository:
+        def get_parameter_set_course_id(self, _parameter_set_id):
+            return "course_1"
+
+    read_only = M8AssessmentService(ReadOnlyRuntimeRepository(), object(), object())
+    selected = read_only.select_adaptive_items(
+        configured,
+        _ability(),
+        parameter_set=parameters,
+        candidate_items=[_item("item_1")],
+        exposure_snapshot=_exposure(),
+        requested_at=NOW,
+    )
+    assert selected.status == "selected"
+
+    class AlteringRuntimeRepository(ReadOnlyRuntimeRepository):
+        def insert_or_get_adaptive_selection(self, selection, *, course_id):
+            return selection.model_copy(update={"selection_id": "altered_selection"})
+
+    altering = M8AssessmentService(AlteringRuntimeRepository(), object(), object())
+    with pytest.raises(RuntimeError, match="adaptive-selection persistence conflict"):
+        altering.select_adaptive_items(
+            configured,
+            _ability(),
+            parameter_set=parameters,
+            candidate_items=[_item("item_1")],
+            exposure_snapshot=_exposure(),
+            requested_at=NOW,
+        )

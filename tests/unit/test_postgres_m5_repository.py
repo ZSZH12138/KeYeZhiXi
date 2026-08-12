@@ -327,6 +327,86 @@ def test_postgres_m5_persists_bkt_models_and_knowledge_traces() -> None:
     PostgresM5Repository is None,
     reason="adapter is the RED-phase missing feature",
 )
+def test_postgres_bkt_runtime_rejects_conflicts_and_sanitizes_errors() -> None:
+    """Exercise append-only, integrity and database-error boundaries."""
+
+    from course_insight.contracts.learning_models import BktModelArtifact
+    from course_insight.modules.m5_learner_class_state.bkt import BktEngine
+    from tests.unit.test_m5_bkt import _model, _sequence
+
+    model = _model()
+    trace = BktEngine().update(
+        model,
+        _sequence("learner_1", [True, False, True, True, False]),
+    )
+    conflicting_model = model.model_copy(update={"log_likelihood": -999.0})
+    conflicting_trace = trace.model_copy(
+        update={"concept_probabilities": {"concept_1": 0.123}}
+    )
+
+    def stored_rows(statement: str, _: tuple[Any, ...]):
+        normalized = " ".join(statement.lower().split())
+        if "from m5_bkt_models" in normalized:
+            return _bkt_model_row(model)
+        if "from m5_knowledge_traces" in normalized:
+            return _knowledge_trace_row(trace)
+        return None
+
+    repository = PostgresM5Repository(FakePool(FakeConnection(stored_rows)))
+    with pytest.raises(PostgresOperationError, match="conflict"):
+        repository.insert_or_get_bkt_model(conflicting_model)
+    with pytest.raises(PostgresOperationError, match="conflict"):
+        repository.insert_or_get_knowledge_trace(conflicting_trace)
+    with pytest.raises(ValueError, match="course and class scope"):
+        repository.insert_or_get_knowledge_trace(
+            trace.model_copy(update={"course_id": None, "class_id": None})
+        )
+
+    wrong_row = _bkt_model_row(model)
+    wrong_row["model_id"] = "wrong_model_id"
+    corrupt_repository = PostgresM5Repository(
+        FakePool(FakeConnection(lambda _statement, _parameters: wrong_row))
+    )
+    with pytest.raises(PostgresOperationError, match="integrity"):
+        corrupt_repository.get_bkt_model(
+            course_id=model.course_id,
+            model_version=model.model_version,
+        )
+
+    with pytest.raises(TypeError, match="BktModelArtifact"):
+        repository.insert_or_get_bkt_model(trace)  # type: ignore[arg-type]
+
+    def fail_operation(_statement: str, _parameters: tuple[Any, ...]):
+        raise psycopg.DataError("private BKT SQL detail")
+
+    unsafe = PostgresM5Repository(FakePool(FakeConnection(fail_operation)))
+    operations = (
+        lambda: unsafe.insert_or_get_bkt_model(model),
+        lambda: unsafe.get_bkt_model(
+            course_id=model.course_id,
+            model_version=model.model_version,
+        ),
+        lambda: unsafe.get_latest_bkt_model(
+            course_id=model.course_id,
+            class_id=model.class_id,
+        ),
+        lambda: unsafe.insert_or_get_knowledge_trace(trace),
+        lambda: unsafe.get_knowledge_trace(trace_id=trace.trace_id),
+    )
+    for invoke in operations:
+        with pytest.raises(PostgresOperationError, match="operation failed") as captured:
+            invoke()
+        assert captured.value.__cause__ is None
+        assert "private BKT SQL detail" not in str(captured.value)
+
+    assert BktModelArtifact is not None
+
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
 def test_postgres_m5_implements_complete_protocol_and_serializes_contracts() -> None:
     result = _state_result(
         attempt_id="attempt_1",

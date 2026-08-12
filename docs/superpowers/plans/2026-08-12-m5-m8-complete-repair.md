@@ -729,7 +729,7 @@ git commit -m "feat: implement validated 2PL calibration"
 
 Exact signature: `apply_calibration_review(run_id: str, quality_report: ModelQualityReport, decision: CalibrationReviewDecision) -> IRTParameterSet`.
 
-- [ ] **Step 1: 写迁移与追加历史失败测试**
+- [x] **Step 1: 写迁移与追加历史失败测试**
 
 ```python
 def test_parameter_versions_are_append_only(repository, shadow_set):
@@ -753,7 +753,7 @@ def test_sqlite_and_postgres_return_same_model_history(sqlite_repo, postgres_rep
     assert sqlite_repo.list_parameter_sets() == postgres_repo.list_parameter_sets()
 ```
 
-- [ ] **Step 2: 接入 Task 3 已创建的模型运行表**
+- [x] **Step 2: 接入 Task 3 已创建的模型运行表**
 
 ```text
 m5_learning_observations
@@ -769,7 +769,7 @@ m8_calibration_reviews
 
 验证所有表均使用完整作用域、模型版本和 payload checksum；SQLite 与 PostgreSQL Repository 对同一身份、同一版本、不同内容都必须拒绝写入。
 
-- [ ] **Step 3: 实现审核状态机**
+- [x] **Step 3: 实现审核状态机**
 
 ```text
 shadow + 质量报告 ready + 教师 approve -> approved
@@ -778,7 +778,7 @@ shadow + defer -> 保持 shadow
 approved/rejected -> 禁止再次改写原版本，只能创建新标定版本
 ```
 
-- [ ] **Step 4: 实现 EAP 能力估计**
+- [x] **Step 4: 实现 EAP 能力估计**
 
 ```text
 只使用 approved 2PL 参数。
@@ -786,7 +786,7 @@ approved/rejected -> 禁止再次改写原版本，只能创建新标定版本
 全对或全错仍返回有限能力和有限标准误，不允许无穷值。
 ```
 
-- [ ] **Step 5: 运行双数据库测试并提交**
+- [x] **Step 5: 运行双数据库测试并提交**
 
 ```powershell
 python -m pytest tests/integration/test_m8_model_approval.py tests/unit/test_postgres_m8_repository.py tests/integration/test_sqlite_to_postgres_migration.py -q
@@ -816,7 +816,7 @@ Exact contracts and signature:
 - `ItemExposureSnapshot(parameter_set_id: str, total_sessions: int, item_administered_counts: dict[str, int])`。
 - `select_adaptive_items(policy: AdaptiveSelectionPolicy, ability_estimate: AbilityEstimate, parameter_set: IRTParameterSet, candidate_items: list[ItemCard], administered_item_ids: frozenset[str], exposure_snapshot: ItemExposureSnapshot, requested_at: datetime) -> AdaptiveSelectionResult`。
 
-- [ ] **Step 1: 写选题约束失败测试**
+- [x] **Step 1: 写选题约束失败测试**
 
 ```python
 def test_selects_highest_information_available_item(selector, selection_case):
@@ -848,14 +848,14 @@ def test_respects_item_exposure_cap(selector, exposed_case):
     assert "overexposed_item" not in result.item_ids
 ```
 
-- [ ] **Step 2: 实现 2PL Fisher 信息量**
+- [x] **Step 2: 实现 2PL Fisher 信息量**
 
 ```python
 p = sigmoid(a * (theta - b))
 information = a * a * p * (1.0 - p)
 ```
 
-- [ ] **Step 3: 按功能约束选题**
+- [x] **Step 3: 按功能约束选题**
 
 ```text
 先过滤非 approved 参数题、已作答题、难度超出策略范围的题，以及历史曝光率达到上限的题。
@@ -865,7 +865,7 @@ information = a * a * p * (1.0 - p)
 每完成一题，先用真实作答更新并持久化 AbilityEstimate，再基于新能力选择下一题。
 ```
 
-- [ ] **Step 4: 做自适应效率模拟验收**
+- [x] **Step 4: 做自适应效率模拟验收**
 
 ```text
 seed=20260812；500 名模拟学生；200 道 approved 题目。
@@ -873,7 +873,7 @@ seed=20260812；500 名模拟学生；200 道 approved 题目。
 达到相同能力标准误时，平均用题数比固定顺序测验至少减少 20%。
 ```
 
-- [ ] **Step 5: 运行测试并提交**
+- [x] **Step 5: 运行测试并提交**
 
 ```powershell
 python -m pytest tests/unit/test_m8_adaptive_selector.py tests/model_validation/test_adaptive_efficiency.py -q
@@ -895,7 +895,7 @@ git commit -m "feat: implement constrained adaptive item selection"
 - Consumes: 教师批准、修改或拒绝的评分版本。
 - Produces: 只有有效最终评分才能进入 M5 的受控链路。
 
-- [ ] **Step 1: 写教师复核并发和拒绝测试**
+- [x] **Step 1: 写教师复核并发和拒绝测试**
 
 ```python
 def test_review_requires_exact_current_audit_version_and_checksum(service, stale_review):
@@ -915,7 +915,7 @@ def test_same_review_replay_returns_same_result(service, override_review):
     assert service.apply_teacher_review(override_review) == first
 ```
 
-- [ ] **Step 2: 实现精确并发保护**
+- [x] **Step 2: 实现精确并发保护**
 
 ```text
 复核请求必须携带 expected_audit_version 和 expected_audit_checksum。
@@ -923,7 +923,7 @@ def test_same_review_replay_returns_same_result(service, override_review):
 教师修改产生 audit_version + 1；原版本永不修改。
 ```
 
-- [ ] **Step 3: 建立 M5 消费规则**
+- [x] **Step 3: 建立 M5 消费规则**
 
 ```text
 approved 或无需复核：允许生成学习观测。
@@ -931,7 +931,7 @@ teacher_override：只消费新版本，旧版本保持历史但不重复更新�
 rejected：不生成可进入 M5 的学习观测，并记录拒绝原因。
 ```
 
-- [ ] **Step 4: 运行链路测试并提交**
+- [x] **Step 4: 运行链路测试并提交**
 
 ```powershell
 python -m pytest tests/integration/test_m8_review_to_m5.py -q
@@ -954,7 +954,7 @@ git commit -m "fix: govern reviewed scores before M5 consumption"
 - Consumes: Tasks 1—11 的所有产物。
 - Produces: 可合并、可重启、可追溯且模型指标达标的 M5/M8 完整实现。
 
-- [ ] **Step 1: 写端到端业务测试**
+- [x] **Step 1: 写端到端业务测试**
 
 ```text
 教师发布知识包和蓝图 -> M8 按比例组卷 -> 学生作答 -> 客观/主观评分 -> 教师复核
@@ -964,7 +964,7 @@ git commit -m "fix: govern reviewed scores before M5 consumption"
 
 测试中途分别重启 M5 和 M8 服务，最终结果必须与不中断运行完全一致。
 
-- [ ] **Step 2: 运行完整测试、覆盖率和静态健康检查**
+- [x] **Step 2: 运行完整测试、覆盖率和静态健康检查**
 
 ```powershell
 python -m compileall src
@@ -975,7 +975,7 @@ git diff --check origin/main...HEAD
 
 Expected: 全部通过；M5/M8 新文件逐个检查覆盖率不低于 90%。
 
-- [ ] **Step 3: 校正文档中的功能状态**
+- [x] **Step 3: 校正文档中的功能状态**
 
 ```text
 删除“空实现”说明。
@@ -985,7 +985,7 @@ Expected: 全部通过；M5/M8 新文件逐个检查覆盖率不低于 90%。
 把已复现问题和对应回归测试逐项关联。
 ```
 
-- [ ] **Step 4: 做最终数据兼容验证**
+- [x] **Step 4: 做最终数据兼容验证**
 
 ```powershell
 python -m pytest tests/integration/test_sqlite_to_postgres_migration.py tests/integration/test_postgres_foundation_live.py -q
@@ -993,7 +993,7 @@ python -m pytest tests/integration/test_sqlite_to_postgres_migration.py tests/in
 
 Expected: 旧数据库可以按版本升级；SQLite 导入 PostgreSQL 后，试卷、评分、状态和模型历史数量及 checksum 一致。
 
-- [ ] **Step 5: 提交最终验收结果**
+- [x] **Step 5: 提交最终验收结果**
 
 ```powershell
 git add docs src tests contracts pyproject.toml

@@ -10,6 +10,8 @@ import pytest
 
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.learning_models import (
+    AbilityEstimate,
+    AdaptiveSelectionResult,
     CalibrationReviewDecision,
     CalibrationRunResult,
     IRTItemParameters,
@@ -307,3 +309,205 @@ def test_eap_estimates_are_finite_persisted_and_approved_only(
     restarted = _service(_repository(database_path))
     assert restarted.get_ability_estimate(all_correct.estimate_id) == all_correct
     assert restarted.get_ability_estimate(all_incorrect.estimate_id) == all_incorrect
+
+
+def test_model_runtime_rejects_missing_scope_identity_and_invalid_ability(
+    tmp_path: Path,
+) -> None:
+    """Public lifecycle errors stay stable instead of leaking repository details."""
+
+    service = _service(_repository(tmp_path / "runtime-errors.sqlite3"))
+    run = _shadow_run()
+
+    with pytest.raises(DomainError) as missing_run:
+        service.apply_calibration_review(
+            run.run_id,
+            _quality(run),
+            _decision(run, decision="approve"),
+        )
+    assert missing_run.value.code == "CALIBRATION_RUN_NOT_FOUND"
+    with pytest.raises(DomainError) as missing_parameter:
+        service.get_parameter_set("missing_parameter")
+    assert missing_parameter.value.code == "IRT_PARAMETER_SET_NOT_FOUND"
+    with pytest.raises(DomainError) as missing_ability:
+        service.get_ability_estimate("missing_ability")
+    assert missing_ability.value.code == "ABILITY_ESTIMATE_NOT_FOUND"
+
+    service.store_calibration_result(run, course_id="course_1")
+    mismatched_decision = _decision(run, decision="reject").model_copy(
+        update={"calibration_run_id": "other_run"}
+    )
+    with pytest.raises(DomainError) as identity:
+        service.apply_calibration_review(
+            run.run_id,
+            _quality(run),
+            mismatched_decision,
+        )
+    assert identity.value.code == "CALIBRATION_REVIEW_IDENTITY_MISMATCH"
+
+    approved = service.apply_calibration_review(
+        run.run_id,
+        _quality(run),
+        _decision(run, decision="approve"),
+    )
+    with pytest.raises(DomainError) as scope:
+        service.estimate_ability(
+            approved.parameter_set_id,
+            _responses(learner_id="learner_scope", correct=True),
+            course_id="course_2",
+        )
+    assert scope.value.code == "IRT_PARAMETER_SCOPE_MISMATCH"
+    with pytest.raises(DomainError) as invalid:
+        service.estimate_ability(
+            approved.parameter_set_id,
+            [],
+            course_id="course_1",
+        )
+    assert invalid.value.code == "ABILITY_ESTIMATION_INVALID"
+
+
+def test_calibration_persistence_validates_single_course_and_repository_result(
+    tmp_path: Path,
+) -> None:
+    """Calibration persistence must not mix courses or accept altered writes."""
+
+    service = _service(_repository(tmp_path / "calibration-errors.sqlite3"))
+    run = _shadow_run()
+    mixed = [
+        _responses(learner_id="learner_1", correct=True)[0],
+        _responses(learner_id="learner_2", correct=False)[0].model_copy(
+            update={"course_id": "course_2"}
+        ),
+    ]
+    with pytest.raises(DomainError) as scope:
+        service._persist_calibration_if_supported(run, mixed)
+    assert scope.value.code == "CALIBRATION_SCOPE_MISMATCH"
+
+    class NoCalibrationPersistence:
+        pass
+
+    no_persistence = _service(NoCalibrationPersistence())
+    assert no_persistence._persist_calibration_if_supported(run, mixed[:1]) == run
+    with pytest.raises(RuntimeError, match="does not support"):
+        no_persistence.store_calibration_result(run, course_id="course_1")
+
+    class AlteringRepository(NoCalibrationPersistence):
+        def insert_or_get_calibration_run(self, result, *, course_id):
+            return result.model_copy(update={"run_id": "altered_run"})
+
+    with pytest.raises(RuntimeError, match="calibration-run conflict"):
+        _service(AlteringRepository()).store_calibration_result(
+            run,
+            course_id="course_1",
+        )
+
+
+def test_sqlite_model_runtime_guards_every_append_only_artifact(
+    tmp_path: Path,
+) -> None:
+    """Calibration, ability and adaptive history reject altered retries."""
+
+    from course_insight.infrastructure.sqlite import m8_model_runtime
+
+    repository = _repository(tmp_path / "runtime-persistence-guards.sqlite3")
+    run = _shadow_run()
+    repository.insert_or_get_calibration_run(run, course_id="course_1")
+    assert repository.list_parameter_sets(course_id="course_1") == [
+        run.parameter_set
+    ]
+    with pytest.raises(ValueError, match="scope"):
+        repository.list_parameter_sets(course_id="   ")
+    with pytest.raises(RuntimeError, match="calibration-run conflict"):
+        repository.insert_or_get_calibration_run(
+            run.model_copy(update={"metrics": {"log_likelihood": -999.0}}),
+            course_id="course_1",
+        )
+
+    approved = run.parameter_set.model_copy(
+        update={
+            "parameter_set_id": "irt_approved_guards",
+            "version": "irt-task9-v1-approved-guards",
+            "status": "approved",
+            "created_at": NOW + timedelta(minutes=2),
+        }
+    )
+    decision = _decision(run, decision="approve", decision_id="decision_guards")
+    with pytest.raises(RuntimeError, match="review conflict"):
+        repository.insert_or_get_calibration_review(
+            decision,
+            approved,
+            course_id="course_2",
+        )
+    repository.insert_or_get_parameter_set(approved, course_id="course_1")
+
+    invalid_estimate = AbilityEstimate(
+        estimate_id="ability_shadow",
+        learner_id="learner_1",
+        parameter_set_id=run.parameter_set.parameter_set_id,
+        theta=0.0,
+        standard_error=1.0,
+        status="estimated",
+        estimated_at=NOW + timedelta(minutes=3),
+    )
+    with pytest.raises(RuntimeError, match="ability-estimate conflict"):
+        repository.insert_or_get_ability_estimate(
+            invalid_estimate,
+            course_id="course_1",
+        )
+
+    estimate = invalid_estimate.model_copy(
+        update={
+            "estimate_id": "ability_approved_guards",
+            "parameter_set_id": approved.parameter_set_id,
+        }
+    )
+    assert repository.insert_or_get_ability_estimate(
+        estimate,
+        course_id="course_1",
+    ) == estimate
+    with pytest.raises(RuntimeError, match="ability-estimate conflict"):
+        repository.insert_or_get_ability_estimate(
+            estimate.model_copy(update={"theta": 0.5}),
+            course_id="course_1",
+        )
+
+    empty_selection = AdaptiveSelectionResult(
+        selection_id="selection_empty_guard",
+        policy_id="policy_guard",
+        learner_id="learner_1",
+        item_ids=[],
+        ability_estimate=None,
+        status="empty",
+        failure_code=None,
+        selected_at=NOW + timedelta(minutes=4),
+    )
+    with pytest.raises(ValueError, match="unconfigured"):
+        repository.insert_or_get_adaptive_selection(
+            empty_selection,
+            course_id="course_1",
+        )
+
+    selection = empty_selection.model_copy(
+        update={
+            "selection_id": "selection_guard",
+            "item_ids": ["item_1"],
+            "ability_estimate": estimate,
+            "status": "selected",
+        }
+    )
+    assert repository.insert_or_get_adaptive_selection(
+        selection,
+        course_id="course_1",
+    ) == selection
+    with pytest.raises(RuntimeError, match="adaptive-selection conflict"):
+        repository.insert_or_get_adaptive_selection(
+            selection.model_copy(update={"item_ids": ["item_2"]}),
+            course_id="course_1",
+        )
+    with pytest.raises(ValueError, match="unsupported"):
+        m8_model_runtime._scope_value(
+            tmp_path / "runtime-persistence-guards.sqlite3",
+            "bad_table",
+            "bad_id",
+            "value",
+        )

@@ -6,28 +6,29 @@
 
 ## 职责
 
-构建班级/个体报告、复核队列和证据化教学建议，评估 DINA/BKT/IRT 的模型
-或参数版本质量，并记录教师对 M8 影子标定的审核决定。LLM 只允许使用
-DeepSeek API，仅将已计算的结构化证据转写为教师叙述，不代替统计计算。
-当前 DeepSeek 叙述是空实现，模型质量返回 `insufficient_data`。
+M9 构建班级/个体报告和教师复核决定，并对 M8 的 2PL shadow 标定生成可审核的
+质量报告。DeepSeek 教师叙述边界仍不访问网络；模型质量计算是本地、确定性的，
+不依赖 LLM。
 
 ## 输入来源
 
 - M3 `KnowledgeBundle`、M8 `ScoringResultBundle`、M5 `StateUpdateResult`。
-- M8 `CalibrationRunResult` 与未来 M5 `LearningModelRun`。
-- M0 转换的 `TeacherReviewSubmission` 或经验证的 `teacher_review.json`；二者由
-  `record_teacher_review` 在同一边界消费，并统一为 `confirm/override/reject`。
-- `LLMGenerationRequest`，用例必须为 `teacher_narrative`，provider 必须是 DeepSeek。
+- M8 `CalibrationRunResult`。
+- M0 `TeacherReviewSubmission` 或经验证的 `teacher_review.json`。
+- `LLMGenerationRequest`；仅允许 `teacher_narrative` 和 DeepSeek provider。
 
 ## 输出
 
-- `TeacherAnalyticsBundle` 供 M0 Django 教师外层，`TeacherReviewDecision` 返回 M8。
-- `LLMGenerationResult`：当前 `empty` 且 `not_run`。
-- `ModelQualityReport`：样本或指标不足时只能为 `insufficient_data`。
-- `CalibrationReviewDecision`：教师对影子标定 approve/reject/defer 的追加式记录。
+- `TeacherAnalyticsBundle`、`TeacherReviewDecision`。
+- `ModelQualityReport`：检查收敛指标、样本覆盖、参数边界稳定性和平均信息量，
+  输出 `ready`、`failed` 或 `insufficient_data`。
+- `CalibrationReviewDecision`：教师对 shadow 标定作出 approve/reject/defer。
+- `LLMGenerationResult`：DeepSeek 尚未启用时保持 `empty/not_run`。
+
+质量报告只评估证据，不自动发布参数；M8 必须同时收到 `ready` 报告和教师批准，
+才能创建 approved 参数版本。
 
 ## 禁止事项
 
-不得在证据不足时生成质量指标/高置信建议、让 DeepSeek 重算统计、在空实现
-中读取 `DEEPSEEK_API_KEY`或访问网络、自动发布 M8 参数、直接修改评分、
-泄露身份，或跨模块读表。
+不得在证据不足时伪造指标或高置信建议、让 DeepSeek 重算统计、自动发布 M8
+参数、直接覆盖评分、泄露身份，或跨模块读表。
