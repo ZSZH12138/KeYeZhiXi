@@ -418,7 +418,7 @@ Exact signatures:
 - `DinaEngine.fit(cohort: list[LearningObservationBatch], q_matrix: list[QMatrixEntry]) -> DinaModelArtifact`
 - `DinaEngine.infer(model: DinaModelArtifact, batch: LearningObservationBatch) -> CognitiveDiagnosisResult`
 
-- [ ] **Step 1: 写 DINA 公式级单元测试**
+- [x] **Step 1: 写 DINA 公式级单元测试**
 
 ```python
 def test_mastered_profile_uses_one_minus_slip(dina_engine):
@@ -435,7 +435,7 @@ def test_posterior_probabilities_are_normalized(dina_engine, fitted_dina, learne
     assert sum(posterior.values()) == pytest.approx(1.0)
 ```
 
-- [ ] **Step 2: 实现显式二值化策略**
+- [x] **Step 2: 实现显式二值化策略**
 
 ```python
 is_correct = observation.score / observation.max_score >= policy.correct_threshold
@@ -443,7 +443,7 @@ is_correct = observation.score / observation.max_score >= policy.correct_thresho
 
 阈值必须来自版本化策略；没有策略时拒绝训练，不得写死在算法内部。
 
-- [ ] **Step 3: 持久化并读取课程范围内的训练观测**
+- [x] **Step 3: 持久化并读取课程范围内的训练观测**
 
 ```python
 repository.insert_or_get_learning_observation_batch(observation_batch)
@@ -455,7 +455,7 @@ cohort = repository.list_learning_observations(
 
 同一审计版本只保存一次；DINA 至少需要 200 名不同学生、每道题至少 50 条且同时含正确和错误作答，否则返回 `INSUFFICIENT_MODEL_DATA`。
 
-- [ ] **Step 4: 实现 EM 拟合和后验推断**
+- [x] **Step 4: 实现 EM 拟合和后验推断**
 
 ```text
 E 步：计算每名学生对各属性掌握组合的后验概率。
@@ -465,7 +465,7 @@ M 步：按后验权重更新每道题的 slip、guess 和属性先验。
 维度：按 Q-matrix 的连通知识点分量分别推断；不超过 12 个知识点的分量使用精确后验，超过 12 个知识点的分量使用均值场变分 EM，并记录 `inference_mode="variational"`、ELBO 和收敛轮数，避免 2^K 状态空间耗尽内存且不丢弃功能。
 ```
 
-- [ ] **Step 5: 用固定合成数据验证模型恢复能力**
+- [x] **Step 5: 用固定合成数据验证模型恢复能力**
 
 ```text
 seed=20260812；500 名学生；20 道题；4 个知识点。
@@ -475,7 +475,7 @@ slip 和 guess 的平均绝对误差 <= 0.08。
 增加一个 20 知识点连通分量用例，验证变分路径产生有限概率、ELBO 不下降且内存峰值低于 2 GB。
 ```
 
-- [ ] **Step 6: 运行测试并提交**
+- [x] **Step 6: 运行测试并提交**
 
 ```powershell
 python -m pytest tests/unit/test_m5_dina.py tests/model_validation/test_dina_recovery.py -q
@@ -503,7 +503,7 @@ Exact signatures:
 - `BktEngine.fit(sequences: list[ConceptResponseSequence]) -> BktModelArtifact`
 - `BktEngine.update(model: BktModelArtifact, sequence: ConceptResponseSequence) -> KnowledgeTraceSnapshot`
 
-- [ ] **Step 1: 写正确、错误和多次作答的概率更新测试**
+- [x] **Step 1: 写正确、错误和多次作答的概率更新测试**
 
 ```python
 def test_correct_answer_raises_mastery_probability(bkt_engine, bkt_model):
@@ -526,7 +526,7 @@ def test_replay_watermark_prevents_double_update(bkt_service, learner_batch):
     assert replay == first
 ```
 
-- [ ] **Step 2: 实现四参数 BKT 前向更新和 Baum-Welch 拟合**
+- [x] **Step 2: 实现四参数 BKT 前向更新和 Baum-Welch 拟合**
 
 ```text
 参数：初始掌握 prior、学习转移 learn、猜测 guess、失误 slip。
@@ -536,14 +536,14 @@ def test_replay_watermark_prevents_double_update(bkt_service, learner_batch):
 每个知识点至少需要 100 名学生、每名学生至少 5 条有序观测后才拟合课程参数；不足时返回 `INSUFFICIENT_MODEL_DATA`，不得套用伪造参数。
 ```
 
-- [ ] **Step 3: 持久化模型版本和学生追踪水位**
+- [x] **Step 3: 持久化模型版本和学生追踪水位**
 
 ```python
 repository.insert_or_get_bkt_model(model)
 repository.insert_or_get_knowledge_trace(trace)
 ```
 
-- [ ] **Step 4: 用合成序列验收**
+- [x] **Step 4: 用合成序列验收**
 
 ```text
 seed=20260812；300 名学生；每人 30 次观测；4 个知识点。
@@ -552,7 +552,7 @@ seed=20260812；300 名学生；每人 30 次观测；4 个知识点。
 服务重启后继续一条新观测，与不中断运行的结果完全一致。
 ```
 
-- [ ] **Step 5: 运行测试并提交**
+- [x] **Step 5: 运行测试并提交**
 
 ```powershell
 python -m pytest tests/unit/test_m5_bkt.py tests/model_validation/test_bkt_recovery.py -q
@@ -581,7 +581,7 @@ Exact signatures and field:
 - `update_state(scoring_result_bundle: ScoringResultBundle, knowledge_bundle: KnowledgeBundle, observation_batch: LearningObservationBatch, learning_model_run: LearningModelRun, previous_learner_state_snapshot: LearnerStateSnapshot | None, previous_class_state_snapshot: ClassStateSnapshot | None, state_policy_path: Path) -> StateUpdateResult`
 - `LearnerStateSnapshot.model_run_id: str | None = None`：兼容旧快照；本次上线后产生的新快照必须填写实际模型运行版本。
 
-- [ ] **Step 1: 写完整链路失败测试**
+- [x] **Step 1: 写完整链路失败测试**
 
 ```python
 paper = m8.generate_paper(task_plan, knowledge_bundle, None, None)
@@ -602,7 +602,7 @@ assert models.status == "completed"
 assert state.learner_state_snapshot.model_run_id == models.run_id
 ```
 
-- [ ] **Step 2: 明确两个模型的业务分工**
+- [x] **Step 2: 明确两个模型的业务分工**
 
 ```text
 DINA：回答“学生目前可能掌握了哪些知识属性”，用于诊断和薄弱点排序。
@@ -610,7 +610,7 @@ BKT：回答“学生随时间学习后当前掌握概率是多少”，作为 C
 两者的模型版本、观测水位和数据量写入状态证据；不做无依据的简单平均。
 ```
 
-- [ ] **Step 3: coordinator 使用真实评分观测，不再构造空批次**
+- [x] **Step 3: coordinator 使用真实评分观测，不再构造空批次**
 
 ```python
 observation_batch = self._m8.build_observation_batch(
@@ -623,7 +623,7 @@ learning_model_run = self._m5.run_learning_models(
 )
 ```
 
-- [ ] **Step 4: 运行链路测试并提交**
+- [x] **Step 4: 运行链路测试并提交**
 
 ```powershell
 python -m pytest tests/integration/test_m8_m5_model_chain.py -q
@@ -652,7 +652,7 @@ Exact signatures:
 - `TwoPLCalibrator.fit(observations: list[LearningObservation], requested_at: datetime) -> CalibrationRunResult`
 - `TwoPLCalibrator.estimate_ability(parameter_set: IRTParameterSet, responses: list[LearningObservation]) -> AbilityEstimate`
 
-- [ ] **Step 1: 增加数值计算依赖并写公式测试**
+- [x] **Step 1: 增加数值计算依赖并写公式测试**
 
 ```toml
 "numpy>=2.0,<3",
@@ -676,7 +676,7 @@ def test_single_response_never_claims_convergence(calibrator, one_observation):
     assert result.status == "failed"
 ```
 
-- [ ] **Step 2: 实现边际最大似然 2PL**
+- [x] **Step 2: 实现边际最大似然 2PL**
 
 ```text
 使用 21 点 Gauss-Hermite 求积表示学生能力分布。
@@ -686,7 +686,7 @@ discrimination 范围 [0.20, 3.00]；difficulty 范围 [-4.00, 4.00]。
 对数似然差 < 1e-6 且参数最大变化 < 1e-4 才算收敛，最多 200 轮。
 ```
 
-- [ ] **Step 3: 设置真实的数据充分性门槛**
+- [x] **Step 3: 设置真实的数据充分性门槛**
 
 ```text
 至少 200 名不同学生。
@@ -695,7 +695,7 @@ discrimination 范围 [0.20, 3.00]；difficulty 范围 [-4.00, 4.00]。
 不足时返回明确的 INSUFFICIENT_CALIBRATION_DATA，不生成参数、不声称收敛。
 ```
 
-- [ ] **Step 4: 用合成数据验证参数恢复**
+- [x] **Step 4: 用合成数据验证参数恢复**
 
 ```text
 seed=20260812；1000 名学生；30 道题。
@@ -704,7 +704,7 @@ seed=20260812；1000 名学生；30 道题。
 所有收敛结果必须包含 log_likelihood、AIC、BIC、iteration_count。
 ```
 
-- [ ] **Step 5: 运行测试并提交**
+- [x] **Step 5: 运行测试并提交**
 
 ```powershell
 python -m pytest tests/unit/test_m8_irt_2pl.py tests/model_validation/test_irt_2pl_recovery.py -q

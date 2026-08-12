@@ -70,7 +70,7 @@ def test_internal_provenance_references_public_service_boundaries() -> None:
     assert sorted(set(missing_parameters)) == []
 
 
-def test_m6_public_signature_and_the_84_schema_surface_are_frozen() -> None:
+def test_m6_public_signature_and_the_90_schema_surface_are_frozen() -> None:
     """Catch private policy learning leaking into the public contract surface."""
 
     parameters = signature(
@@ -84,4 +84,15 @@ def test_m6_public_signature_and_the_84_schema_surface_are_frozen() -> None:
         "state_update_result",
         "previous_session_state_snapshot",
     )
-    assert len(tuple(SCHEMA_PATH.glob("*.schema.json"))) == 84
+    schema_names = {
+        path.name for path in SCHEMA_PATH.glob("*.schema.json")
+    }
+    assert len(schema_names) == 90
+    assert {
+        "BktConceptParameters.schema.json",
+        "BktModelArtifact.schema.json",
+        "ConceptResponse.schema.json",
+        "ConceptResponseSequence.schema.json",
+        "DinaItemParameters.schema.json",
+        "DinaModelArtifact.schema.json",
+    } <= schema_names

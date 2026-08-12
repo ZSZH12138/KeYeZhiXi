@@ -158,6 +158,64 @@ def test_postgres_m5_m9_repositories_round_trip_real_contracts(
     }
 
 
+def test_postgres_m5_model_runtime_round_trip(
+    postgres_pool: PostgresPool,
+) -> None:
+    """Exercise DINA/BKT evidence, models, and trace on real PostgreSQL."""
+
+    from course_insight.modules.m5_learner_class_state.bkt import BktEngine
+    from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+    from tests.unit.test_m5_bkt import _sequence
+    from tests.unit.test_m5_dina import _q_matrix, _training_cohort
+
+    repository = PostgresM5Repository(postgres_pool)
+    cohort = _training_cohort()
+    for batch in cohort:
+        assert repository.insert_or_get_learning_observation_batch(batch) == batch
+    dina_model = DinaEngine(
+        min_students=4,
+        min_responses_per_item=4,
+        max_iterations=30,
+    ).fit(cohort, _q_matrix())
+
+    assert repository.insert_or_get_dina_model(dina_model) == dina_model
+    assert repository.get_latest_dina_model(
+        course_id=dina_model.course_id,
+        class_id=dina_model.class_id,
+    ) == dina_model
+    recovered_observations = repository.list_learning_observations(
+        course_id="course_1",
+        class_id="class_1",
+    )
+    expected_observations = sorted(
+        (item for batch in cohort for item in batch.observations),
+        key=lambda item: (item.occurred_at, item.attempt_id, item.observation_id),
+    )
+    assert recovered_observations == expected_observations
+
+    sequences = [
+        _sequence("learner_1", [True, True, False, True, True]),
+        _sequence("learner_2", [False, True, True, True, False]),
+        _sequence("learner_3", [False, False, True, True, True]),
+        _sequence("learner_4", [True, False, False, True, False]),
+    ]
+    bkt_engine = BktEngine(
+        min_students=4,
+        min_observations_per_student=5,
+        max_iterations=50,
+    )
+    bkt_model = bkt_engine.fit(sequences)
+    trace = bkt_engine.update(bkt_model, sequences[0])
+
+    assert repository.insert_or_get_bkt_model(bkt_model) == bkt_model
+    assert repository.get_latest_bkt_model(
+        course_id=bkt_model.course_id,
+        class_id=bkt_model.class_id,
+    ) == bkt_model
+    assert repository.insert_or_get_knowledge_trace(trace) == trace
+    assert repository.get_knowledge_trace(trace_id=trace.trace_id) == trace
+
+
 def test_postgres_feedback_insert_or_get_is_concurrency_safe(
     postgres_pool: PostgresPool,
 ) -> None:
