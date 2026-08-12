@@ -36,7 +36,7 @@ from course_insight.contracts.learning_models import (
 from course_insight.contracts.platform import AssessmentSubmission
 from course_insight.contracts.state import DiagnosisResult, LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
-from course_insight.modules.m8_assessment_scoring.paper_generator import FIXED_TIME
+from course_insight.modules.m8_assessment_scoring.clock import Clock, SystemUTCClock
 from course_insight.modules.m8_assessment_scoring.observation_builder import (
     build_observation_batch as build_authoritative_observation_batch,
 )
@@ -55,10 +55,12 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
         repository: M8Repository,
         rule_scorer: Any,
         parameter_item_generator: Any,
+        clock: Clock | None = None,
     ) -> None:
         self._repository = repository
         self._rule_scorer = rule_scorer
         self._parameter_item_generator = parameter_item_generator
+        self._clock = SystemUTCClock() if clock is None else clock
         self._paper_event_context: dict[str, tuple[str, str]] = {}
 
     def generate_paper(
@@ -218,6 +220,7 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
 
         if assessment_paper.immutable_checksum != assessment_paper.freeze():
             self._raise_answer_error("assessment paper checksum is invalid")
+        prepared_at = self._clock.now()
         record_getter = getattr(self._repository, "get_paper_record", None)
         frozen_record = (
             record_getter(assessment_paper.paper_id)
@@ -316,7 +319,7 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
                     student_answer=answer,
                     rubric=rubric,
                     evidence_query_id=evidence_query_id,
-                    created_at=FIXED_TIME,
+                    created_at=prepared_at,
                 )
             )
             evidence_queries.append(
@@ -339,7 +342,7 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
             rubric_scoring_tasks=rubric_tasks,
             evidence_queries=evidence_queries,
             raw_answer_checksum=hashlib.sha256(raw_bytes).hexdigest(),
-            prepared_at=FIXED_TIME,
+            prepared_at=prepared_at,
         )
 
     def finalize_scoring(
@@ -356,6 +359,7 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
         错误码：ANSWER_FORMAT_INVALID。
         """
 
+        finalized_at = self._clock.now()
         task_ids = scoring_preparation_result.pending_task_ids()
         result_ids = [result.scoring_task_id for result in rubric_scoring_results]
         if (
@@ -461,7 +465,7 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
                     record.needs_review() for record in audits
                 ),
             },
-            occurred_at=FIXED_TIME,
+            occurred_at=finalized_at,
         )
         bundle = ScoringResultBundle(
             attempt_id=scoring_preparation_result.attempt_id,
@@ -476,11 +480,11 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
                 based_on_attempt_id=scoring_preparation_result.attempt_id,
                 learner_id=scoring_preparation_result.learner_id,
                 targets=remediation_targets,
-                created_at=FIXED_TIME,
+                created_at=finalized_at,
             ),
             total_score=total_score,
             max_score=max_score,
-            finalized_at=FIXED_TIME,
+            finalized_at=finalized_at,
         )
         return self._persist_scoring_result(bundle)
 

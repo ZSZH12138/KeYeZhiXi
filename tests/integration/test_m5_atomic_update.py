@@ -94,6 +94,7 @@ def test_v14_creates_all_m5_m8_model_runtime_tables(tmp_path) -> None:
     repository = SQLiteM5Repository(database_path)
     repository.initialize()
     expected = {
+        "m8_frozen_assessment_records",
         "m5_learning_observations",
         "m5_dina_models",
         "m5_bkt_models",
@@ -111,6 +112,14 @@ def test_v14_creates_all_m5_m8_model_runtime_tables(tmp_path) -> None:
                 "SELECT name FROM sqlite_master WHERE type = 'table'"
             )
         }
+        for table_name in expected:
+            columns = {
+                row[1]
+                for row in connection.execute(
+                    f"PRAGMA table_info({table_name})"
+                )
+            }
+            assert {"payload", "payload_checksum", "schema_version"} <= columns
 
     assert SCHEMA_VERSION == 14
     assert expected <= actual

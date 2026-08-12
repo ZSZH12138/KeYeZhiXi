@@ -21,6 +21,9 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.modules.m8_assessment_scoring.paper_record import (
+    FrozenAssessmentRecord,
+)
 
 
 _OPERATION_ERROR = "PostgreSQL repository operation failed"
@@ -59,6 +62,12 @@ payload,
 payload_checksum,
 schema_version
 """
+_PAPER_RECORD_COLUMNS = """
+paper_id,
+payload,
+payload_checksum,
+schema_version
+"""
 
 
 class PostgresM8Repository:
@@ -84,57 +93,84 @@ class PostgresM8Repository:
         try:
             with self._pool.connection() as connection:
                 with connection.transaction():
-                    connection.execute(
-                        """
-                        INSERT INTO m8_assessment_papers(
-                            paper_id,
-                            task_id,
-                            course_id,
-                            class_id,
-                            learner_id,
-                            payload,
-                            payload_checksum,
-                            schema_version
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        (
-                            candidate.paper_id,
-                            candidate.task_id,
-                            course_id,
-                            class_id,
-                            candidate.learner_id,
-                            Jsonb(candidate.to_dict()),
-                            candidate.content_checksum(),
-                            candidate.schema_version,
-                        ),
+                    return _insert_or_validate_paper(
+                        connection,
+                        candidate,
+                        course_id=course_id,
+                        class_id=class_id,
                     )
-                    row = connection.execute(
-                        f"""
-                        SELECT {_PAPER_COLUMNS}
-                        FROM m8_assessment_papers
-                        WHERE paper_id = %s OR task_id = %s
-                        ORDER BY
-                            CASE WHEN paper_id = %s THEN 0 ELSE 1 END
-                        LIMIT 1
-                        """,
-                        (
-                            candidate.paper_id,
-                            candidate.task_id,
-                            candidate.paper_id,
-                        ),
-                    ).fetchone()
-                    stored = _paper_from_row(row)
-                    stored_scope = (
-                        _required_text(row, "course_id"),
-                        _required_text(row, "class_id"),
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def insert_or_get_paper_record(
+        self,
+        record: FrozenAssessmentRecord,
+    ) -> FrozenAssessmentRecord:
+        """Persist one append-only paper, scope, and rubric record."""
+
+        candidate = _isolated_contract(record, FrozenAssessmentRecord)
+        try:
+            with self._pool.connection() as connection:
+                with connection.transaction():
+                    authoritative_paper = _insert_or_validate_paper(
+                        connection,
+                        candidate.paper,
+                        course_id=candidate.course_id,
+                        class_id=candidate.class_id,
                     )
-                    if (
-                        stored != candidate
-                        or stored_scope != (course_id, class_id)
-                    ):
+                    if authoritative_paper != candidate.paper:
                         raise PostgresOperationError(_CONFLICT_ERROR)
-                    return stored
+                    return _insert_or_validate_paper_record(
+                        connection,
+                        candidate,
+                    )
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def get_paper_record(
+        self,
+        paper_id: str,
+    ) -> FrozenAssessmentRecord | None:
+        """Load the exact frozen evidence retained for one paper."""
+
+        try:
+            with self._pool.connection() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT {_PAPER_RECORD_COLUMNS}
+                    FROM m8_frozen_assessment_records
+                    WHERE paper_id = %s
+                    """,
+                    (paper_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                record = _paper_record_from_row(row)
+                if record.paper.paper_id != paper_id:
+                    raise PostgresOperationError(_INTEGRITY_ERROR)
+                paper_row = connection.execute(
+                    f"""
+                    SELECT {_PAPER_COLUMNS}
+                    FROM m8_assessment_papers
+                    WHERE paper_id = %s
+                    """,
+                    (paper_id,),
+                ).fetchone()
+                if (
+                    paper_row is None
+                    or _paper_from_row(paper_row) != record.paper
+                    or (
+                        _required_text(paper_row, "course_id"),
+                        _required_text(paper_row, "class_id"),
+                    )
+                    != (record.course_id, record.class_id)
+                ):
+                    raise PostgresOperationError(_INTEGRITY_ERROR)
+                return record
         except PostgresError:
             raise
         except psycopg.Error:
@@ -374,6 +410,93 @@ class PostgresM8Repository:
             raise PostgresOperationError(_OPERATION_ERROR) from None
 
 
+def _insert_or_validate_paper(
+    connection: Any,
+    candidate: AssessmentPaper,
+    *,
+    course_id: str,
+    class_id: str,
+) -> AssessmentPaper:
+    connection.execute(
+        """
+        INSERT INTO m8_assessment_papers(
+            paper_id,
+            task_id,
+            course_id,
+            class_id,
+            learner_id,
+            payload,
+            payload_checksum,
+            schema_version
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT DO NOTHING
+        """,
+        (
+            candidate.paper_id,
+            candidate.task_id,
+            course_id,
+            class_id,
+            candidate.learner_id,
+            Jsonb(candidate.to_dict()),
+            candidate.content_checksum(),
+            candidate.schema_version,
+        ),
+    )
+    row = connection.execute(
+        f"""
+        SELECT {_PAPER_COLUMNS}
+        FROM m8_assessment_papers
+        WHERE paper_id = %s OR task_id = %s
+        ORDER BY CASE WHEN paper_id = %s THEN 0 ELSE 1 END
+        LIMIT 1
+        """,
+        (candidate.paper_id, candidate.task_id, candidate.paper_id),
+    ).fetchone()
+    stored = _paper_from_row(row)
+    stored_scope = (
+        _required_text(row, "course_id"),
+        _required_text(row, "class_id"),
+    )
+    if stored != candidate or stored_scope != (course_id, class_id):
+        raise PostgresOperationError(_CONFLICT_ERROR)
+    return stored
+
+
+def _insert_or_validate_paper_record(
+    connection: Any,
+    candidate: FrozenAssessmentRecord,
+) -> FrozenAssessmentRecord:
+    connection.execute(
+        """
+        INSERT INTO m8_frozen_assessment_records(
+            paper_id,
+            payload,
+            payload_checksum,
+            schema_version
+        ) VALUES (%s, %s, %s, %s)
+        ON CONFLICT (paper_id) DO NOTHING
+        """,
+        (
+            candidate.paper.paper_id,
+            Jsonb(candidate.to_dict()),
+            candidate.content_checksum(),
+            candidate.schema_version,
+        ),
+    )
+    row = connection.execute(
+        f"""
+        SELECT {_PAPER_RECORD_COLUMNS}
+        FROM m8_frozen_assessment_records
+        WHERE paper_id = %s
+        """,
+        (candidate.paper.paper_id,),
+    ).fetchone()
+    stored = _paper_record_from_row(row)
+    if stored != candidate:
+        raise PostgresOperationError(_CONFLICT_ERROR)
+    return stored
+
+
 def _insert_or_validate_audit(
     connection: Any,
     record: ScoreAuditRecord,
@@ -444,6 +567,24 @@ def _paper_from_row(row: Mapping[str, Any] | None) -> AssessmentPaper:
         _required_text(row, "course_id")
         _required_text(row, "class_id")
         return paper
+    except PostgresError:
+        raise
+    except Exception:
+        raise PostgresOperationError(_INTEGRITY_ERROR) from None
+
+
+def _paper_record_from_row(
+    row: Mapping[str, Any] | None,
+) -> FrozenAssessmentRecord:
+    record = _contract_from_row(
+        row,
+        FrozenAssessmentRecord,
+        label="paper record",
+    )
+    try:
+        if record.paper.paper_id != _required_text(row, "paper_id"):
+            raise ValueError
+        return record
     except PostgresError:
         raise
     except Exception:

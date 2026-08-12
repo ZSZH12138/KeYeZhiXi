@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hmac
 import sqlite3
 from datetime import timezone
 from pathlib import Path
@@ -14,6 +15,9 @@ from course_insight.contracts.assessment import (
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import migrate
+from course_insight.modules.m8_assessment_scoring.paper_record import (
+    FrozenAssessmentRecord,
+)
 
 
 class SQLiteM8Repository:
@@ -38,33 +42,72 @@ class SQLiteM8Repository:
     ) -> AssessmentPaper:
         if not course_id.strip() or not class_id.strip():
             raise ValueError("M8 paper execution scope must not be blank")
-        payload = dumps_json(paper.to_dict())
         connection = connect_sqlite(self._database_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
-            connection.execute(
-                """
-                INSERT INTO m8_assessment_papers(
-                    paper_id,
-                    task_id,
-                    course_id,
-                    class_id,
-                    learner_id,
-                    payload
-                )
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT DO NOTHING
-                """,
-                (
-                    paper.paper_id,
-                    paper.task_id,
-                    course_id,
-                    class_id,
-                    paper.learner_id,
-                    payload,
-                ),
+            stored = self._insert_or_validate_paper(
+                connection,
+                paper,
+                course_id=course_id,
+                class_id=class_id,
             )
+            connection.execute("COMMIT")
+            return stored.model_copy(deep=True)
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def insert_or_get_paper_record(
+        self,
+        record: FrozenAssessmentRecord,
+    ) -> FrozenAssessmentRecord:
+        """Persist one append-only paper, scope, and rubric record."""
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            authoritative_paper = self._insert_or_validate_paper(
+                connection,
+                record.paper,
+                course_id=record.course_id,
+                class_id=record.class_id,
+            )
+            if authoritative_paper != record.paper:
+                raise RuntimeError("M8 paper record conflict")
+            stored = self._insert_or_validate_paper_record(
+                connection,
+                record,
+            )
+            connection.execute("COMMIT")
+            return stored.model_copy(deep=True)
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def get_paper_record(
+        self,
+        paper_id: str,
+    ) -> FrozenAssessmentRecord | None:
+        connection = connect_sqlite(self._database_path)
+        try:
             row = connection.execute(
+                """
+                SELECT paper_id, payload, payload_checksum, schema_version
+                FROM m8_frozen_assessment_records
+                WHERE paper_id = ?
+                """,
+                (paper_id,),
+            ).fetchone()
+            if row is None:
+                return None
+            record = self._paper_record_from_row(row)
+            paper_row = connection.execute(
                 """
                 SELECT
                     paper_id,
@@ -74,22 +117,18 @@ class SQLiteM8Repository:
                     learner_id,
                     payload
                 FROM m8_assessment_papers
-                WHERE paper_id = ? OR task_id = ?
-                ORDER BY CASE WHEN paper_id = ? THEN 0 ELSE 1 END
-                LIMIT 1
+                WHERE paper_id = ?
                 """,
-                (paper.paper_id, paper.task_id, paper.paper_id),
+                (paper_id,),
             ).fetchone()
-            stored = self._paper_from_row(row)
-            stored_scope = (str(row["course_id"]), str(row["class_id"]))
-            if stored != paper or stored_scope != (course_id, class_id):
-                raise RuntimeError("M8 paper identity or scope conflict")
-            connection.execute("COMMIT")
-            return stored.model_copy(deep=True)
-        except Exception:
-            if connection.in_transaction:
-                connection.execute("ROLLBACK")
-            raise
+            if (
+                paper_row is None
+                or record.paper != self._paper_from_row(paper_row)
+                or (record.course_id, record.class_id)
+                != (str(paper_row["course_id"]), str(paper_row["class_id"]))
+            ):
+                raise RuntimeError("M8 frozen paper record is inconsistent")
+            return record.model_copy(deep=True)
         finally:
             connection.close()
 
@@ -306,6 +345,94 @@ class SQLiteM8Repository:
                 return bundle.model_copy(deep=True)
         return None
 
+    @staticmethod
+    def _insert_or_validate_paper(
+        connection: sqlite3.Connection,
+        paper: AssessmentPaper,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> AssessmentPaper:
+        connection.execute(
+            """
+            INSERT INTO m8_assessment_papers(
+                paper_id,
+                task_id,
+                course_id,
+                class_id,
+                learner_id,
+                payload
+            )
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                paper.paper_id,
+                paper.task_id,
+                course_id,
+                class_id,
+                paper.learner_id,
+                dumps_json(paper.to_dict()),
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT
+                paper_id,
+                task_id,
+                course_id,
+                class_id,
+                learner_id,
+                payload
+            FROM m8_assessment_papers
+            WHERE paper_id = ? OR task_id = ?
+            ORDER BY CASE WHEN paper_id = ? THEN 0 ELSE 1 END
+            LIMIT 1
+            """,
+            (paper.paper_id, paper.task_id, paper.paper_id),
+        ).fetchone()
+        stored = SQLiteM8Repository._paper_from_row(row)
+        stored_scope = (str(row["course_id"]), str(row["class_id"]))
+        if stored != paper or stored_scope != (course_id, class_id):
+            raise RuntimeError("M8 paper identity or scope conflict")
+        return stored
+
+    @staticmethod
+    def _insert_or_validate_paper_record(
+        connection: sqlite3.Connection,
+        record: FrozenAssessmentRecord,
+    ) -> FrozenAssessmentRecord:
+        connection.execute(
+            """
+            INSERT INTO m8_frozen_assessment_records(
+                paper_id,
+                payload,
+                payload_checksum,
+                schema_version
+            )
+            VALUES (?, ?, ?, ?)
+            ON CONFLICT(paper_id) DO NOTHING
+            """,
+            (
+                record.paper.paper_id,
+                dumps_json(record.to_dict()),
+                record.content_checksum(),
+                record.schema_version,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT paper_id, payload, payload_checksum, schema_version
+            FROM m8_frozen_assessment_records
+            WHERE paper_id = ?
+            """,
+            (record.paper.paper_id,),
+        ).fetchone()
+        stored = SQLiteM8Repository._paper_record_from_row(row)
+        if stored != record:
+            raise RuntimeError("M8 paper record conflict")
+        return stored
+
     def _scoring_history(
         self,
         attempt_id: str,
@@ -396,6 +523,24 @@ class SQLiteM8Repository:
         ):
             raise RuntimeError("M8 paper row identity mismatch")
         return paper
+
+    @staticmethod
+    def _paper_record_from_row(
+        row: sqlite3.Row | None,
+    ) -> FrozenAssessmentRecord:
+        if row is None:
+            raise RuntimeError("M8 paper-record insert produced no row")
+        record = FrozenAssessmentRecord.model_validate_json(str(row["payload"]))
+        if record.paper.paper_id != str(row["paper_id"]):
+            raise RuntimeError("M8 paper-record row identity mismatch")
+        if not hmac.compare_digest(
+            record.content_checksum(),
+            str(row["payload_checksum"]),
+        ):
+            raise RuntimeError("M8 paper-record checksum mismatch")
+        if record.schema_version != str(row["schema_version"]):
+            raise RuntimeError("M8 paper-record schema version mismatch")
+        return record
 
     @staticmethod
     def _audit_from_row(row: sqlite3.Row | None) -> ScoreAuditRecord:

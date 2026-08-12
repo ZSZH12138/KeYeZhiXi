@@ -28,10 +28,12 @@ from course_insight.application.assessment_results import (
     require_results,
     validate_decision,
 )
+from course_insight.contracts.assessment import ScoringResultBundle
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef
 from course_insight.contracts.knowledge import KnowledgeBundle
+from course_insight.contracts.learning_models import LearningObservationBatch
 from course_insight.contracts.platform import (
     AssessmentSubmission,
     TeacherReviewSubmission,
@@ -315,6 +317,9 @@ class AssessmentWorkflow:
                         state_policy_path=state_policy_path,
                         expected_policy_checksum=(
                             expected_state_policy_checksum
+                        ),
+                        learning_observation_batch=(
+                            self._build_observation_batch(scoring)
                         ),
                     ),
                 )
@@ -621,6 +626,9 @@ class AssessmentWorkflow:
                         expected_policy_checksum=(
                             expected_state_policy_checksum
                         ),
+                        learning_observation_batch=(
+                            self._build_observation_batch(reviewed)
+                        ),
                     ),
                 )
             if run.checkpoint == "state_inputs_frozen":
@@ -721,6 +729,15 @@ class AssessmentWorkflow:
                 **dependencies.as_run_fields(),
             )
         )
+
+    def _build_observation_batch(
+        self,
+        scoring: ScoringResultBundle,
+    ) -> LearningObservationBatch | None:
+        builder = getattr(self._m8, "build_observation_batch", None)
+        if not callable(builder):
+            return None
+        return builder(scoring.paper_id, scoring)
 
     def _claim(self, run: AssessmentRun, worker_id: str) -> AssessmentRun:
         return self._recovery.claim(

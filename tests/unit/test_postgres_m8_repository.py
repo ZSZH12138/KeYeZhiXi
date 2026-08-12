@@ -12,6 +12,9 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresConnectionError,
     PostgresOperationError,
 )
+from course_insight.modules.m8_assessment_scoring.paper_record import (
+    FrozenAssessmentRecord,
+)
 from tests.integration.test_web_workflow_persistence import (
     NOW,
     _paper,
@@ -50,6 +53,13 @@ def _paper_row(paper: Any) -> dict[str, Any]:
     }
 
 
+def _paper_record_row(record: FrozenAssessmentRecord) -> dict[str, Any]:
+    return {
+        "paper_id": record.paper.paper_id,
+        **_contract_columns(record),
+    }
+
+
 def _audit_row(record: Any) -> dict[str, Any]:
     return {
         "audit_id": record.audit_id,
@@ -85,7 +95,11 @@ def _scoring_row(bundle: Any) -> dict[str, Any]:
     }
 
 
-def _responder(paper: Any, bundles: list[Any]):
+def _responder(
+    paper: Any,
+    bundles: list[Any],
+    record: FrozenAssessmentRecord | None = None,
+):
     result_by_key = {_result_key(bundle): bundle for bundle in bundles}
     audit_by_key = {
         (record.audit_id, record.audit_version): record
@@ -95,13 +109,17 @@ def _responder(paper: Any, bundles: list[Any]):
 
     def respond(statement: str, parameters: tuple[Any, ...]):
         normalized = " ".join(statement.lower().split())
+        if "from m8_frozen_assessment_records" in normalized:
+            return None if record is None else _paper_record_row(record)
         if "from m8_assessment_papers" in normalized:
             if normalized.startswith("select course_id, class_id"):
                 return {"course_id": "course_1", "class_id": "class_1"}
             return _paper_row(paper)
         if "from m8_score_audits" in normalized:
-            record = audit_by_key[(str(parameters[0]), int(parameters[1]))]
-            return _audit_row(record)
+            audit_record = audit_by_key[
+                (str(parameters[0]), int(parameters[1]))
+            ]
+            return _audit_row(audit_record)
         if "from m8_scoring_results" in normalized:
             if "and result_key = %s" in normalized:
                 return _scoring_row(result_by_key[str(parameters[1])])
@@ -123,6 +141,12 @@ def test_postgres_m8_repository_module_exists() -> None:
 )
 def test_postgres_m8_persists_scope_audit_vectors_and_history() -> None:
     paper = _paper()
+    paper_record = FrozenAssessmentRecord(
+        paper=paper,
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[],
+    )
     first = _vector_scoring_bundle(
         first_version=4,
         second_version=3,
@@ -133,7 +157,9 @@ def test_postgres_m8_persists_scope_audit_vectors_and_history() -> None:
         second_version=1,
         finalized_at=NOW + timedelta(hours=2),
     )
-    connection = FakeConnection(_responder(paper, [first, second]))
+    connection = FakeConnection(
+        _responder(paper, [first, second], paper_record)
+    )
     repository = PostgresM8Repository(FakePool(connection))
 
     assert repository.insert_or_get_paper(
@@ -147,6 +173,8 @@ def test_postgres_m8_persists_scope_audit_vectors_and_history() -> None:
         "course_1",
         "class_1",
     )
+    assert repository.insert_or_get_paper_record(paper_record) == paper_record
+    assert repository.get_paper_record("paper_1") == paper_record
 
     audit = first.get_audit_record("audit_a")
     repository.save_score_audit(audit)
@@ -188,6 +216,27 @@ def test_postgres_m8_persists_scope_audit_vectors_and_history() -> None:
     assert first.finalized_at in insert_parameters
     assert first.content_checksum() in insert_parameters
     assert first.schema_version in insert_parameters
+
+
+@pytest.mark.skipif(
+    PostgresM8Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m8_saves_paper_and_frozen_record_atomically() -> None:
+    paper = _paper()
+    record = FrozenAssessmentRecord(
+        paper=paper,
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[],
+    )
+    connection = FakeConnection(_responder(paper, [], record))
+    pool = FakePool(connection)
+    repository = PostgresM8Repository(pool)
+
+    assert repository.insert_or_get_paper_record(record) == record
+    assert pool.connection_entries == 1
+    assert connection.transaction_entries == 1
 
 
 @pytest.mark.skipif(

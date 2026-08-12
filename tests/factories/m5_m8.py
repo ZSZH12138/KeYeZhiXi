@@ -26,6 +26,7 @@ from course_insight.contracts.knowledge import (
     RubricCriterion,
 )
 from course_insight.contracts.platform import AssessmentSubmission
+from course_insight.contracts.tasking import TaskPlan
 
 
 UTC_TIME = datetime(2026, 8, 12, 4, 0, tzinfo=timezone.utc)
@@ -233,4 +234,21 @@ def make_submission(paper: AssessmentPaper) -> AssessmentSubmission:
         learner_id=paper.learner_id,
         answers={paper.all_items()[0].item_instance_id: "working"},
         submitted_at=UTC_TIME,
+    )
+
+
+def make_task_plan(*, learner_id: str = "learner_1") -> TaskPlan:
+    return TaskPlan(
+        task_id="task_1",
+        task_type="practice",
+        course_id="course_1",
+        class_id="class_1",
+        learner_id=learner_id,
+        session_id="session_1",
+        blueprint_id="blueprint_1",
+        knowledge_bundle_id="kb_1",
+        course_package_id="cp_1",
+        workflow=["M8", "M2", "M7", "M5", "M6", "M9"],
+        next_module="M8",
+        created_at=UTC_TIME,
     )

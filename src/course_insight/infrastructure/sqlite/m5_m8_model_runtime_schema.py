@@ -19,6 +19,11 @@ CREATE TABLE IF NOT EXISTS {table_name} (
             ELSE 0
         END
     ),
+    payload_checksum TEXT NOT NULL CHECK (
+        length(payload_checksum) = 64
+        AND payload_checksum NOT GLOB '*[^0-9a-f]*'
+    ),
+    schema_version TEXT NOT NULL CHECK (length(schema_version) > 0),
     PRIMARY KEY ({primary_key}){constraint_sql}
 )
 """

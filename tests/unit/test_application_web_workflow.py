@@ -18,6 +18,7 @@ from course_insight.contracts.platform import (
     TeacherReviewSubmission,
 )
 from course_insight.contracts.errors import DomainError
+from course_insight.contracts.learning_models import LearningObservationBatch
 from course_insight.infrastructure.sqlite.m0_repository import SQLiteM0Repository
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import (
@@ -509,6 +510,8 @@ class _WorkflowStore:
         self.policy_events: list[str] = []
         self.prepare_results: list[PolicyExecutionRef] = []
         self.tutoring_calls = 0
+        self.observation_batches_built: list[LearningObservationBatch] = []
+        self.observation_batches_received: list[LearningObservationBatch] = []
 
     def trip(self, point: str) -> None:
         if self.fail_after == point and not self.failed_once:
@@ -560,6 +563,20 @@ class _M8:
 
     def prepare_scoring(self, **_: Any):
         return self.store.preparation
+
+    def build_observation_batch(self, paper_id: str, bundle):
+        latest_version = max(
+            record.audit_version for record in bundle.score_audit_records
+        )
+        batch = LearningObservationBatch(
+            batch_id=f"observations_{bundle.attempt_id}_v{latest_version}",
+            learner_id=bundle.learner_id,
+            observations=[],
+            watermark=f"{paper_id}:v{latest_version}",
+            created_at=bundle.finalized_at,
+        )
+        self.store.observation_batches_built.append(batch)
+        return batch.model_copy(deep=True)
 
     def finalize_scoring(self, **_: Any):
         self.store.scoring_calls += 1
@@ -671,7 +688,12 @@ class _M5:
                 return snapshot.model_copy(deep=True)
         return None
 
-    def update_state(self, scoring_result_bundle, **_: Any):
+    def update_state(self, scoring_result_bundle, **kwargs: Any):
+        observation_batch = kwargs.get("learning_observation_batch")
+        if observation_batch is not None:
+            self.store.observation_batches_received.append(
+                observation_batch.model_copy(deep=True)
+            )
         latest_version = max(
             record.audit_version
             for record in scoring_result_bundle.score_audit_records
@@ -1143,6 +1165,10 @@ def test_split_assessment_use_cases_reload_and_review(tmp_path: Path) -> None:
         "feedback",
         "analytics",
     } <= set(submitted)
+    assert [
+        batch.batch_id for batch in store.observation_batches_built
+    ] == ["observations_attempt_1_v1"]
+    assert store.observation_batches_received == store.observation_batches_built
     with pytest.raises(DomainError) as submitted_pending_error:
         coordinator.get_pending_assessment(
             paper_id="paper_1",
@@ -1200,6 +1226,10 @@ def test_split_assessment_use_cases_reload_and_review(tmp_path: Path) -> None:
         "recomputed_state_result",
         "refreshed_analytics",
     }
+    assert [
+        batch.batch_id for batch in store.observation_batches_built
+    ] == ["observations_attempt_1_v1", "observations_attempt_1_v2"]
+    assert store.observation_batches_received == store.observation_batches_built
     refreshed_context = restarted.get_teacher_review_context(
         paper_id="paper_1",
         course_id="course_1",

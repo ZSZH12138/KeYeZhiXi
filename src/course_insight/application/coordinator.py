@@ -285,12 +285,14 @@ class AppCoordinator:
             rubric_scoring_results=[rubric_result],
         )
         self._m0.append_learning_events(events=scoring.learning_events)
+        observation_batch = self._build_observation_batch(scoring)
         state = self._m5.update_state(
             scoring_result_bundle=scoring,
             knowledge_bundle=knowledge_bundle,
             previous_learner_state_snapshot=None,
             previous_class_state_snapshot=None,
             state_policy_path=state_policy_path,
+            learning_observation_batch=observation_batch,
         )
         tutoring = self._m6.decide_next_action(
             task_plan=task_plan,
@@ -346,12 +348,14 @@ class AppCoordinator:
             teacher_review_decision=decision,
         )
         self._m0.append_learning_events(events=reviewed.learning_events)
+        observation_batch = self._build_observation_batch(reviewed)
         recomputed = self._m5.update_state(
             scoring_result_bundle=reviewed,
             knowledge_bundle=knowledge_bundle,
             previous_learner_state_snapshot=state_update_result.learner_state_snapshot,
             previous_class_state_snapshot=state_update_result.class_state_snapshot,
             state_policy_path=state_policy_path,
+            learning_observation_batch=observation_batch,
         )
         refreshed = self._m9.build_teacher_analytics(
             knowledge_bundle=knowledge_bundle,
@@ -365,6 +369,15 @@ class AppCoordinator:
             "recomputed_state_result": recomputed,
             "refreshed_analytics": refreshed,
         }
+
+    def _build_observation_batch(
+        self,
+        scoring: ScoringResultBundle,
+    ) -> LearningObservationBatch | None:
+        builder = getattr(self._m8, "build_observation_batch", None)
+        if not callable(builder):
+            return None
+        return builder(scoring.paper_id, scoring)
 
     def run_intelligence_architecture(
         self,
