@@ -61,9 +61,34 @@ def normalize_learning_observations(
     return governed
 
 
+def select_current_learning_observations(
+    observations: Iterable[LearningObservation],
+) -> list[LearningObservation]:
+    """Retain history while exposing only the latest version of each audit."""
+
+    normalized = normalize_learning_observations(observations)
+    latest_versions = {
+        audit_id: max(
+            observation.source_audit_version
+            for observation in normalized
+            if observation.source_audit_id == audit_id
+        )
+        for audit_id in {
+            observation.source_audit_id for observation in normalized
+        }
+    }
+    return [
+        observation
+        for observation in normalized
+        if observation.source_audit_version
+        == latest_versions[observation.source_audit_id]
+    ]
+
+
 __all__ = [
     "AuditKey",
     "learning_observation_audit_key",
     "learning_observation_evidence_checksum",
     "normalize_learning_observations",
+    "select_current_learning_observations",
 ]

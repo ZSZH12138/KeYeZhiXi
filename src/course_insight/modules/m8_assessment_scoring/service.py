@@ -45,7 +45,10 @@ from course_insight.modules.m8_assessment_scoring.observation_builder import (
 from course_insight.modules.m8_assessment_scoring.paper_record import (
     FrozenAssessmentRecord,
 )
-from course_insight.modules.m8_assessment_scoring.repository import M8Repository
+from course_insight.modules.m8_assessment_scoring.repository import (
+    M8Repository,
+    ReviewVersionConflictError,
+)
 from course_insight.modules.m8_assessment_scoring.recovery import M8HistoricalRecoveryMixin
 from course_insight.modules.m8_assessment_scoring.retry_equivalence import (
     same_frozen_generation,
@@ -572,7 +575,11 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
                 if teacher_review_decision.decision == "reject"
                 else "approved"
             ),
-            review_reason=[],
+            review_reason=(
+                [teacher_review_decision.teacher_comment]
+                if teacher_review_decision.decision == "reject"
+                else []
+            ),
             created_at=teacher_review_decision.reviewed_at,
         )
         reviewed_bundle = ScoringResultBundle(
@@ -621,7 +628,10 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
                 "finalized_at": teacher_review_decision.reviewed_at,
             }
         )
-        return self._persist_scoring_result(finalized)
+        return self._persist_reviewed_scoring_result(
+            finalized,
+            teacher_review_decision,
+        )
 
     def _event_context(self, paper_id: str) -> tuple[str, str]:
         context = self._paper_event_context.get(paper_id)
@@ -679,6 +689,51 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
             for record in bundle.score_audit_records:
                 saver(record.model_copy(deep=True))
         return bundle
+
+    def _persist_reviewed_scoring_result(
+        self,
+        bundle: ScoringResultBundle,
+        decision: TeacherReviewDecision,
+    ) -> ScoringResultBundle:
+        writer = getattr(
+            self._repository,
+            "insert_or_get_reviewed_scoring_result",
+            None,
+        )
+        if not callable(writer):
+            return self._persist_scoring_result(bundle)
+        try:
+            authoritative = writer(
+                bundle.model_copy(deep=True),
+                audit_id=decision.audit_id,
+                expected_audit_version=decision.expected_audit_version,
+                expected_audit_checksum=decision.expected_audit_checksum,
+            )
+        except ReviewVersionConflictError as error:
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m8",
+                message=(
+                    "score audit changed before the teacher decision was applied"
+                ),
+                details={
+                    "audit_id": decision.audit_id,
+                    "expected_audit_version": decision.expected_audit_version,
+                },
+                recoverable=True,
+            ) from error
+        if authoritative != bundle and not same_scoring_result(
+            authoritative,
+            bundle,
+        ):
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m8",
+                message="persisted teacher review differs from the request",
+                details={"audit_id": decision.audit_id},
+                recoverable=True,
+            )
+        return authoritative.model_copy(deep=True)
 
     def calibrate_irt(
         self,

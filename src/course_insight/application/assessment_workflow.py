@@ -586,8 +586,12 @@ class AssessmentWorkflow:
                 self._m0.append_learning_events(reviewed.learning_events)
                 run = self._advance(run, "events_appended")
 
+            review_rejected = (
+                reviewed.get_audit_record(decision.audit_id).review_status
+                == "rejected"
+            )
             state = self._results.exact_state(run)
-            if state is None:
+            if state is None and not review_rejected:
                 state = self._m5.get_state_update_for_audit(
                     run.attempt_id,
                     decision.audit_id,
@@ -604,7 +608,16 @@ class AssessmentWorkflow:
                     learner=previous_state.learner_state_snapshot,
                     class_state=previous_state.class_state_snapshot,
                 )
-            if state is None or review_key not in state.processed_audit_ids:
+            if review_rejected and state is None:
+                state = self._results.exact_state(base_run)
+                require_results(state)
+            if (
+                not review_rejected
+                and (
+                    state is None
+                    or review_key not in state.processed_audit_ids
+                )
+            ):
                 if run.checkpoint != "state_inputs_frozen":
                     missing("review state result is unavailable")
                 previous_learner, previous_class = (

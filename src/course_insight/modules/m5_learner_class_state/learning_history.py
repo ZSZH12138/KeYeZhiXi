@@ -8,7 +8,7 @@ import json
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.learning_models import LearningObservationBatch
 from course_insight.modules.m5_learner_class_state.learning_observation_evidence import (
-    normalize_learning_observations,
+    select_current_learning_observations,
 )
 from course_insight.modules.m5_learner_class_state.repository import M5Repository
 
@@ -38,7 +38,7 @@ def build_complete_history_batch(
             message="persisted learning observations do not match model scope",
             recoverable=True,
         )
-    learner_history = normalize_learning_observations(
+    learner_history = select_current_learning_observations(
         observation.model_copy(deep=True)
         for observation in stored
         if observation.learner_id == current_batch.learner_id

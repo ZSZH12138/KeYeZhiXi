@@ -32,6 +32,10 @@ from course_insight.infrastructure.postgresql.pool import PostgresPool
 from course_insight.modules.m8_assessment_scoring.paper_record import (
     FrozenAssessmentRecord,
 )
+from course_insight.modules.m8_assessment_scoring.repository import (
+    ReviewVersionConflictError,
+    assert_review_transition,
+)
 from course_insight.modules.m8_assessment_scoring.retry_equivalence import (
     same_paper_generation,
     same_score_audit_result,
@@ -547,6 +551,153 @@ class PostgresM8Repository:
                 ).fetchall()
                 return [_scoring_from_row(row) for row in rows]
         except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def insert_or_get_reviewed_scoring_result(
+        self,
+        bundle: ScoringResultBundle,
+        *,
+        audit_id: str,
+        expected_audit_version: int,
+        expected_audit_checksum: str,
+    ) -> ScoringResultBundle:
+        """Lock the review base, compare its checksum, and append one winner."""
+
+        candidate = _isolated_contract(bundle, ScoringResultBundle)
+        candidate.validate_business_rules()
+        result_key = _result_key(candidate)
+        try:
+            with self._pool.connection() as connection:
+                with connection.transaction():
+                    base_row = connection.execute(
+                        f"""
+                        SELECT {_AUDIT_COLUMNS}
+                        FROM m8_score_audits
+                        WHERE audit_id = %s AND audit_version = %s
+                        FOR UPDATE
+                        """,
+                        (audit_id, expected_audit_version),
+                    ).fetchone()
+                    if base_row is None:
+                        raise ReviewVersionConflictError(
+                            "review base audit is unavailable"
+                        )
+                    if (
+                        _audit_from_row(base_row).content_checksum()
+                        != expected_audit_checksum
+                    ):
+                        raise ReviewVersionConflictError(
+                            "review base audit checksum changed"
+                        )
+
+                    existing_row = connection.execute(
+                        f"""
+                        SELECT {_SCORING_COLUMNS}
+                        FROM m8_scoring_results
+                        WHERE attempt_id = %s AND result_key = %s
+                        """,
+                        (candidate.attempt_id, result_key),
+                    ).fetchone()
+                    if existing_row is not None:
+                        stored = _scoring_from_row(existing_row)
+                        if stored != candidate and not same_scoring_result(
+                            stored,
+                            candidate,
+                        ):
+                            raise ReviewVersionConflictError(
+                                "review result vector has a different winner"
+                            )
+                        return stored
+
+                    current_audit_row = connection.execute(
+                        f"""
+                        SELECT {_AUDIT_COLUMNS}
+                        FROM m8_score_audits
+                        WHERE audit_id = %s
+                        ORDER BY audit_version DESC
+                        LIMIT 1
+                        """,
+                        (audit_id,),
+                    ).fetchone()
+                    if current_audit_row is None:
+                        raise ReviewVersionConflictError(
+                            "review base audit is unavailable"
+                        )
+                    current_audit = _audit_from_row(current_audit_row)
+                    if (
+                        current_audit.audit_version
+                        != expected_audit_version
+                        or current_audit.content_checksum()
+                        != expected_audit_checksum
+                    ):
+                        raise ReviewVersionConflictError(
+                            "review base audit version or checksum changed"
+                        )
+
+                    current_row = connection.execute(
+                        f"""
+                        SELECT {_SCORING_COLUMNS}
+                        FROM m8_scoring_results
+                        WHERE attempt_id = %s
+                        ORDER BY finalized_at DESC, result_key DESC
+                        LIMIT 1
+                        FOR UPDATE
+                        """,
+                        (candidate.attempt_id,),
+                    ).fetchone()
+                    if current_row is None:
+                        raise ReviewVersionConflictError(
+                            "review base scoring result is unavailable"
+                        )
+                    assert_review_transition(
+                        _scoring_from_row(current_row),
+                        candidate,
+                        audit_id=audit_id,
+                        expected_audit_version=expected_audit_version,
+                        expected_audit_checksum=expected_audit_checksum,
+                    )
+                    for record in candidate.score_audit_records:
+                        _insert_or_validate_audit(connection, record)
+                    connection.execute(
+                        """
+                        INSERT INTO m8_scoring_results(
+                            attempt_id, result_key, paper_id, learner_id,
+                            finalized_at, payload, payload_checksum,
+                            schema_version
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (attempt_id, result_key) DO NOTHING
+                        """,
+                        (
+                            candidate.attempt_id,
+                            result_key,
+                            candidate.paper_id,
+                            candidate.learner_id,
+                            candidate.finalized_at,
+                            Jsonb(candidate.to_dict()),
+                            candidate.content_checksum(),
+                            candidate.schema_version,
+                        ),
+                    )
+                    stored_row = connection.execute(
+                        f"""
+                        SELECT {_SCORING_COLUMNS}
+                        FROM m8_scoring_results
+                        WHERE attempt_id = %s AND result_key = %s
+                        """,
+                        (candidate.attempt_id, result_key),
+                    ).fetchone()
+                    stored = _scoring_from_row(stored_row)
+                    if stored != candidate and not same_scoring_result(
+                        stored,
+                        candidate,
+                    ):
+                        raise ReviewVersionConflictError(
+                            "persisted review differs from the requested result"
+                        )
+                    return stored
+        except (PostgresError, ReviewVersionConflictError):
             raise
         except psycopg.Error:
             raise PostgresOperationError(_OPERATION_ERROR) from None

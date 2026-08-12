@@ -358,20 +358,34 @@ class AppCoordinator:
             teacher_review_decision=decision,
         )
         self._m0.append_learning_events(events=reviewed.learning_events)
-        observation_batch = self._build_observation_batch(reviewed)
+        rejected = (
+            reviewed.get_audit_record(decision.audit_id).review_status
+            == "rejected"
+        )
+        observation_batch = (
+            None if rejected else self._build_observation_batch(reviewed)
+        )
         learning_model_run = (
             None
             if observation_batch is None
             else self._run_learning_models(observation_batch, knowledge_bundle)
         )
-        recomputed = self._m5.update_state(
-            scoring_result_bundle=reviewed,
-            knowledge_bundle=knowledge_bundle,
-            previous_learner_state_snapshot=state_update_result.learner_state_snapshot,
-            previous_class_state_snapshot=state_update_result.class_state_snapshot,
-            state_policy_path=state_policy_path,
-            learning_observation_batch=observation_batch,
-            learning_model_run=learning_model_run,
+        recomputed = (
+            state_update_result.model_copy(deep=True)
+            if rejected
+            else self._m5.update_state(
+                scoring_result_bundle=reviewed,
+                knowledge_bundle=knowledge_bundle,
+                previous_learner_state_snapshot=(
+                    state_update_result.learner_state_snapshot
+                ),
+                previous_class_state_snapshot=(
+                    state_update_result.class_state_snapshot
+                ),
+                state_policy_path=state_policy_path,
+                learning_observation_batch=observation_batch,
+                learning_model_run=learning_model_run,
+            )
         )
         refreshed = self._m9.build_teacher_analytics(
             knowledge_bundle=knowledge_bundle,

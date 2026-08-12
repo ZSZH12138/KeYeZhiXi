@@ -13,6 +13,9 @@ from course_insight.contracts.analytics import (
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import migrate
+from course_insight.modules.m9_teacher_analytics.repository import (
+    ReviewDecisionConflictError,
+)
 
 
 class SQLiteM9Repository:
@@ -198,7 +201,9 @@ class SQLiteM9Repository:
             ).fetchone()
             stored = self._review_from_row(row)
             if stored != decision:
-                raise RuntimeError("M9 teacher-review identity conflict")
+                raise ReviewDecisionConflictError(
+                    "M9 teacher-review identity conflict"
+                )
             connection.execute("COMMIT")
             return stored.model_copy(deep=True)
         except Exception:

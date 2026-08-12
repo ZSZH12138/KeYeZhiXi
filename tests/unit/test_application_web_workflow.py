@@ -606,18 +606,55 @@ class _M8:
             audit_version=version,
             finalized_at=NOW + timedelta(minutes=version - 1),
         )
+        source_event = generated.learning_events[-1]
+        review_event = source_event.model_copy(
+            update={
+                "event_id": (
+                    f"event_{teacher_review_decision.decision_id}_"
+                    f"audit_v{version}"
+                ),
+                "event_type": "teacher_review_applied",
+                "payload": {
+                    "audit_id": teacher_review_decision.audit_id,
+                    "audit_version": version,
+                    "decision": teacher_review_decision.decision,
+                    "total_score": generated.total_score,
+                },
+                "occurred_at": teacher_review_decision.reviewed_at,
+            }
+        )
         self.store.reviewed = generated.model_copy(
             update={
                 "learner_id": "learner_1",
                 "learning_events": [
                     event.model_copy(update={"learner_id": "learner_1"})
-                    for event in generated.learning_events
+                    for event in [*generated.learning_events, review_event]
                 ],
                 "remediation_plan": generated.remediation_plan.model_copy(
                     update={"learner_id": "learner_1"}
                 ),
             }
         )
+        if teacher_review_decision.decision == "reject":
+            latest = self.store.reviewed.get_audit_record(
+                teacher_review_decision.audit_id
+            )
+            rejected = latest.model_copy(
+                update={
+                    "review_status": "rejected",
+                    "review_reason": [teacher_review_decision.teacher_comment],
+                }
+            )
+            self.store.reviewed = self.store.reviewed.model_copy(
+                update={
+                    "score_audit_records": [
+                        record
+                        for record in self.store.reviewed.score_audit_records
+                        if record.audit_version != latest.audit_version
+                    ]
+                    + [rejected]
+                }
+            )
         self.store.scoring_history.append(self.store.reviewed)
         self.store.trip("review")
         return self.store.reviewed.model_copy(deep=True)
@@ -965,6 +1002,7 @@ class _M9:
             decision_id=raw_review_path.submission_id,
             audit_id=raw_review_path.audit_id,
             expected_audit_version=raw_review_path.expected_audit_version,
+            expected_audit_checksum=raw_review_path.expected_audit_checksum,
             decision=raw_review_path.decision,
             final_total_score=raw_review_path.final_total_score,
             criterion_overrides=raw_review_path.criterion_overrides,
@@ -1203,6 +1241,11 @@ def test_split_assessment_use_cases_reload_and_review(tmp_path: Path) -> None:
         submission_id="decision_1",
         audit_id="audit_attempt_1",
         expected_audit_version=1,
+        expected_audit_checksum=(
+            _scoring_result(audit_id="audit_attempt_1")
+            .get_audit_record("audit_attempt_1")
+            .content_checksum()
+        ),
         reviewer_id="teacher_1",
         decision="confirm",
         final_total_score=0.0,
@@ -1263,6 +1306,9 @@ def test_legacy_review_cycle_passes_frozen_observations_to_m5(
         submission_id="legacy_review_1",
         audit_id="audit_attempt_1",
         expected_audit_version=1,
+        expected_audit_checksum=(
+            current.get_audit_record("audit_attempt_1").content_checksum()
+        ),
         reviewer_id="teacher_1",
         decision="confirm",
         final_total_score=0.0,
@@ -1284,6 +1330,63 @@ def test_legacy_review_cycle_passes_frozen_observations_to_m5(
     assert [
         batch.batch_id for batch in store.observation_batches_received
     ] == ["observations_attempt_1_v2"]
+
+
+def test_restart_safe_rejected_review_preserves_prior_m5_state(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    coordinator = _coordinator(tmp_path, store)
+    knowledge, _, submit_arguments = _start_and_submission(
+        coordinator,
+        tmp_path,
+    )
+    submitted = coordinator.submit_assessment(**submit_arguments)
+    original_state = submitted["state_result"]
+    original_state_count = len(store.state_history)
+    current_audit = submitted["scoring_result"].get_audit_record(
+        "audit_attempt_1"
+    )
+    review = TeacherReviewSubmission(
+        submission_id="rejected_decision_1",
+        audit_id=current_audit.audit_id,
+        expected_audit_version=current_audit.audit_version,
+        expected_audit_checksum=current_audit.content_checksum(),
+        reviewer_id="teacher_1",
+        decision="reject",
+        final_total_score=current_audit.total_score,
+        criterion_overrides=[],
+        teacher_comment="The evidence is invalid and must not affect mastery.",
+        submitted_at=NOW + timedelta(minutes=1),
+    )
+
+    reviewed = coordinator.review_assessment(
+        paper_id="paper_1",
+        review_submission=review,
+        request_id="reject_review_request_1",
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+        course_id="course_1",
+        class_id="class_1",
+    )
+    replayed = _coordinator(tmp_path, store).review_assessment(
+        paper_id="paper_1",
+        review_submission=review.model_copy(deep=True),
+        request_id="reject_review_request_replay",
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+        course_id="course_1",
+        class_id="class_1",
+    )
+
+    assert reviewed["recomputed_state_result"] == original_state
+    assert replayed == reviewed
+    assert len(store.state_history) == original_state_count
+    assert [
+        batch.batch_id for batch in store.observation_batches_built
+    ] == ["observations_attempt_1_v1"]
 
 
 def test_observation_builder_compatibility_fallback_returns_none(
@@ -1512,6 +1615,11 @@ def test_review_recovers_after_authoritative_save(
         submission_id="decision_1",
         audit_id="audit_attempt_1",
         expected_audit_version=1,
+        expected_audit_checksum=(
+            _scoring_result(audit_id="audit_attempt_1")
+            .get_audit_record("audit_attempt_1")
+            .content_checksum()
+        ),
         reviewer_id="teacher_1",
         decision="confirm",
         final_total_score=0.0,
@@ -1736,6 +1844,14 @@ def _review_submission(
         submission_id=decision_id,
         audit_id="audit_attempt_1",
         expected_audit_version=expected_version,
+        expected_audit_checksum=(
+            _scoring_result(
+                audit_id="audit_attempt_1",
+                audit_version=expected_version,
+            )
+            .get_audit_record("audit_attempt_1")
+            .content_checksum()
+        ),
         reviewer_id="teacher_1",
         decision="confirm",
         final_total_score=0.0,

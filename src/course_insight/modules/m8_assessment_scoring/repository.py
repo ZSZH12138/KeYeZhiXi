@@ -24,6 +24,56 @@ from course_insight.modules.m8_assessment_scoring.paper_record import (
 _AUDIT_TABLE = "m8_score_audits"
 
 
+class ReviewVersionConflictError(RuntimeError):
+    """The persisted audit winner no longer matches a review request."""
+
+
+def assert_review_transition(
+    current: ScoringResultBundle,
+    reviewed: ScoringResultBundle,
+    *,
+    audit_id: str,
+    expected_audit_version: int,
+    expected_audit_checksum: str,
+) -> None:
+    """Validate one append-only review against the transaction-time winner."""
+
+    try:
+        current_audit = current.get_audit_record(audit_id)
+        reviewed_audit = reviewed.get_audit_record(audit_id)
+    except Exception as error:
+        raise ReviewVersionConflictError(
+            "review audit is unavailable from the persisted scoring vector"
+        ) from error
+    if (
+        current_audit.audit_version != expected_audit_version
+        or current_audit.content_checksum() != expected_audit_checksum
+        or reviewed_audit.audit_version != expected_audit_version + 1
+    ):
+        raise ReviewVersionConflictError(
+            "review base audit version or checksum changed"
+        )
+    current_history = {
+        (record.audit_id, record.audit_version): record
+        for record in current.score_audit_records
+    }
+    reviewed_history = {
+        (record.audit_id, record.audit_version): record
+        for record in reviewed.score_audit_records
+    }
+    expected_review_key = (audit_id, expected_audit_version + 1)
+    if reviewed_history.keys() != current_history.keys() | {
+        expected_review_key
+    } or any(
+        record.content_checksum()
+        != reviewed_history[history_key].content_checksum()
+        for history_key, record in current_history.items()
+    ):
+        raise ReviewVersionConflictError(
+            "the scoring history changed before review"
+        )
+
+
 class M8Repository(Protocol):
     """Persistence operations owned exclusively by M8."""
 
@@ -75,6 +125,16 @@ class M8Repository(Protocol):
         bundle: ScoringResultBundle,
     ) -> ScoringResultBundle:
         """Persist one complete scoring-result version idempotently."""
+
+    def insert_or_get_reviewed_scoring_result(
+        self,
+        bundle: ScoringResultBundle,
+        *,
+        audit_id: str,
+        expected_audit_version: int,
+        expected_audit_checksum: str,
+    ) -> ScoringResultBundle:
+        """Atomically compare and append one teacher-reviewed audit version."""
 
     def get_scoring_result(
         self,
@@ -176,3 +236,10 @@ class M8Repository(Protocol):
         selection_id: str,
     ) -> AdaptiveSelectionResult | None:
         """Load one exact adaptive item-selection decision."""
+
+
+__all__ = [
+    "M8Repository",
+    "ReviewVersionConflictError",
+    "assert_review_transition",
+]

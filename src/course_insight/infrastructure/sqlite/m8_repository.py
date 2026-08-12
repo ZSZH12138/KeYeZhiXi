@@ -26,6 +26,10 @@ from course_insight.infrastructure.sqlite.migrations import migrate
 from course_insight.modules.m8_assessment_scoring.paper_record import (
     FrozenAssessmentRecord,
 )
+from course_insight.modules.m8_assessment_scoring.repository import (
+    ReviewVersionConflictError,
+    assert_review_transition,
+)
 from course_insight.modules.m8_assessment_scoring.retry_equivalence import (
     same_paper_generation,
     same_score_audit_result,
@@ -297,6 +301,128 @@ class SQLiteM8Repository:
             if stored != bundle and not same_scoring_result(stored, bundle):
                 raise RuntimeError(
                     "M8 scoring-result conflict for the same attempt version"
+                )
+            connection.execute("COMMIT")
+            return stored.model_copy(deep=True)
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def insert_or_get_reviewed_scoring_result(
+        self,
+        bundle: ScoringResultBundle,
+        *,
+        audit_id: str,
+        expected_audit_version: int,
+        expected_audit_checksum: str,
+    ) -> ScoringResultBundle:
+        """Compare the current winner and append its review in one lock."""
+
+        bundle.validate_business_rules()
+        result_key = self._result_key(bundle)
+        payload = dumps_json(bundle.to_dict())
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing_row = connection.execute(
+                """
+                SELECT attempt_id, result_key, paper_id, learner_id,
+                       finalized_at, payload
+                FROM m8_scoring_results
+                WHERE attempt_id = ? AND result_key = ?
+                """,
+                (bundle.attempt_id, result_key),
+            ).fetchone()
+            if existing_row is not None:
+                stored = self._scoring_from_row(existing_row)
+                if stored != bundle and not same_scoring_result(stored, bundle):
+                    raise ReviewVersionConflictError(
+                        "review result vector already has a different winner"
+                    )
+                connection.execute("COMMIT")
+                return stored.model_copy(deep=True)
+
+            audit_row = connection.execute(
+                """
+                SELECT audit_id, audit_version, item_instance_id, payload
+                FROM m8_score_audits
+                WHERE audit_id = ?
+                ORDER BY audit_version DESC
+                LIMIT 1
+                """,
+                (audit_id,),
+            ).fetchone()
+            if audit_row is None:
+                raise ReviewVersionConflictError(
+                    "review base audit is unavailable"
+                )
+            current_audit = self._audit_from_row(audit_row)
+            if (
+                current_audit.audit_version != expected_audit_version
+                or current_audit.content_checksum()
+                != expected_audit_checksum
+            ):
+                raise ReviewVersionConflictError(
+                    "review base audit version or checksum changed"
+                )
+
+            current_row = connection.execute(
+                """
+                SELECT attempt_id, result_key, paper_id, learner_id,
+                       finalized_at, payload
+                FROM m8_scoring_results
+                WHERE attempt_id = ?
+                ORDER BY finalized_at DESC, rowid DESC
+                LIMIT 1
+                """,
+                (bundle.attempt_id,),
+            ).fetchone()
+            if current_row is None:
+                raise ReviewVersionConflictError(
+                    "review base scoring result is unavailable"
+                )
+            current = self._scoring_from_row(current_row)
+            assert_review_transition(
+                current,
+                bundle,
+                audit_id=audit_id,
+                expected_audit_version=expected_audit_version,
+                expected_audit_checksum=expected_audit_checksum,
+            )
+            for record in bundle.score_audit_records:
+                self._insert_or_validate_audit(connection, record)
+            connection.execute(
+                """
+                INSERT INTO m8_scoring_results(
+                    attempt_id, result_key, paper_id, learner_id,
+                    finalized_at, payload
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    bundle.attempt_id,
+                    result_key,
+                    bundle.paper_id,
+                    bundle.learner_id,
+                    bundle.finalized_at.astimezone(timezone.utc).isoformat(),
+                    payload,
+                ),
+            )
+            stored_row = connection.execute(
+                """
+                SELECT attempt_id, result_key, paper_id, learner_id,
+                       finalized_at, payload
+                FROM m8_scoring_results
+                WHERE attempt_id = ? AND result_key = ?
+                """,
+                (bundle.attempt_id, result_key),
+            ).fetchone()
+            stored = self._scoring_from_row(stored_row)
+            if stored != bundle and not same_scoring_result(stored, bundle):
+                raise ReviewVersionConflictError(
+                    "persisted review differs from the requested result"
                 )
             connection.execute("COMMIT")
             return stored.model_copy(deep=True)

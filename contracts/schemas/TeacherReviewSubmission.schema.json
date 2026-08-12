@@ -64,6 +64,11 @@
       "title": "Decision",
       "type": "string"
     },
+    "expected_audit_checksum": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Expected Audit Checksum",
+      "type": "string"
+    },
     "expected_audit_version": {
       "minimum": 1,
       "title": "Expected Audit Version",
@@ -104,6 +109,7 @@
     "submission_id",
     "audit_id",
     "expected_audit_version",
+    "expected_audit_checksum",
     "reviewer_id",
     "decision",
     "final_total_score",

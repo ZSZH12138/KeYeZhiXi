@@ -103,6 +103,9 @@ def test_teacher_review_builds_existing_contract_and_uses_prg(
     assert coordinator.review_submission.reviewer_id == teacher.actor_id
     assert coordinator.review_submission.audit_id == "audit_1"
     assert coordinator.review_submission.expected_audit_version == 1
+    assert coordinator.review_submission.expected_audit_checksum == (
+        coordinator.scoring.get_audit_record("audit_1").content_checksum()
+    )
 
 
 def test_teacher_cannot_cross_class_and_stale_version_returns_409(

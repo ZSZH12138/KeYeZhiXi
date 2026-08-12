@@ -29,7 +29,7 @@ from course_insight.modules.m5_learner_class_state.dina_components import (
     validate_inference_scope,
 )
 from course_insight.modules.m5_learner_class_state.learning_observation_evidence import (
-    normalize_learning_observations,
+    select_current_learning_observations,
 )
 
 
@@ -332,7 +332,7 @@ class DinaEngine:
         if not cohort or not requirements:
             self._raise_insufficient("cohort and active Q-matrix are required")
 
-        observations = normalize_learning_observations(
+        observations = select_current_learning_observations(
             sorted(
                 (observation for batch in cohort for observation in batch.observations),
                 key=lambda item: (

@@ -225,6 +225,7 @@ def test_teacher_review_submission_uses_domain_decision_vocabulary() -> None:
         submission_id="decision_1",
         audit_id="audit_1",
         expected_audit_version=1,
+        expected_audit_checksum="0" * 64,
         reviewer_id="pseudonym_teacher",
         decision="confirm",
         final_total_score=1.0,
@@ -241,6 +242,9 @@ def test_m9_record_teacher_review_consumes_path_free_submission() -> None:
         submission_id="decision_1",
         audit_id="audit_1",
         expected_audit_version=1,
+        expected_audit_checksum=(
+            _scoring_bundle().get_audit_record("audit_1").content_checksum()
+        ),
         reviewer_id="pseudonym_teacher",
         decision="confirm",
         final_total_score=1.0,
@@ -269,6 +273,11 @@ def test_m9_record_teacher_review_preserves_json_path_boundary(
                 "decision_id": "decision_path_1",
                 "audit_id": "audit_1",
                 "expected_audit_version": 1,
+                "expected_audit_checksum": (
+                    _scoring_bundle()
+                    .get_audit_record("audit_1")
+                    .content_checksum()
+                ),
                 "decision": "confirm",
                 "final_total_score": 1.0,
                 "criterion_overrides": [],
@@ -301,6 +310,7 @@ def test_teacher_override_submission_reuses_existing_override_contract() -> None
         submission_id="decision_2",
         audit_id="audit_2",
         expected_audit_version=1,
+        expected_audit_checksum="0" * 64,
         reviewer_id="pseudonym_teacher",
         decision="override",
         final_total_score=1.0,

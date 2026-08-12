@@ -28,7 +28,10 @@ from course_insight.contracts.platform import TeacherReviewSubmission
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.deepseek import EmptyDeepSeekAdapter
 from course_insight.infrastructure.json_io import read_json
-from course_insight.modules.m9_teacher_analytics.repository import M9Repository
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9Repository,
+    ReviewDecisionConflictError,
+)
 from course_insight.modules.m9_teacher_analytics.reports import (
     build_class_report,
     build_individual_report,
@@ -308,6 +311,9 @@ class M9TeacherAnalyticsService:
                     expected_audit_version=(
                         raw_review_path.expected_audit_version
                     ),
+                    expected_audit_checksum=(
+                        raw_review_path.expected_audit_checksum
+                    ),
                     decision=raw_review_path.decision,
                     final_total_score=raw_review_path.final_total_score,
                     criterion_overrides=[
@@ -361,10 +367,30 @@ class M9TeacherAnalyticsService:
             None,
         )
         if callable(insert_or_get):
-            authoritative = insert_or_get(decision.model_copy(deep=True))
+            try:
+                authoritative = insert_or_get(decision.model_copy(deep=True))
+            except ReviewDecisionConflictError as error:
+                raise DomainError(
+                    code="REVIEW_VERSION_CONFLICT",
+                    module="m9",
+                    message=(
+                        "another teacher decision already reviewed this audit version"
+                    ),
+                    details={
+                        "audit_id": decision.audit_id,
+                        "expected_audit_version": (
+                            decision.expected_audit_version
+                        ),
+                    },
+                    recoverable=True,
+                ) from error
             if authoritative != decision:
-                raise RuntimeError(
-                    "M9 persisted teacher review conflicts with result"
+                raise DomainError(
+                    code="REVIEW_VERSION_CONFLICT",
+                    module="m9",
+                    message="persisted teacher review conflicts with the request",
+                    details={"audit_id": decision.audit_id},
+                    recoverable=True,
                 )
             return authoritative.model_copy(deep=True)
         saver = getattr(self._repository, "save_review_decision", None)

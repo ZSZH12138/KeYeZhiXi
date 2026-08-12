@@ -176,6 +176,7 @@ class TeacherReviewForm(forms.Form):
             submission_id=submission_id,
             audit_id=self._audit.audit_id,
             expected_audit_version=self._audit.audit_version,
+            expected_audit_checksum=self._audit.content_checksum(),
             reviewer_id=self._reviewer_id,
             decision=decision,
             final_total_score=float(
@@ -191,6 +192,7 @@ class TeacherReviewForm(forms.Form):
             decision_id=submission.submission_id,
             audit_id=submission.audit_id,
             expected_audit_version=submission.expected_audit_version,
+            expected_audit_checksum=submission.expected_audit_checksum,
             decision=submission.decision,
             final_total_score=submission.final_total_score,
             criterion_overrides=[

@@ -19,6 +19,9 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.modules.m9_teacher_analytics.repository import (
+    ReviewDecisionConflictError,
+)
 
 
 _OPERATION_ERROR = "PostgreSQL repository operation failed"
@@ -236,9 +239,9 @@ class PostgresM9Repository:
                     ).fetchone()
                     stored = _review_from_row(row)
                     if stored != candidate:
-                        raise PostgresOperationError(_CONFLICT_ERROR)
+                        raise ReviewDecisionConflictError(_CONFLICT_ERROR)
                     return stored
-        except PostgresError:
+        except (PostgresError, ReviewDecisionConflictError):
             raise
         except psycopg.Error:
             raise PostgresOperationError(_OPERATION_ERROR) from None

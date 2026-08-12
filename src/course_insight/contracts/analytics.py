@@ -287,6 +287,7 @@ class TeacherReviewDecision(ContractModel):
     decision_id: str = Field(min_length=1)
     audit_id: str = Field(min_length=1)
     expected_audit_version: int = Field(ge=1)
+    expected_audit_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
     decision: Literal["confirm", "override", "reject"]
     final_total_score: float = Field(ge=0.0, allow_inf_nan=False)
     criterion_overrides: list[CriterionOverride]
@@ -349,7 +350,11 @@ class TeacherReviewDecision(ContractModel):
                     "record_audit_id": record.audit_id,
                 },
             )
-        if self.expected_audit_version != record.audit_version:
+        record_checksum = record.content_checksum()
+        if (
+            self.expected_audit_version != record.audit_version
+            or self.expected_audit_checksum != record_checksum
+        ):
             raise DomainError(
                 code="REVIEW_VERSION_CONFLICT",
                 module="m9",
@@ -357,6 +362,8 @@ class TeacherReviewDecision(ContractModel):
                 details={
                     "expected_audit_version": self.expected_audit_version,
                     "record_audit_version": record.audit_version,
+                    "expected_audit_checksum": self.expected_audit_checksum,
+                    "record_audit_checksum": record_checksum,
                 },
                 recoverable=True,
             )

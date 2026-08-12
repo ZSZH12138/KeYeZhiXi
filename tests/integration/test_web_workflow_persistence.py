@@ -455,6 +455,7 @@ def _review() -> TeacherReviewDecision:
         decision_id="decision_1",
         audit_id="audit_attempt_1",
         expected_audit_version=1,
+        expected_audit_checksum=_audit().content_checksum(),
         decision="confirm",
         final_total_score=1.0,
         criterion_overrides=[],

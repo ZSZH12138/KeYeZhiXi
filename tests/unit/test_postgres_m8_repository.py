@@ -15,12 +15,15 @@ from course_insight.infrastructure.postgresql.base import (
 from course_insight.modules.m8_assessment_scoring.paper_record import (
     FrozenAssessmentRecord,
 )
+from course_insight.modules.m8_assessment_scoring.repository import (
+    ReviewVersionConflictError,
+)
 from tests.integration.test_web_workflow_persistence import (
     NOW,
     _paper,
     _vector_scoring_bundle,
 )
-from tests.factories.m5_m8 import make_paper, make_rubric
+from tests.factories.m5_m8 import make_paper, make_rubric, make_scoring_bundle
 from tests.unit._postgres_repository_fakes import (
     FailingPool,
     FakeConnection,
@@ -217,6 +220,68 @@ def test_postgres_m8_persists_scope_audit_vectors_and_history() -> None:
     assert first.finalized_at in insert_parameters
     assert first.content_checksum() in insert_parameters
     assert first.schema_version in insert_parameters
+
+
+def test_postgres_m8_teacher_review_locks_and_appends_atomically() -> None:
+    paper = make_paper(subjective=False)
+    original = make_scoring_bundle(paper)
+    original_audit = original.score_audit_records[0]
+    reviewed_audit = original_audit.model_copy(
+        update={
+            "audit_version": 2,
+            "scoring_method": "teacher_override",
+            "review_status": "approved",
+            "created_at": original_audit.created_at + timedelta(minutes=1),
+        }
+    )
+    reviewed = original.model_copy(
+        update={
+            "score_audit_records": [original_audit, reviewed_audit],
+            "finalized_at": original.finalized_at + timedelta(minutes=1),
+        }
+    )
+    inserted = False
+
+    def respond(statement: str, parameters: tuple[Any, ...]):
+        nonlocal inserted
+        normalized = " ".join(statement.lower().split())
+        if normalized.startswith("insert into m8_scoring_results"):
+            inserted = True
+            return None
+        if "from m8_score_audits" in normalized:
+            version = int(parameters[1]) if len(parameters) > 1 else 1
+            return _audit_row(original_audit if version == 1 else reviewed_audit)
+        if "from m8_scoring_results" in normalized:
+            if "and result_key = %s" in normalized:
+                return _scoring_row(reviewed) if inserted else None
+            if "limit 1" in normalized:
+                return _scoring_row(original)
+        return None
+
+    connection = FakeConnection(respond)
+    repository = PostgresM8Repository(FakePool(connection))
+
+    stored = repository.insert_or_get_reviewed_scoring_result(
+        reviewed,
+        audit_id=original_audit.audit_id,
+        expected_audit_version=1,
+        expected_audit_checksum=original_audit.content_checksum(),
+    )
+
+    assert stored == reviewed
+    assert connection.transaction_entries == 1
+    assert any(
+        "FOR UPDATE" in statement
+        for statement, _ in connection.executions
+    )
+
+    with pytest.raises(ReviewVersionConflictError):
+        repository.insert_or_get_reviewed_scoring_result(
+            reviewed,
+            audit_id=original_audit.audit_id,
+            expected_audit_version=1,
+            expected_audit_checksum="0" * 64,
+        )
 
 
 @pytest.mark.skipif(
