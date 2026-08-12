@@ -29,11 +29,11 @@
 - Consumes: existing `DinaEngine.fit(cohort, requested_at)` and the item-to-concept Q-matrix in `LearningObservation`.
 - Produces: one `DinaModelArtifact` whose item parameters and priors cover every component.
 
-- [ ] Add a regression test with 13 disconnected one-concept items and sufficient learners; assert `inference_mode == "exact"` and all 13 item/concept parameters are present.
-- [ ] Run `python -m pytest tests/unit/test_m5_dina.py -k disconnected -q` and confirm it fails because the current engine selects variational mode from the total concept count.
-- [ ] Build deterministic Q-matrix connected components, prepare one component-specific cohort per component, run exact or variational EM by component size, and merge results in stable identifier order.
-- [ ] Aggregate learner/observation counts from the governed full cohort without double counting; set overall mode to variational only when at least one component is variational.
-- [ ] Run `python -m pytest tests/unit/test_m5_dina.py tests/model_validation/test_dina_recovery.py -q` and confirm all DINA tests pass.
+- [x] Add a regression test with 13 disconnected one-concept items and sufficient learners; assert `inference_mode == "exact"` and all 13 item/concept parameters are present.
+- [x] Run `python -m pytest tests/unit/test_m5_dina.py -k disconnected -q` and confirm it fails because the current engine selects variational mode from the total concept count.
+- [x] Build deterministic Q-matrix connected components, prepare one component-specific cohort per component, run exact or variational EM by component size, and merge results in stable identifier order.
+- [x] Aggregate learner/observation counts from the governed full cohort without double counting; set overall mode to variational only when at least one component is variational.
+- [x] Run `python -m pytest tests/unit/test_m5_dina.py tests/model_validation/test_dina_recovery.py -q` and confirm all DINA tests pass.
 
 ### Task 2: Authoritative audit deduplication
 
@@ -52,12 +52,12 @@
 - Consumes: immutable `LearningObservation` records.
 - Produces: deterministic governed evidence with one record per audit identity.
 
-- [ ] Add tests proving an identical audit replay does not change DINA sample size and a conflicting replay is rejected.
-- [ ] Add SQLite and PostgreSQL repository tests proving the same audit identity cannot be stored under a second observation ID.
-- [ ] Run the new tests and confirm failures come from observation-ID-only identity handling.
-- [ ] Add one canonical audit normalization helper used by DINA and M5 historical replay. Compare full contract payloads when an audit key repeats; ignore exact duplicates and raise a recoverable domain conflict for different payloads.
-- [ ] Persist audit ID/version as indexed columns and add a unique scope-safe database constraint in SQLite and PostgreSQL. Preserve insert-or-get behavior for exact retries.
-- [ ] Run repository, DINA, schema, and PostgreSQL unit tests and confirm they pass.
+- [x] Add tests proving an identical audit replay does not change DINA sample size and a conflicting replay is rejected.
+- [x] Add SQLite and PostgreSQL repository tests proving the same audit identity cannot be stored under a second observation ID.
+- [x] Run the new tests and confirm failures come from observation-ID-only identity handling.
+- [x] Add one canonical audit normalization helper used by DINA and M5 historical replay. Compare full contract payloads when an audit key repeats; ignore exact duplicates and raise a recoverable domain conflict for different payloads.
+- [x] Persist audit ID/version in a scope-safe identity guard keyed by audit identity in SQLite and PostgreSQL. Preserve insert-or-get behavior for exact retries.
+- [x] Run repository, DINA, schema, and PostgreSQL unit tests and confirm they pass.
 
 ### Task 3: Complete-history M5 inference
 
@@ -69,12 +69,12 @@
 - Consumes: `M5Repository.list_learning_observations(course_id, class_id)` after the current batch is persisted.
 - Produces: `LearningModelRun` whose DINA diagnosis and BKT trace use the learner's complete governed history.
 
-- [ ] Add an integration regression test with a correct first attempt and an incorrect second attempt; compare the second result with a direct full-history BKT replay.
-- [ ] Add a restart assertion using a new service over the same repository; the mastery, observation count, audit keys, and watermark must match uninterrupted execution.
-- [ ] Run the new integration test and confirm it fails because the current service restarts BKT from the model prior.
-- [ ] Load all observations for the current course/class, filter the current learner, normalize audit identities, sort by event order, and build a deterministic history batch.
-- [ ] Run DINA and every BKT concept sequence against that same history batch. Build run IDs, counts, audit keys, and watermarks from the history rather than the current batch.
-- [ ] Run M5 BKT unit tests and the M8→M5 integration tests and confirm they pass.
+- [x] Add an integration regression test with a correct first attempt and an incorrect second attempt; compare the second result with a direct full-history BKT replay.
+- [x] Add a restart assertion using a new service over the same repository; the mastery, observation count, audit keys, and watermark must match uninterrupted execution.
+- [x] Run the new integration test and confirm it fails because the current service restarts BKT from the model prior.
+- [x] Load all observations for the current course/class, filter the current learner, normalize audit identities, sort by event order, and build a deterministic history batch.
+- [x] Run DINA and every BKT concept sequence against that same history batch. Build run IDs, counts, audit keys, and watermarks from the history rather than the current batch.
+- [x] Run M5 BKT unit tests and the M8→M5 integration tests and confirm they pass.
 
 ### Task 4: IRT immutable identity separation
 
@@ -86,12 +86,12 @@
 - Consumes: normalized calibration observations plus `requested_at`.
 - Produces: stable `IRTParameterSet` identity and request-specific `CalibrationRunResult` identity.
 
-- [ ] Add one test proving identical observations and identical request time return an equal result.
-- [ ] Add one test proving identical observations at a later request time retain an equal parameter set but use a different run ID and generated time.
-- [ ] Run both tests and confirm the later-time case fails because the current run ID stays the same while timestamps change.
-- [ ] Derive parameter-set identity and `created_at` from normalized evidence and its maximum `occurred_at`; derive run identity from the parameter-set identity, status, and normalized UTC request time.
-- [ ] Apply the same no-conflict rule to insufficient-data and non-convergence results.
-- [ ] Run IRT unit and fixed-seed recovery tests and confirm they pass.
+- [x] Add one test proving identical observations and identical request time return an equal result.
+- [x] Add one test proving identical observations at a later request time retain an equal parameter set but use a different run ID and generated time.
+- [x] Run both tests and confirm the later-time case fails because the current run ID stays the same while timestamps change.
+- [x] Derive parameter-set identity and `created_at` from normalized evidence and its maximum `occurred_at`; derive run identity from the parameter-set identity, status, and normalized UTC request time.
+- [x] Apply the same no-conflict rule to insufficient-data and non-convergence results.
+- [x] Run IRT unit and fixed-seed recovery tests and confirm they pass.
 
 ### Task 5: Cross-storage and full verification
 
@@ -102,10 +102,10 @@
 - Consumes: completed Task 1–4 repairs.
 - Produces: evidence that Task 5–8 satisfy the approved design.
 
-- [ ] Run targeted Task 5–8 unit, integration, and model-validation suites.
-- [ ] Initialize fresh SQLite schema twice and verify idempotence plus the audit unique constraint.
-- [ ] Run the real PostgreSQL 16 round-trip suite including migration 0015 and audit conflict checks.
-- [ ] Run the entire pytest suite with coverage and require at least 80%.
-- [ ] Run `compileall`, `pip check`, configured lint/type checks when available, and a secret-pattern scan over the diff.
-- [ ] Review `git diff --check`, `git status`, and every changed file against the design acceptance list.
-- [ ] Commit the repair in small conventional commits only after fresh verification evidence.
+- [x] Run targeted Task 5–8 unit, integration, and model-validation suites.
+- [x] Initialize fresh SQLite schema twice and verify idempotence plus the audit unique constraint.
+- [x] Run the real PostgreSQL 16 round-trip suite including migration 0015 and audit conflict checks.
+- [x] Run the entire pytest suite with coverage and require at least 80%.
+- [x] Run `compileall`, `pip check`, configured lint/type checks when available, and a secret-pattern scan over the diff.
+- [x] Review `git diff --check`, `git status`, and every changed file against the design acceptance list.
+- [x] Commit the repair in small conventional commits only after fresh verification evidence.
