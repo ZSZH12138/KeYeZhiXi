@@ -9,9 +9,10 @@ from typing import Any
 
 from course_insight.contracts.assessment import ScoringResultBundle
 from course_insight.contracts.errors import DomainError
-from course_insight.contracts.knowledge import KnowledgeBundle
+from course_insight.contracts.knowledge import KnowledgeBundle, QMatrixEntry
 from course_insight.contracts.learning_models import (
     CognitiveDiagnosisResult,
+    DinaModelArtifact,
     KnowledgeTraceSnapshot,
     LearningModelRun,
     LearningObservationBatch,
@@ -22,6 +23,7 @@ from course_insight.contracts.state import (
     StateUpdateResult,
 )
 from course_insight.modules.m5_learner_class_state.repository import M5Repository
+from course_insight.modules.m5_learner_class_state.dina import DinaEngine
 from course_insight.modules.m5_learner_class_state.aggregation import (
     DeterministicClassAggregationPolicy,
 )
@@ -70,14 +72,57 @@ class M5StateService:
         repository: M5Repository,
         state_update_policy: Any,
         class_aggregation_policy: Any,
+        *,
+        dina_engine: DinaEngine | None = None,
     ) -> None:
         self._repository = repository
         self._state_update_policy = state_update_policy
         self._class_aggregation_policy = class_aggregation_policy
+        self._dina_engine = dina_engine or DinaEngine()
         self._processed_by_scope: dict[
             tuple[str, str, str],
             frozenset[str],
         ] = {}
+
+    def fit_dina_model(
+        self,
+        cohort: list[LearningObservationBatch],
+        q_matrix: list[QMatrixEntry],
+    ) -> DinaModelArtifact:
+        """Persist governed observations and fit one append-only DINA model."""
+
+        observation_writer = getattr(
+            self._repository,
+            "insert_or_get_learning_observation_batch",
+            None,
+        )
+        if callable(observation_writer):
+            for batch in cohort:
+                authoritative = observation_writer(batch.model_copy(deep=True))
+                if authoritative != batch:
+                    raise RuntimeError(
+                        "M5 persisted learning observations conflict with input"
+                    )
+        model = self._dina_engine.fit(cohort, q_matrix)
+        model_writer = getattr(self._repository, "insert_or_get_dina_model", None)
+        if callable(model_writer):
+            authoritative_model = model_writer(model.model_copy(deep=True))
+            if authoritative_model != model:
+                raise RuntimeError("M5 persisted DINA model conflicts with result")
+            model = authoritative_model
+        return model.model_copy(deep=True)
+
+    def infer_dina(
+        self,
+        model: DinaModelArtifact,
+        batch: LearningObservationBatch,
+    ) -> CognitiveDiagnosisResult:
+        """Apply one exact DINA model version to a learner batch."""
+
+        return self._dina_engine.infer(
+            model.model_copy(deep=True),
+            batch.model_copy(deep=True),
+        )
 
     def get_state_update(
         self,

@@ -4,6 +4,11 @@ from __future__ import annotations
 
 from typing import Protocol
 
+from course_insight.contracts.learning_models import (
+    DinaModelArtifact,
+    LearningObservation,
+    LearningObservationBatch,
+)
 from course_insight.contracts.state import (
     ClassStateSnapshot,
     LearnerStateSnapshot,
@@ -17,6 +22,34 @@ _CLASS_TABLE = "m5_class_states"
 
 class M5Repository(Protocol):
     """Persistence operations owned exclusively by M5."""
+
+    def insert_or_get_learning_observation_batch(
+        self,
+        batch: LearningObservationBatch,
+    ) -> LearningObservationBatch:
+        """Persist every immutable observation in one replay-safe batch."""
+
+    def list_learning_observations(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> list[LearningObservation]:
+        """List governed observations in deterministic event order."""
+
+    def insert_or_get_dina_model(
+        self,
+        model: DinaModelArtifact,
+    ) -> DinaModelArtifact:
+        """Persist or recover one append-only DINA model version."""
+
+    def get_dina_model(
+        self,
+        *,
+        course_id: str,
+        model_version: str,
+    ) -> DinaModelArtifact | None:
+        """Load one exact course-scoped DINA model version."""
 
     def save_learner_state(self, snapshot: LearnerStateSnapshot) -> None:
         """Persist one versioned learner-state snapshot."""

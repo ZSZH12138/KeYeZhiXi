@@ -69,6 +69,28 @@ def _update_row(result: Any) -> dict[str, Any]:
     }
 
 
+def _observation_row(observation: Any) -> dict[str, Any]:
+    return {
+        "observation_id": observation.observation_id,
+        "course_id": observation.course_id,
+        "class_id": observation.class_id,
+        "learner_id": observation.learner_id,
+        "attempt_id": observation.attempt_id,
+        "occurred_at": observation.occurred_at,
+        **_contract_columns(observation),
+    }
+
+
+def _dina_model_row(model: Any) -> dict[str, Any]:
+    return {
+        "model_id": model.model_id,
+        "course_id": model.course_id,
+        "model_version": model.model_version,
+        "created_at": model.created_at,
+        **_contract_columns(model),
+    }
+
+
 def _responder_for(result: Any):
     def respond(statement: str, _: tuple[Any, ...]):
         normalized = " ".join(statement.lower().split())
@@ -87,6 +109,60 @@ def _responder_for(result: Any):
 
 def test_postgres_m5_repository_module_exists() -> None:
     assert PostgresM5Repository is not None
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_persists_observations_and_dina_model_versions() -> None:
+    """Catch PostgreSQL lagging behind SQLite model-runtime behavior."""
+
+    from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+    from tests.unit.test_m5_dina import _q_matrix, _training_cohort
+
+    cohort = _training_cohort()
+    model = DinaEngine(
+        min_students=4,
+        min_responses_per_item=4,
+        max_iterations=30,
+    ).fit(cohort, _q_matrix())
+    observations = [item for batch in cohort for item in batch.observations]
+    observation_by_id = {item.observation_id: item for item in observations}
+
+    def respond(statement: str, parameters: tuple[Any, ...]):
+        normalized = " ".join(statement.lower().split())
+        if "from m5_learning_observations" in normalized:
+            if len(parameters) == 1:
+                return _observation_row(observation_by_id[str(parameters[0])])
+            return [_observation_row(item) for item in observations]
+        if "from m5_dina_models" in normalized:
+            return _dina_model_row(model)
+        return None
+
+    connection = FakeConnection(respond)
+    repository = PostgresM5Repository(FakePool(connection))
+
+    assert repository.insert_or_get_learning_observation_batch(cohort[0]) == cohort[0]
+    assert repository.list_learning_observations(
+        course_id="course_1",
+        class_id="class_1",
+    ) == observations
+    assert repository.insert_or_get_dina_model(model) == model
+    assert repository.get_dina_model(
+        course_id="course_1",
+        model_version=model.model_version,
+    ) == model
+
+    inserted_payloads = [
+        parameter.obj
+        for statement, parameters in connection.executions
+        if "INSERT INTO m5_" in statement
+        for parameter in parameters
+        if isinstance(parameter, Jsonb)
+    ]
+    assert cohort[0].observations[0].to_dict() in inserted_payloads
+    assert model.to_dict() in inserted_payloads
 
 
 @pytest.mark.skipif(

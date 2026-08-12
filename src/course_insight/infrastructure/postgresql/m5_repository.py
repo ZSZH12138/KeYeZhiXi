@@ -9,6 +9,11 @@ import psycopg
 from psycopg.types.json import Jsonb
 
 from course_insight.contracts.base import ContractModel
+from course_insight.contracts.learning_models import (
+    DinaModelArtifact,
+    LearningObservation,
+    LearningObservationBatch,
+)
 from course_insight.contracts.state import (
     ClassStateSnapshot,
     LearnerStateSnapshot,
@@ -59,6 +64,26 @@ payload,
 payload_checksum,
 schema_version
 """
+_OBSERVATION_COLUMNS = """
+observation_id,
+course_id,
+class_id,
+learner_id,
+attempt_id,
+occurred_at,
+payload,
+payload_checksum,
+schema_version
+"""
+_DINA_MODEL_COLUMNS = """
+model_id,
+course_id,
+model_version,
+created_at,
+payload,
+payload_checksum,
+schema_version
+"""
 
 
 class PostgresM5Repository:
@@ -66,6 +91,167 @@ class PostgresM5Repository:
 
     def __init__(self, pool: PostgresPool) -> None:
         self._pool = pool
+
+    def insert_or_get_learning_observation_batch(
+        self,
+        batch: LearningObservationBatch,
+    ) -> LearningObservationBatch:
+        """Insert immutable observations or return their identical replay."""
+
+        candidate = _isolated_contract(batch, LearningObservationBatch)
+        try:
+            with self._pool.connection() as connection:
+                with connection.transaction():
+                    for observation in candidate.observations:
+                        connection.execute(
+                            """
+                            INSERT INTO m5_learning_observations(
+                                observation_id,
+                                course_id,
+                                class_id,
+                                learner_id,
+                                attempt_id,
+                                occurred_at,
+                                payload,
+                                payload_checksum,
+                                schema_version
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ON CONFLICT (observation_id) DO NOTHING
+                            """,
+                            (
+                                observation.observation_id,
+                                observation.course_id,
+                                observation.class_id,
+                                observation.learner_id,
+                                observation.attempt_id,
+                                observation.occurred_at,
+                                Jsonb(observation.to_dict()),
+                                observation.content_checksum(),
+                                observation.schema_version,
+                            ),
+                        )
+                        row = connection.execute(
+                            f"""
+                            SELECT {_OBSERVATION_COLUMNS}
+                            FROM m5_learning_observations
+                            WHERE observation_id = %s
+                            """,
+                            (observation.observation_id,),
+                        ).fetchone()
+                        if _learning_observation_from_row(row) != observation:
+                            raise PostgresOperationError(_CONFLICT_ERROR)
+            return candidate
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def list_learning_observations(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> list[LearningObservation]:
+        """List observations in stable chronological order."""
+
+        try:
+            with self._pool.connection() as connection:
+                rows = connection.execute(
+                    f"""
+                    SELECT {_OBSERVATION_COLUMNS}
+                    FROM m5_learning_observations
+                    WHERE course_id = %s AND class_id = %s
+                    ORDER BY occurred_at, attempt_id, observation_id
+                    """,
+                    (course_id, class_id),
+                ).fetchall()
+                return [_learning_observation_from_row(row) for row in rows]
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def insert_or_get_dina_model(
+        self,
+        model: DinaModelArtifact,
+    ) -> DinaModelArtifact:
+        """Insert one append-only DINA model version."""
+
+        candidate = _isolated_contract(model, DinaModelArtifact)
+        try:
+            with self._pool.connection() as connection:
+                with connection.transaction():
+                    connection.execute(
+                        """
+                        INSERT INTO m5_dina_models(
+                            model_id,
+                            course_id,
+                            model_version,
+                            created_at,
+                            payload,
+                            payload_checksum,
+                            schema_version
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT DO NOTHING
+                        """,
+                        (
+                            candidate.model_id,
+                            candidate.course_id,
+                            candidate.model_version,
+                            candidate.created_at,
+                            Jsonb(candidate.to_dict()),
+                            candidate.content_checksum(),
+                            candidate.schema_version,
+                        ),
+                    )
+                    row = connection.execute(
+                        f"""
+                        SELECT {_DINA_MODEL_COLUMNS}
+                        FROM m5_dina_models
+                        WHERE model_id = %s
+                           OR (course_id = %s AND model_version = %s)
+                        ORDER BY (model_id = %s) DESC
+                        LIMIT 1
+                        """,
+                        (
+                            candidate.model_id,
+                            candidate.course_id,
+                            candidate.model_version,
+                            candidate.model_id,
+                        ),
+                    ).fetchone()
+                    stored = _dina_model_from_row(row)
+                    if stored != candidate:
+                        raise PostgresOperationError(_CONFLICT_ERROR)
+                    return stored
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def get_dina_model(
+        self,
+        *,
+        course_id: str,
+        model_version: str,
+    ) -> DinaModelArtifact | None:
+        """Load one exact course-scoped DINA version."""
+
+        try:
+            with self._pool.connection() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT {_DINA_MODEL_COLUMNS}
+                    FROM m5_dina_models
+                    WHERE course_id = %s AND model_version = %s
+                    """,
+                    (course_id, model_version),
+                ).fetchone()
+                return None if row is None else _dina_model_from_row(row)
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
 
     def insert_or_get_state_update(
         self,
@@ -630,6 +816,44 @@ def _insert_or_validate_learner(
     ).fetchone()
     if row is None or _learner_from_row(row) != snapshot:
         raise PostgresOperationError(_CONFLICT_ERROR)
+
+
+def _learning_observation_from_row(
+    row: Mapping[str, Any] | None,
+) -> LearningObservation:
+    observation = _contract_from_row(
+        row,
+        LearningObservation,
+        label="learning observation",
+    )
+    try:
+        if (
+            observation.observation_id != _required_text(row, "observation_id")
+            or observation.course_id != _required_text(row, "course_id")
+            or observation.class_id != _required_text(row, "class_id")
+            or observation.learner_id != _required_text(row, "learner_id")
+            or observation.attempt_id != _required_text(row, "attempt_id")
+        ):
+            raise ValueError
+        return observation
+    except Exception:
+        raise PostgresOperationError(_INTEGRITY_ERROR) from None
+
+
+def _dina_model_from_row(
+    row: Mapping[str, Any] | None,
+) -> DinaModelArtifact:
+    model = _contract_from_row(row, DinaModelArtifact, label="DINA model")
+    try:
+        if (
+            model.model_id != _required_text(row, "model_id")
+            or model.course_id != _required_text(row, "course_id")
+            or model.model_version != _required_text(row, "model_version")
+        ):
+            raise ValueError
+        return model
+    except Exception:
+        raise PostgresOperationError(_INTEGRITY_ERROR) from None
 
 
 def _insert_or_validate_class(

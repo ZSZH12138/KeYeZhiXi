@@ -67,6 +67,87 @@ class LearningObservationBatch(ContractModel):
             )
 
 
+class DinaItemParameters(ContractModel):
+    """DINA slip and guess estimates for one immutable item version."""
+
+    item_id: str = Field(min_length=1)
+    item_version: str = Field(min_length=1)
+    concept_ids: list[str] = Field(min_length=1)
+    slip: float = Field(ge=0.01, le=0.40, allow_inf_nan=False)
+    guess: float = Field(ge=0.01, le=0.40, allow_inf_nan=False)
+    sample_size: int = Field(ge=1)
+
+    def validate_business_rules(self) -> None:
+        """Require a unique, non-empty conjunctive concept set."""
+
+        if len(self.concept_ids) != len(set(self.concept_ids)):
+            raise DomainError(
+                code="DINA_ITEM_PARAMETERS_INVALID",
+                module="m5",
+                message="DINA item concepts must be unique",
+            )
+
+
+class DinaModelArtifact(ContractModel):
+    """Versioned fitted DINA model for one course and class scope."""
+
+    model_id: str = Field(min_length=1)
+    course_id: str = Field(min_length=1)
+    class_id: str = Field(min_length=1)
+    model_version: str = Field(min_length=1)
+    concept_ids: list[str] = Field(min_length=1)
+    item_parameters: list[DinaItemParameters] = Field(min_length=1)
+    attribute_priors: dict[str, float]
+    learner_count: int = Field(ge=1)
+    observation_count: int = Field(ge=1)
+    inference_mode: Literal["exact", "variational"]
+    log_likelihood: float = Field(allow_inf_nan=False)
+    elbo: float | None = Field(default=None, allow_inf_nan=False)
+    objective_history: list[float] = Field(default_factory=list)
+    iteration_count: int = Field(ge=1)
+    converged: bool
+    created_at: datetime
+
+    def validate_business_rules(self) -> None:
+        """Keep concept, item, and inference metadata internally aligned."""
+
+        concept_set = set(self.concept_ids)
+        item_keys = [
+            (item.item_id, item.item_version) for item in self.item_parameters
+        ]
+        invalid_priors = (
+            set(self.attribute_priors) != concept_set
+            or any(not 0.0 <= value <= 1.0 for value in self.attribute_priors.values())
+        )
+        invalid_items = any(
+            not set(item.concept_ids) <= concept_set for item in self.item_parameters
+        )
+        invalid_mode = self.inference_mode == "variational" and (
+            self.elbo is None
+            or not self.objective_history
+            or any(
+                later + 1e-9 < earlier
+                for earlier, later in zip(
+                    self.objective_history,
+                    self.objective_history[1:],
+                    strict=False,
+                )
+            )
+        )
+        if (
+            len(self.concept_ids) != len(concept_set)
+            or len(item_keys) != len(set(item_keys))
+            or invalid_priors
+            or invalid_items
+            or invalid_mode
+        ):
+            raise DomainError(
+                code="DINA_MODEL_INVALID",
+                module="m5",
+                message="DINA model concepts, items, or inference metadata are invalid",
+            )
+
+
 class CognitiveDiagnosisResult(ContractModel):
     """Versioned DINA-family output; empty until the engine is configured."""
 
