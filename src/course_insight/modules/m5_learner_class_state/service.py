@@ -239,6 +239,7 @@ class M5StateService:
         previous_learner_state_snapshot: LearnerStateSnapshot | None,
         previous_class_state_snapshot: ClassStateSnapshot | None,
         state_policy_path: Path,
+        learning_observation_batch: LearningObservationBatch | None = None,
     ) -> StateUpdateResult:
         """Update diagnosis plus learner and class state atomically.
 
@@ -255,6 +256,7 @@ class M5StateService:
             previous_learner_state_snapshot=previous_learner_state_snapshot,
             previous_class_state_snapshot=previous_class_state_snapshot,
             policy=StatePolicy.from_path(state_policy_path),
+            learning_observation_batch=learning_observation_batch,
         )
 
     def update_state_with_frozen_policy(
@@ -265,6 +267,7 @@ class M5StateService:
         previous_class_state_snapshot: ClassStateSnapshot | None,
         state_policy_path: Path,
         expected_policy_checksum: str,
+        learning_observation_batch: LearningObservationBatch | None = None,
     ) -> StateUpdateResult:
         """Update state using the exact policy bytes identified by M0."""
 
@@ -277,6 +280,7 @@ class M5StateService:
                 state_policy_path,
                 expected_policy_checksum,
             ),
+            learning_observation_batch=learning_observation_batch,
         )
 
     def _update_state_with_policy(
@@ -287,6 +291,7 @@ class M5StateService:
         previous_learner_state_snapshot: LearnerStateSnapshot | None,
         previous_class_state_snapshot: ClassStateSnapshot | None,
         policy: StatePolicy,
+        learning_observation_batch: LearningObservationBatch | None,
     ) -> StateUpdateResult:
         audits = latest_audits(scoring_result_bundle)
         audit_keys = frozenset(
@@ -340,6 +345,7 @@ class M5StateService:
         diagnosis = update_policy.build_diagnosis(
             scoring_result_bundle,
             knowledge_bundle,
+            learning_observation_batch,
         )
         learner = update_policy.build_learner_state(
             scoring_result_bundle,
@@ -348,10 +354,44 @@ class M5StateService:
             previous_learner_state_snapshot,
             policy,
         )
-        class_state = aggregation_policy.aggregate(
-            learner,
-            previous_class_state_snapshot,
+        state_lister = getattr(
+            self._repository,
+            "list_latest_learner_states",
+            None,
+        )
+        persisted_states = (
+            state_lister(knowledge_bundle.course_id, policy.class_id)
+            if callable(state_lister)
+            else []
+        )
+        states_by_learner = {
+            state.learner_id: state.model_copy(deep=True)
+            for state in persisted_states
+        }
+        states_by_learner = {
+            **states_by_learner,
+            learner.learner_id: learner,
+        }
+        version_getter = getattr(
+            self._repository,
+            "get_latest_class_state_version",
+            None,
+        )
+        latest_class_version = (
+            version_getter(knowledge_bundle.course_id, policy.class_id)
+            if callable(version_getter)
+            else None
+        )
+        class_version = (
+            latest_class_version + 1
+            if latest_class_version is not None
+            else learner.state_version
+        )
+        class_state = aggregation_policy.aggregate_all(
+            list(states_by_learner.values()),
             policy,
+            class_version=class_version,
+            previous=previous_class_state_snapshot,
         )
         result = StateUpdateResult(
             diagnosis_result=diagnosis,
@@ -366,7 +406,14 @@ class M5StateService:
             None,
         )
         if callable(insert_or_get):
-            authoritative = insert_or_get(result.model_copy(deep=True))
+            authoritative = insert_or_get(
+                result.model_copy(deep=True),
+                expected_previous_class_snapshot_id=(
+                    None
+                    if previous_class_state_snapshot is None
+                    else previous_class_state_snapshot.snapshot_id
+                ),
+            )
             if authoritative != result:
                 raise RuntimeError("M5 persisted state update conflicts with result")
             result = authoritative.model_copy(deep=True)

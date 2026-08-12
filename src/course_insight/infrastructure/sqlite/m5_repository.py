@@ -15,6 +15,9 @@ from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import migrate
 
 
+_UNSPECIFIED_CLASS_BASELINE = object()
+
+
 class SQLiteM5Repository:
     """Persist state results within M5-owned tables."""
 
@@ -31,6 +34,10 @@ class SQLiteM5Repository:
     def insert_or_get_state_update(
         self,
         result: StateUpdateResult,
+        *,
+        expected_previous_class_snapshot_id: str | None | object = (
+            _UNSPECIFIED_CLASS_BASELINE
+        ),
     ) -> StateUpdateResult:
         """Insert an attempt result once or return its identical winner."""
 
@@ -42,6 +49,22 @@ class SQLiteM5Repository:
         connection = connect_sqlite(self._database_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if expected_previous_class_snapshot_id is not _UNSPECIFIED_CLASS_BASELINE:
+                row = connection.execute(
+                    """
+                    SELECT snapshot_id
+                    FROM m5_class_states
+                    WHERE course_id = ? AND class_id = ?
+                    ORDER BY state_version DESC
+                    LIMIT 1
+                    """,
+                    (learner.course_id, learner.class_id),
+                ).fetchone()
+                current_snapshot_id = (
+                    None if row is None else str(row["snapshot_id"])
+                )
+                if current_snapshot_id != expected_previous_class_snapshot_id:
+                    raise RuntimeError("M5 class-state baseline conflict")
             self._insert_or_validate_learner(connection, learner)
             self._insert_or_validate_class(connection, class_state)
             connection.execute(
@@ -293,6 +316,44 @@ class SQLiteM5Repository:
         finally:
             connection.close()
 
+    def list_latest_learner_states(
+        self,
+        course_id: str,
+        class_id: str,
+    ) -> list[LearnerStateSnapshot]:
+        """Load each learner's greatest state version in stable order."""
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT
+                    state.snapshot_id,
+                    state.course_id,
+                    state.class_id,
+                    state.learner_id,
+                    state.payload
+                FROM m5_learner_states AS state
+                JOIN (
+                    SELECT learner_id, MAX(state_version) AS state_version
+                    FROM m5_learner_states
+                    WHERE course_id = ? AND class_id = ?
+                    GROUP BY learner_id
+                ) AS latest
+                  ON latest.learner_id = state.learner_id
+                 AND latest.state_version = state.state_version
+                WHERE state.course_id = ? AND state.class_id = ?
+                ORDER BY state.learner_id
+                """,
+                (course_id, class_id, course_id, class_id),
+            ).fetchall()
+            return [
+                self._learner_from_row(row).model_copy(deep=True)
+                for row in rows
+            ]
+        finally:
+            connection.close()
+
     def save_class_state(self, snapshot: ClassStateSnapshot) -> None:
         connection = connect_sqlite(self._database_path)
         try:
@@ -419,6 +480,28 @@ class SQLiteM5Repository:
                 if row is None
                 else self._class_from_row(row).model_copy(deep=True)
             )
+        finally:
+            connection.close()
+
+    def get_latest_class_state_version(
+        self,
+        course_id: str,
+        class_id: str,
+    ) -> int | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT MAX(state_version) AS state_version
+                FROM m5_class_states
+                WHERE course_id = ? AND class_id = ?
+                """,
+                (course_id, class_id),
+            ).fetchone()
+            value = None if row is None else row["state_version"]
+            if value is not None and (type(value) is not int or value < 1):
+                raise RuntimeError("M5 class-state version is invalid")
+            return value
         finally:
             connection.close()
 

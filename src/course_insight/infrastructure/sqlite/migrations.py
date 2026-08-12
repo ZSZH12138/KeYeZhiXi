@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import sqlite3
 
+from course_insight.infrastructure.sqlite.m5_m8_model_runtime_schema import (
+    MODEL_RUNTIME_TABLES as _M5_M8_MODEL_RUNTIME_TABLES,
+)
 from course_insight.infrastructure.sqlite.module_recovery_schema import (
     M5_CLASS_STATES_SQL as _M5_CLASS_STATES_SQL,
     M5_CLASS_STATES_V4_SQL as _M5_CLASS_STATES_V4_SQL,
@@ -32,7 +35,7 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     migrate_workflow_v10_to_v11,
 )
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
@@ -49,6 +52,7 @@ _ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME = (
 )
 _M6_POLICY_LEARNING_MIGRATION_NAME = "m6_policy_learning"
 _ASSESSMENT_POLICY_FREEZE_MIGRATION_NAME = "m0_policy_freeze"
+_M5_M8_MODEL_RUNTIME_MIGRATION_NAME = "m5_m8_model_runtime"
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -910,6 +914,17 @@ def _validate_module_recovery_schema(connection: sqlite3.Connection) -> None:
             )
 
 
+def _validate_m5_m8_model_runtime_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    for table_name, expected_sql in _M5_M8_MODEL_RUNTIME_TABLES:
+        if _normalized_table_schema_sql(
+            connection,
+            table_name,
+        ) != _normalize_create_table_sql(expected_sql):
+            raise RuntimeError(f"{table_name} schema is incompatible")
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     """Apply every pending migration in one explicit immediate transaction."""
 
@@ -1102,6 +1117,17 @@ def migrate(connection: sqlite3.Connection) -> None:
                 connection,
                 schema_version=13,
             )
+        if 14 not in applied_versions:
+            for _, statement in _M5_M8_MODEL_RUNTIME_TABLES:
+                connection.execute(statement)
+            _validate_m5_m8_model_runtime_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (14, _M5_M8_MODEL_RUNTIME_MIGRATION_NAME),
+            )
+            applied_versions.add(14)
+        else:
+            _validate_m5_m8_model_runtime_schema(connection)
         validate_outbox_schema(connection, schema_version=SCHEMA_VERSION)
         connection.execute("COMMIT")
     except Exception:

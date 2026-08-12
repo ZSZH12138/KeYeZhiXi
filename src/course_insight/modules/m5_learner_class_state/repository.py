@@ -62,6 +62,8 @@ class M5Repository(Protocol):
     def insert_or_get_state_update(
         self,
         result: StateUpdateResult,
+        *,
+        expected_previous_class_snapshot_id: str | None = None,
     ) -> StateUpdateResult:
         """Persist or recover one complete attempt-bound update."""
 
@@ -91,12 +93,26 @@ class M5Repository(Protocol):
     ) -> LearnerStateSnapshot | None:
         """Load the latest learner state in an exact course/class scope."""
 
+    def list_latest_learner_states(
+        self,
+        course_id: str,
+        class_id: str,
+    ) -> list[LearnerStateSnapshot]:
+        """Load one latest state for every learner in a teaching scope."""
+
     def get_latest_class_state(
         self,
         course_id: str,
         class_id: str,
     ) -> ClassStateSnapshot | None:
         """Load the latest class aggregate in an exact course scope."""
+
+    def get_latest_class_state_version(
+        self,
+        course_id: str,
+        class_id: str,
+    ) -> int | None:
+        """Load the latest internal class history version."""
 
     def get_processed_audit_ids(
         self,

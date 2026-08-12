@@ -126,10 +126,18 @@ def test_postgres_m5_implements_complete_protocol_and_serializes_contracts() -> 
         "class_1",
         "learner_1",
     ) == result.learner_state_snapshot
+    assert repository.list_latest_learner_states(
+        "course_1",
+        "class_1",
+    ) == [result.learner_state_snapshot]
     assert repository.get_latest_class_state(
         "course_1",
         "class_1",
     ) == result.class_state_snapshot
+    assert repository.get_latest_class_state_version(
+        "course_1",
+        "class_1",
+    ) == 1
     assert repository.get_processed_audit_ids(
         "course_1",
         "class_1",
@@ -417,8 +425,16 @@ def test_postgres_m5_empty_recovery_and_safe_database_errors() -> None:
         "class_1",
         "missing",
     ) is None
+    assert repository.list_latest_learner_states(
+        "course_1",
+        "class_1",
+    ) == []
     assert repository.get_class_state("missing") is None
     assert repository.get_latest_class_state("course_1", "class_1") is None
+    assert repository.get_latest_class_state_version(
+        "course_1",
+        "class_1",
+    ) is None
     assert repository.get_processed_audit_ids(
         "course_1",
         "class_1",
@@ -487,6 +503,10 @@ def test_postgres_m5_sanitizes_database_errors_across_protocol_methods() -> None
             "class_1",
             "learner_1",
         ),
+        lambda repository: repository.list_latest_learner_states(
+            "course_1",
+            "class_1",
+        ),
         lambda repository: repository.save_class_state(
             result.class_state_snapshot
         ),
@@ -494,6 +514,10 @@ def test_postgres_m5_sanitizes_database_errors_across_protocol_methods() -> None
             result.class_state_snapshot.snapshot_id
         ),
         lambda repository: repository.get_latest_class_state(
+            "course_1",
+            "class_1",
+        ),
+        lambda repository: repository.get_latest_class_state_version(
             "course_1",
             "class_1",
         ),

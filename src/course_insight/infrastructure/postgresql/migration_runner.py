@@ -18,7 +18,7 @@ from course_insight.infrastructure.postgresql.base import (
 )
 
 
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 MIGRATION_LOCK_ID = 0x434F55525345494E
 MIGRATIONS_DIRECTORY = Path(__file__).with_name("migrations")
 
@@ -42,6 +42,10 @@ CORE_TABLES = (
     "m5_state_updates",
     "m5_class_states",
     "m5_learner_states",
+    "m5_learning_observations",
+    "m5_dina_models",
+    "m5_bkt_models",
+    "m5_knowledge_traces",
     "m6_policy_observations",
     "m6_policy_rewards",
     "m6_policy_evaluations",
@@ -53,6 +57,12 @@ CORE_TABLES = (
     "m8_scoring_results",
     "m8_score_audits",
     "m8_assessment_papers",
+    "m8_frozen_assessment_records",
+    "m8_irt_calibration_runs",
+    "m8_irt_parameter_sets",
+    "m8_ability_estimates",
+    "m8_adaptive_selections",
+    "m8_calibration_reviews",
     "m9_teacher_reviews",
     "m9_teacher_analytics",
 )
@@ -66,6 +76,10 @@ _DROP_TABLE_STATEMENTS = (
     "DROP TABLE IF EXISTS m5_state_updates",
     "DROP TABLE IF EXISTS m5_class_states",
     "DROP TABLE IF EXISTS m5_learner_states",
+    "DROP TABLE IF EXISTS m5_learning_observations",
+    "DROP TABLE IF EXISTS m5_dina_models",
+    "DROP TABLE IF EXISTS m5_bkt_models",
+    "DROP TABLE IF EXISTS m5_knowledge_traces",
     "DROP TABLE IF EXISTS m6_policy_observations",
     "DROP TABLE IF EXISTS m6_policy_rewards",
     "DROP TABLE IF EXISTS m6_policy_evaluations",
@@ -77,6 +91,12 @@ _DROP_TABLE_STATEMENTS = (
     "DROP TABLE IF EXISTS m8_scoring_results",
     "DROP TABLE IF EXISTS m8_score_audits",
     "DROP TABLE IF EXISTS m8_assessment_papers",
+    "DROP TABLE IF EXISTS m8_frozen_assessment_records",
+    "DROP TABLE IF EXISTS m8_irt_calibration_runs",
+    "DROP TABLE IF EXISTS m8_irt_parameter_sets",
+    "DROP TABLE IF EXISTS m8_ability_estimates",
+    "DROP TABLE IF EXISTS m8_adaptive_selections",
+    "DROP TABLE IF EXISTS m8_calibration_reviews",
     "DROP TABLE IF EXISTS m9_teacher_reviews",
     "DROP TABLE IF EXISTS m9_teacher_analytics",
     "DROP TABLE IF EXISTS schema_migrations",

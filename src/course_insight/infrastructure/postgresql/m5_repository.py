@@ -26,6 +26,7 @@ _INTEGRITY_ERROR = "PostgreSQL M5 repository integrity check failed"
 _CONFLICT_ERROR = "PostgreSQL M5 repository identity conflict"
 _CHECKSUM_ERROR = "PostgreSQL M5 persisted payload checksum mismatch"
 _SCHEMA_ERROR = "PostgreSQL M5 persisted schema version mismatch"
+_UNSPECIFIED_CLASS_BASELINE = object()
 _TContract = TypeVar("_TContract", bound=ContractModel)
 
 _LEARNER_COLUMNS = """
@@ -69,6 +70,10 @@ class PostgresM5Repository:
     def insert_or_get_state_update(
         self,
         result: StateUpdateResult,
+        *,
+        expected_previous_class_snapshot_id: str | None | object = (
+            _UNSPECIFIED_CLASS_BASELINE
+        ),
     ) -> StateUpdateResult:
         """Insert an attempt version atomically or return its identical winner."""
 
@@ -80,6 +85,38 @@ class PostgresM5Repository:
         try:
             with self._pool.connection() as connection:
                 with connection.transaction():
+                    if (
+                        expected_previous_class_snapshot_id
+                        is not _UNSPECIFIED_CLASS_BASELINE
+                    ):
+                        _lock_class_scope(
+                            connection,
+                            learner.course_id,
+                            learner.class_id,
+                        )
+                        baseline_row = connection.execute(
+                            """
+                            SELECT snapshot_id
+                            FROM m5_class_states
+                            WHERE course_id = %s AND class_id = %s
+                            ORDER BY state_version DESC
+                            LIMIT 1
+                            """,
+                            (learner.course_id, learner.class_id),
+                        ).fetchone()
+                        current_snapshot_id = (
+                            None
+                            if baseline_row is None
+                            else _required_text(
+                                baseline_row,
+                                "snapshot_id",
+                            )
+                        )
+                        if (
+                            current_snapshot_id
+                            != expected_previous_class_snapshot_id
+                        ):
+                            raise PostgresOperationError(_CONFLICT_ERROR)
                     _insert_or_validate_learner(connection, learner)
                     _insert_or_validate_class(connection, class_state)
                     connection.execute(
@@ -317,6 +354,30 @@ class PostgresM5Repository:
         except psycopg.Error:
             raise PostgresOperationError(_OPERATION_ERROR) from None
 
+    def list_latest_learner_states(
+        self,
+        course_id: str,
+        class_id: str,
+    ) -> list[LearnerStateSnapshot]:
+        """Load one greatest state version for every learner in scope."""
+
+        try:
+            with self._pool.connection() as connection:
+                rows = connection.execute(
+                    f"""
+                    SELECT DISTINCT ON (learner_id) {_LEARNER_COLUMNS}
+                    FROM m5_learner_states
+                    WHERE course_id = %s AND class_id = %s
+                    ORDER BY learner_id, state_version DESC
+                    """,
+                    (course_id, class_id),
+                ).fetchall()
+                return [_learner_from_row(row) for row in rows]
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
     def save_class_state(self, snapshot: ClassStateSnapshot) -> None:
         """Insert one immutable class aggregate with a serialized version."""
 
@@ -444,6 +505,32 @@ class PostgresM5Repository:
                     (course_id, class_id),
                 ).fetchone()
                 return None if row is None else _class_from_row(row)
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def get_latest_class_state_version(
+        self,
+        course_id: str,
+        class_id: str,
+    ) -> int | None:
+        """Load the greatest internal class history version."""
+
+        try:
+            with self._pool.connection() as connection:
+                row = connection.execute(
+                    """
+                    SELECT MAX(state_version) AS state_version
+                    FROM m5_class_states
+                    WHERE course_id = %s AND class_id = %s
+                    """,
+                    (course_id, class_id),
+                ).fetchone()
+                value = None if row is None else row.get("state_version")
+                if value is not None and (type(value) is not int or value < 1):
+                    raise PostgresOperationError(_INTEGRITY_ERROR)
+                return value
         except PostgresError:
             raise
         except psycopg.Error:

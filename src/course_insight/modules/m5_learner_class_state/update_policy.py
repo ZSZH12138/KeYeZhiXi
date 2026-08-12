@@ -10,6 +10,7 @@ from typing import Any
 from course_insight.contracts.assessment import ScoreAuditRecord, ScoringResultBundle
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import KnowledgeBundle
+from course_insight.contracts.learning_models import LearningObservationBatch
 from course_insight.contracts.state import (
     ConceptState,
     DiagnosisResult,
@@ -122,8 +123,9 @@ class DeterministicStateUpdatePolicy:
         self,
         bundle: ScoringResultBundle,
         knowledge: KnowledgeBundle,
+        observations: LearningObservationBatch | None = None,
     ) -> DiagnosisResult:
-        """Diagnose latest audits using only governed remediation references."""
+        """Diagnose each audit through its authoritative frozen item mapping."""
 
         audits = latest_audits(bundle)
         if not audits:
@@ -132,6 +134,13 @@ class DeterministicStateUpdatePolicy:
                 module="m5",
                 message="at least one score audit is required for state updating",
                 recoverable=True,
+            )
+        if observations is not None:
+            return self._build_authoritative_diagnosis(
+                bundle,
+                knowledge,
+                observations,
+                audits,
             )
         target_concepts = _unique(
             [target.concept_id for target in bundle.remediation_plan.targets]
@@ -185,6 +194,141 @@ class DeterministicStateUpdatePolicy:
             item_diagnoses=diagnoses,
             priority_concept_ids=target_concepts,
             priority_misconception_ids=target_misconceptions,
+            generated_at=bundle.finalized_at,
+        )
+
+    @staticmethod
+    def _build_authoritative_diagnosis(
+        bundle: ScoringResultBundle,
+        knowledge: KnowledgeBundle,
+        observations: LearningObservationBatch,
+        audits: list[ScoreAuditRecord],
+    ) -> DiagnosisResult:
+        if observations.learner_id != bundle.learner_id:
+            raise DomainError(
+                code="STATE_REFERENCE_MISMATCH",
+                module="m5",
+                message="observation batch learner does not match scoring evidence",
+            )
+        observation_by_audit = {
+            (item.source_audit_id, item.source_audit_version): item
+            for item in observations.observations
+            if item.attempt_id == bundle.attempt_id
+        }
+        audit_keys = {(item.audit_id, item.audit_version) for item in audits}
+        if set(observation_by_audit) != audit_keys:
+            raise DomainError(
+                code="STATE_REFERENCE_MISMATCH",
+                module="m5",
+                message="observations must exactly cover current score audits",
+                details={"attempt_id": bundle.attempt_id},
+            )
+
+        q_concepts: dict[tuple[str, str], list[str]] = {}
+        for entry in knowledge.q_matrix:
+            if not entry.is_active():
+                continue
+            key = (entry.item_id, entry.item_version)
+            q_concepts = {
+                **q_concepts,
+                key: [*q_concepts.get(key, []), entry.concept_id],
+            }
+        diagnosis_rows: list[ItemDiagnosis] = []
+        for audit in audits:
+            observation = observation_by_audit[(audit.audit_id, audit.audit_version)]
+            item_key = (observation.item_id, observation.item_version)
+            concepts = _unique(q_concepts.get(item_key, []))
+            if not concepts or set(concepts) != set(observation.concept_ids):
+                raise DomainError(
+                    code="STATE_REFERENCE_MISMATCH",
+                    module="m5",
+                    message="frozen item concepts do not match the governed Q-matrix",
+                    details={
+                        "item_id": observation.item_id,
+                        "item_version": observation.item_version,
+                    },
+                )
+            if (
+                observation.score != audit.total_score
+                or observation.max_score != audit.max_score
+            ):
+                raise DomainError(
+                    code="STATE_REFERENCE_MISMATCH",
+                    module="m5",
+                    message="observation score differs from its source audit",
+                    details={"audit_id": audit.audit_id},
+                )
+            item = knowledge.get_item(*item_key)
+            misconceptions = (
+                list(item.misconception_ids)
+                if observation.response_outcome == "incorrect"
+                else []
+            )
+            prerequisites = _unique(
+                [
+                    relation.from_concept_id
+                    for relation in knowledge.prerequisite_relations
+                    if relation.to_concept_id in concepts
+                ]
+            )
+            diagnosis_rows.append(
+                ItemDiagnosis(
+                    item_instance_id=audit.item_instance_id,
+                    concept_ids=concepts,
+                    misconception_ids=misconceptions,
+                    error_type=(
+                        "correct"
+                        if observation.response_outcome == "correct"
+                        else "incorrect"
+                    ),
+                    confidence=audit.confidence,
+                    evidence_audit_ids=[audit_version_key(audit)],
+                    prerequisite_gap_ids=prerequisites,
+                )
+            )
+
+        diagnosed_concepts = _unique(
+            [concept for row in diagnosis_rows for concept in row.concept_ids]
+        )
+        diagnosed_misconceptions = _unique(
+            [
+                misconception
+                for row in diagnosis_rows
+                for misconception in row.misconception_ids
+            ]
+        )
+        requested_concepts = _unique(
+            [target.concept_id for target in bundle.remediation_plan.targets]
+        )
+        requested_misconceptions = _unique(
+            [
+                target.misconception_id
+                for target in bundle.remediation_plan.targets
+                if target.misconception_id is not None
+            ]
+        )
+        priority_concepts = requested_concepts or diagnosed_concepts
+        priority_misconceptions = (
+            requested_misconceptions or diagnosed_misconceptions
+        )
+        if not set(priority_concepts) <= set(diagnosed_concepts) or not set(
+            priority_misconceptions
+        ) <= set(diagnosed_misconceptions):
+            raise DomainError(
+                code="STATE_REFERENCE_MISMATCH",
+                module="m5",
+                message="remediation priorities are absent from item diagnoses",
+            )
+        return DiagnosisResult(
+            diagnosis_id=(
+                f"{bundle.attempt_id}_diagnosis_v"
+                f"{max(item.audit_version for item in audits)}"
+            ),
+            attempt_id=bundle.attempt_id,
+            learner_id=bundle.learner_id,
+            item_diagnoses=diagnosis_rows,
+            priority_concept_ids=priority_concepts,
+            priority_misconception_ids=priority_misconceptions,
             generated_at=bundle.finalized_at,
         )
 

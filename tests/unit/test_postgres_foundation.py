@@ -570,6 +570,7 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
         "0011_m4_intent_runtime_statuses.sql",
         "0012_m6_policy_learning.sql",
         "0013_m0_policy_freeze.sql",
+        "0014_m5_m8_model_runtime.sql",
     )
     all_sql = "\n".join(migration.sql for migration in migrations)
     for table_name in CORE_TABLES:

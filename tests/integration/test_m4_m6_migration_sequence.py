@@ -17,24 +17,25 @@ from course_insight.infrastructure.sqlite.migrations import (
 def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
     tmp_path: Path,
 ) -> None:
-    """Keep published M4 versions while appending M6 and its M0 freeze."""
+    """Keep published migrations while appending the M5/M8 runtime schema."""
 
     expected_tail = (
         "0010_m4_intent_decisions.sql",
         "0011_m4_intent_runtime_statuses.sql",
         "0012_m6_policy_learning.sql",
         "0013_m0_policy_freeze.sql",
+        "0014_m5_m8_model_runtime.sql",
     )
 
-    assert SQLITE_SCHEMA_VERSION == 13
-    assert POSTGRES_SCHEMA_VERSION == 13
+    assert SQLITE_SCHEMA_VERSION == 14
+    assert POSTGRES_SCHEMA_VERSION == 14
     assert tuple(
         migration.path.name for migration in load_migrations()
-    )[-4:] == expected_tail
+    )[-5:] == expected_tail
     assert tuple(
         path.name
         for path in sorted(MIGRATIONS_DIRECTORY.glob("*.sql"))
-    )[-4:] == expected_tail
+    )[-5:] == expected_tail
 
     database_path = tmp_path / "runtime" / "course_insight.sqlite3"
     with connect_sqlite(database_path) as connection:
@@ -66,6 +67,7 @@ def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
         (11, "m4_intent_runtime_statuses"),
         (12, "m6_policy_learning"),
         (13, "m0_policy_freeze"),
+        (14, "m5_m8_model_runtime"),
     )
     assert {
         "m4_intent_decisions",
