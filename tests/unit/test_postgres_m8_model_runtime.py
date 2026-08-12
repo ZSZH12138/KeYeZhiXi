@@ -9,6 +9,7 @@ import pytest
 
 from course_insight.contracts.learning_models import (
     AbilityEstimate,
+    AdaptiveSelectionResult,
     CalibrationReviewDecision,
     CalibrationRunResult,
     IRTItemParameters,
@@ -92,6 +93,19 @@ def _ability() -> AbilityEstimate:
     )
 
 
+def _selection() -> AdaptiveSelectionResult:
+    return AdaptiveSelectionResult(
+        selection_id="adaptive_pg",
+        policy_id="policy_pg",
+        learner_id="learner_1",
+        item_ids=["item_1"],
+        ability_estimate=_ability(),
+        status="selected",
+        failure_code=None,
+        selected_at=NOW + timedelta(minutes=3),
+    )
+
+
 def _row(contract: Any, **columns: Any) -> dict[str, Any]:
     return {
         **columns,
@@ -107,6 +121,7 @@ def _model_responder(
     parameter_sets: list[IRTParameterSet],
     decision: CalibrationReviewDecision | None = None,
     ability: AbilityEstimate | None = None,
+    selection: AdaptiveSelectionResult | None = None,
 ):
     by_parameter_id = {item.parameter_set_id: item for item in parameter_sets}
 
@@ -172,6 +187,16 @@ def _model_responder(
                 parameter_set_id=ability.parameter_set_id,
                 estimated_at=ability.estimated_at,
             )
+        if "from m8_adaptive_selections" in normalized:
+            if selection is None:
+                return None
+            return _row(
+                selection,
+                selection_id=selection.selection_id,
+                course_id="course_1",
+                learner_id=selection.learner_id,
+                selected_at=selection.selected_at,
+            )
         return None
 
     return respond
@@ -184,12 +209,14 @@ def test_postgres_persists_and_recovers_full_irt_history() -> None:
     approved = _approved()
     decision = _decision()
     ability = _ability()
+    selection = _selection()
     connection = FakeConnection(
         _model_responder(
             run=run,
             parameter_sets=[run.parameter_set, approved],
             decision=decision,
             ability=ability,
+            selection=selection,
         )
     )
     repository = PostgresM8Repository(FakePool(connection))
@@ -223,6 +250,11 @@ def test_postgres_persists_and_recovers_full_irt_history() -> None:
         course_id="course_1",
     ) == ability
     assert repository.get_ability_estimate(ability.estimate_id) == ability
+    assert repository.insert_or_get_adaptive_selection(
+        selection,
+        course_id="course_1",
+    ) == selection
+    assert repository.get_adaptive_selection(selection.selection_id) == selection
     assert any(
         "INSERT INTO m8_irt_parameter_sets" in statement
         and approved.content_checksum() in parameters
@@ -264,3 +296,4 @@ def test_postgres_model_runtime_empty_reads_are_explicit() -> None:
     assert repository.list_parameter_sets(course_id="course_1") == []
     assert repository.get_calibration_review("missing") is None
     assert repository.get_ability_estimate("missing") is None
+    assert repository.get_adaptive_selection("missing") is None

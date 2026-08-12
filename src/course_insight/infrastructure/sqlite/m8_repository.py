@@ -14,6 +14,7 @@ from course_insight.contracts.assessment import (
 )
 from course_insight.contracts.learning_models import (
     AbilityEstimate,
+    AdaptiveSelectionResult,
     CalibrationReviewDecision,
     CalibrationRunResult,
     IRTParameterSet,
@@ -463,6 +464,27 @@ class SQLiteM8Repository:
         return m8_model_runtime.get_ability_estimate(
             self._database_path,
             estimate_id,
+        )
+
+    def insert_or_get_adaptive_selection(
+        self,
+        selection: AdaptiveSelectionResult,
+        *,
+        course_id: str,
+    ) -> AdaptiveSelectionResult:
+        return m8_model_runtime.insert_or_get_adaptive_selection(
+            self._database_path,
+            selection,
+            course_id=course_id,
+        )
+
+    def get_adaptive_selection(
+        self,
+        selection_id: str,
+    ) -> AdaptiveSelectionResult | None:
+        return m8_model_runtime.get_adaptive_selection(
+            self._database_path,
+            selection_id,
         )
 
     @staticmethod

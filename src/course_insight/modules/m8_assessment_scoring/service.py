@@ -27,9 +27,6 @@ from course_insight.contracts.evidence import EvidenceQuery
 from course_insight.contracts.events import LearningEvent
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.learning_models import (
-    AbilityEstimate,
-    AdaptiveSelectionPolicy,
-    AdaptiveSelectionResult,
     CalibrationRunResult,
     IRTParameterSet,
     LearningObservationBatch,
@@ -740,31 +737,6 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
             metrics={},
             status="empty",
             generated_at=requested_at,
-        )
-
-    def select_adaptive_items(
-        self,
-        policy: AdaptiveSelectionPolicy,
-        ability_estimate: AbilityEstimate,
-        requested_at: datetime,
-    ) -> AdaptiveSelectionResult:
-        """Return an empty adaptive item selection.
-
-        原始输入：M8 自适应选题策略、能力估计和请求时间。
-        契约来源：learning_models 中的策略、能力与选题结果契约。
-        返回消费者：AppCoordinator 和后续 M8 组卷流程。
-        业务校验：不计算信息量、不选择题目且不回传虚构能力值。
-        错误码：无；当前空实现固定返回 empty。
-        """
-
-        return AdaptiveSelectionResult(
-            selection_id=f"selection_empty_{policy.policy_id}",
-            policy_id=policy.policy_id,
-            learner_id=ability_estimate.learner_id,
-            item_ids=[],
-            ability_estimate=None,
-            status="empty",
-            selected_at=requested_at,
         )
 
     @staticmethod

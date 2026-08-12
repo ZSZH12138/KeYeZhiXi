@@ -11,6 +11,7 @@ from course_insight.contracts.assessment import (
 )
 from course_insight.contracts.learning_models import (
     AbilityEstimate,
+    AdaptiveSelectionResult,
     CalibrationReviewDecision,
     CalibrationRunResult,
     IRTParameterSet,
@@ -161,3 +162,17 @@ class M8Repository(Protocol):
         estimate_id: str,
     ) -> AbilityEstimate | None:
         """Load one exact ability estimate."""
+
+    def insert_or_get_adaptive_selection(
+        self,
+        selection: AdaptiveSelectionResult,
+        *,
+        course_id: str,
+    ) -> AdaptiveSelectionResult:
+        """Persist one immutable adaptive item-selection decision."""
+
+    def get_adaptive_selection(
+        self,
+        selection_id: str,
+    ) -> AdaptiveSelectionResult | None:
+        """Load one exact adaptive item-selection decision."""

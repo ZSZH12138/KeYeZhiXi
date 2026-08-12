@@ -11,6 +11,7 @@ from typing import TypeVar
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.learning_models import (
     AbilityEstimate,
+    AdaptiveSelectionResult,
     CalibrationReviewDecision,
     CalibrationRunResult,
     IRTParameterSet,
@@ -24,6 +25,7 @@ _PARAMETER_CONFLICT = "M8 IRT parameter-set conflict"
 _RUN_CONFLICT = "M8 IRT calibration-run conflict"
 _REVIEW_CONFLICT = "M8 calibration review conflict"
 _ABILITY_CONFLICT = "M8 ability-estimate conflict"
+_SELECTION_CONFLICT = "M8 adaptive-selection conflict"
 _INTEGRITY_ERROR = "M8 model-runtime persisted payload integrity error"
 
 
@@ -367,6 +369,89 @@ def get_ability_estimate(
         connection.close()
 
 
+def insert_or_get_adaptive_selection(
+    database_path: Path,
+    selection: AdaptiveSelectionResult,
+    *,
+    course_id: str,
+) -> AdaptiveSelectionResult:
+    candidate = _copy_contract(selection, AdaptiveSelectionResult)
+    scope = _require_scope(course_id)
+    if candidate.status == "empty" or candidate.ability_estimate is None:
+        raise ValueError("M8 cannot persist an unconfigured adaptive selection")
+    connection = connect_sqlite(database_path)
+    try:
+        connection.execute("BEGIN IMMEDIATE")
+        parameter_scope = connection.execute(
+            """
+            SELECT course_id
+            FROM m8_irt_parameter_sets
+            WHERE parameter_set_id = ?
+            """,
+            (candidate.ability_estimate.parameter_set_id,),
+        ).fetchone()
+        if parameter_scope is None or str(parameter_scope["course_id"]) != scope:
+            raise RuntimeError(_SELECTION_CONFLICT)
+        connection.execute(
+            """
+            INSERT INTO m8_adaptive_selections(
+                selection_id, course_id, learner_id, selected_at,
+                payload, payload_checksum, schema_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                candidate.selection_id,
+                scope,
+                candidate.learner_id,
+                candidate.selected_at.astimezone(UTC).isoformat(),
+                dumps_json(candidate.to_dict()),
+                candidate.content_checksum(),
+                candidate.schema_version,
+            ),
+        )
+        row = connection.execute(
+            """
+            SELECT selection_id, course_id, learner_id, selected_at,
+                   payload, payload_checksum, schema_version
+            FROM m8_adaptive_selections
+            WHERE selection_id = ?
+            """,
+            (candidate.selection_id,),
+        ).fetchone()
+        stored = _selection_from_row(row)
+        if stored != candidate or str(row["course_id"]) != scope:
+            raise RuntimeError(_SELECTION_CONFLICT)
+        connection.execute("COMMIT")
+        return stored.model_copy(deep=True)
+    except Exception:
+        if connection.in_transaction:
+            connection.execute("ROLLBACK")
+        raise
+    finally:
+        connection.close()
+
+
+def get_adaptive_selection(
+    database_path: Path,
+    selection_id: str,
+) -> AdaptiveSelectionResult | None:
+    connection = connect_sqlite(database_path)
+    try:
+        row = connection.execute(
+            """
+            SELECT selection_id, course_id, learner_id, selected_at,
+                   payload, payload_checksum, schema_version
+            FROM m8_adaptive_selections
+            WHERE selection_id = ?
+            """,
+            (selection_id,),
+        ).fetchone()
+        return None if row is None else _selection_from_row(row).model_copy(deep=True)
+    finally:
+        connection.close()
+
+
 def _insert_parameter_set(
     connection: sqlite3.Connection,
     candidate: IRTParameterSet,
@@ -476,6 +561,16 @@ def _ability_from_row(row: sqlite3.Row | None) -> AbilityEstimate:
     return estimate
 
 
+def _selection_from_row(row: sqlite3.Row | None) -> AdaptiveSelectionResult:
+    selection = _contract_from_row(row, AdaptiveSelectionResult)
+    if (
+        selection.selection_id != str(row["selection_id"])
+        or selection.learner_id != str(row["learner_id"])
+    ):
+        raise RuntimeError(_INTEGRITY_ERROR)
+    return selection
+
+
 def _contract_from_row(
     row: sqlite3.Row | None,
     contract_type: type[_TContract],
@@ -507,6 +602,7 @@ def _require_scope(course_id: str) -> str:
 
 
 __all__ = [
+    "get_adaptive_selection",
     "get_ability_estimate",
     "get_calibration_review",
     "get_calibration_run",
@@ -514,6 +610,7 @@ __all__ = [
     "get_parameter_set",
     "get_parameter_set_course_id",
     "insert_or_get_ability_estimate",
+    "insert_or_get_adaptive_selection",
     "insert_or_get_calibration_review",
     "insert_or_get_calibration_run",
     "insert_or_get_parameter_set",

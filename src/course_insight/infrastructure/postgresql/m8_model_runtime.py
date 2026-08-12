@@ -11,6 +11,7 @@ from psycopg.types.json import Jsonb
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.learning_models import (
     AbilityEstimate,
+    AdaptiveSelectionResult,
     CalibrationReviewDecision,
     CalibrationRunResult,
     IRTParameterSet,
@@ -41,6 +42,10 @@ payload, payload_checksum, schema_version
 """
 _ABILITY_COLUMNS = """
 estimate_id, course_id, learner_id, parameter_set_id, estimated_at,
+payload, payload_checksum, schema_version
+"""
+_SELECTION_COLUMNS = """
+selection_id, course_id, learner_id, selected_at,
 payload, payload_checksum, schema_version
 """
 
@@ -374,6 +379,89 @@ def get_ability_estimate(
         raise PostgresOperationError(_OPERATION_ERROR) from None
 
 
+def insert_or_get_adaptive_selection(
+    pool: PostgresPool,
+    selection: AdaptiveSelectionResult,
+    *,
+    course_id: str,
+) -> AdaptiveSelectionResult:
+    candidate = _isolated_contract(selection, AdaptiveSelectionResult)
+    scope = _require_scope(course_id)
+    if candidate.status == "empty" or candidate.ability_estimate is None:
+        raise ValueError("M8 cannot persist an unconfigured adaptive selection")
+    try:
+        with pool.connection() as connection:
+            with connection.transaction():
+                parameter_scope = connection.execute(
+                    """
+                    SELECT course_id
+                    FROM m8_irt_parameter_sets
+                    WHERE parameter_set_id = %s
+                    """,
+                    (candidate.ability_estimate.parameter_set_id,),
+                ).fetchone()
+                if (
+                    parameter_scope is None
+                    or _required_text(parameter_scope, "course_id") != scope
+                ):
+                    raise PostgresOperationError(_CONFLICT_ERROR)
+                connection.execute(
+                    """
+                    INSERT INTO m8_adaptive_selections(
+                        selection_id, course_id, learner_id, selected_at,
+                        payload, payload_checksum, schema_version
+                    ) VALUES (%s, %s, %s, %s, %s, %s, %s)
+                    ON CONFLICT (selection_id) DO NOTHING
+                    """,
+                    (
+                        candidate.selection_id,
+                        scope,
+                        candidate.learner_id,
+                        candidate.selected_at,
+                        Jsonb(candidate.to_dict()),
+                        candidate.content_checksum(),
+                        candidate.schema_version,
+                    ),
+                )
+                row = connection.execute(
+                    f"""
+                    SELECT {_SELECTION_COLUMNS}
+                    FROM m8_adaptive_selections
+                    WHERE selection_id = %s
+                    """,
+                    (candidate.selection_id,),
+                ).fetchone()
+                stored = _selection_from_row(row)
+                if stored != candidate or _required_text(row, "course_id") != scope:
+                    raise PostgresOperationError(_CONFLICT_ERROR)
+                return stored
+    except PostgresError:
+        raise
+    except psycopg.Error:
+        raise PostgresOperationError(_OPERATION_ERROR) from None
+
+
+def get_adaptive_selection(
+    pool: PostgresPool,
+    selection_id: str,
+) -> AdaptiveSelectionResult | None:
+    try:
+        with pool.connection() as connection:
+            row = connection.execute(
+                f"""
+                SELECT {_SELECTION_COLUMNS}
+                FROM m8_adaptive_selections
+                WHERE selection_id = %s
+                """,
+                (selection_id,),
+            ).fetchone()
+            return None if row is None else _selection_from_row(row)
+    except PostgresError:
+        raise
+    except psycopg.Error:
+        raise PostgresOperationError(_OPERATION_ERROR) from None
+
+
 def _insert_parameter_set(
     connection: Any,
     candidate: IRTParameterSet,
@@ -485,6 +573,18 @@ def _ability_from_row(row: Mapping[str, Any] | None) -> AbilityEstimate:
     return estimate
 
 
+def _selection_from_row(
+    row: Mapping[str, Any] | None,
+) -> AdaptiveSelectionResult:
+    selection = _contract_from_row(row, AdaptiveSelectionResult)
+    if (
+        selection.selection_id != _required_text(row, "selection_id")
+        or selection.learner_id != _required_text(row, "learner_id")
+    ):
+        raise PostgresOperationError(_INTEGRITY_ERROR)
+    return selection
+
+
 def _contract_from_row(
     row: Mapping[str, Any] | None,
     contract_type: type[_TContract],
@@ -525,6 +625,7 @@ def _require_scope(course_id: str) -> str:
 
 
 __all__ = [
+    "get_adaptive_selection",
     "get_ability_estimate",
     "get_calibration_review",
     "get_calibration_run",
@@ -532,6 +633,7 @@ __all__ = [
     "get_parameter_set",
     "get_parameter_set_course_id",
     "insert_or_get_ability_estimate",
+    "insert_or_get_adaptive_selection",
     "insert_or_get_calibration_review",
     "insert_or_get_calibration_run",
     "insert_or_get_parameter_set",

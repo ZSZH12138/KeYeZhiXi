@@ -3,16 +3,24 @@
 from __future__ import annotations
 
 import hashlib
+from datetime import datetime
 from typing import Any
 
 from course_insight.contracts.errors import DomainError
+from course_insight.contracts.knowledge import ItemCard
 from course_insight.contracts.learning_models import (
     AbilityEstimate,
+    AdaptiveSelectionPolicy,
+    AdaptiveSelectionResult,
     CalibrationReviewDecision,
     CalibrationRunResult,
     IRTParameterSet,
+    ItemExposureSnapshot,
     LearningObservation,
     ModelQualityReport,
+)
+from course_insight.modules.m8_assessment_scoring.adaptive_selector import (
+    AdaptiveItemSelector,
 )
 
 
@@ -204,6 +212,73 @@ class M8ModelRuntimeMixin:
                 recoverable=True,
             )
         return estimate.model_copy(deep=True)
+
+    def select_adaptive_items(
+        self,
+        policy: AdaptiveSelectionPolicy,
+        ability_estimate: AbilityEstimate,
+        parameter_set: IRTParameterSet | None = None,
+        candidate_items: list[ItemCard] | None = None,
+        administered_item_ids: frozenset[str] = frozenset(),
+        exposure_snapshot: ItemExposureSnapshot | None = None,
+        requested_at: datetime | None = None,
+    ) -> AdaptiveSelectionResult:
+        """Select and persist governed items from approved 2PL parameters."""
+
+        if requested_at is None:
+            raise ValueError("adaptive selection requires requested_at")
+        if policy.status == "empty":
+            return AdaptiveSelectionResult(
+                selection_id=f"selection_empty_{policy.policy_id}",
+                policy_id=policy.policy_id,
+                learner_id=ability_estimate.learner_id,
+                item_ids=[],
+                ability_estimate=None,
+                status="empty",
+                failure_code=None,
+                selected_at=requested_at,
+            )
+        if (
+            parameter_set is None
+            or candidate_items is None
+            or exposure_snapshot is None
+        ):
+            raise DomainError(
+                code="ADAPTIVE_INPUT_MISSING",
+                module="m8",
+                message="configured adaptive selection requires model and item inputs",
+                recoverable=True,
+            )
+        selection = AdaptiveItemSelector().select(
+            policy=policy,
+            ability_estimate=ability_estimate,
+            parameter_set=parameter_set,
+            candidate_items=list(candidate_items),
+            administered_item_ids=frozenset(administered_item_ids),
+            exposure_snapshot=exposure_snapshot,
+            requested_at=requested_at,
+        )
+        course_id = self._repository.get_parameter_set_course_id(
+            parameter_set.parameter_set_id
+        )
+        if course_id is None:
+            raise DomainError(
+                code="IRT_PARAMETER_SET_NOT_FOUND",
+                module="m8",
+                message="adaptive parameter set is not persisted",
+                recoverable=True,
+            )
+        inserter = getattr(
+            self._repository,
+            "insert_or_get_adaptive_selection",
+            None,
+        )
+        if not callable(inserter):
+            return selection
+        stored = inserter(selection, course_id=course_id)
+        if stored != selection:
+            raise RuntimeError("M8 adaptive-selection persistence conflict")
+        return stored.model_copy(deep=True)
 
     @staticmethod
     def _validate_review_inputs(

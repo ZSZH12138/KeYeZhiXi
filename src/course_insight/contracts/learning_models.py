@@ -436,21 +436,32 @@ class CalibrationRunResult(ContractModel):
 
 
 class AdaptiveSelectionPolicy(ContractModel):
-    """M8 constraints for future IRT-information item selection."""
+    """M8 constraints for governed IRT-information item selection."""
 
     policy_id: str = Field(min_length=1)
     version: str = Field(min_length=1)
     parameter_set_id: str | None = None
     max_items: int = Field(ge=1)
     concept_quotas: dict[str, int]
+    max_item_exposure_rate: float = Field(default=0.20, gt=0.0, le=1.0)
+    difficulty_range: tuple[float, float] = (-4.0, 4.0)
     status: Literal["empty", "configured"]
 
     def validate_business_rules(self) -> None:
         """Require non-negative quotas and no parameter set for empty policy."""
 
-        if any(value < 0 for value in self.concept_quotas.values()) or (
+        invalid_status = (
             self.status == "empty" and self.parameter_set_id is not None
-        ):
+        ) or (self.status == "configured" and self.parameter_set_id is None)
+        invalid_difficulty = (
+            len(self.difficulty_range) != 2
+            or self.difficulty_range[0] > self.difficulty_range[1]
+        )
+        invalid_quotas = any(
+            not concept_id or value < 0
+            for concept_id, value in self.concept_quotas.items()
+        )
+        if invalid_status or invalid_difficulty or invalid_quotas:
             raise DomainError(
                 code="ADAPTIVE_POLICY_INVALID",
                 module="m8",
@@ -458,8 +469,30 @@ class AdaptiveSelectionPolicy(ContractModel):
             )
 
 
+class ItemExposureSnapshot(ContractModel):
+    """Historical item administration counts for one IRT parameter set."""
+
+    parameter_set_id: str = Field(min_length=1)
+    total_sessions: int = Field(ge=0)
+    item_administered_counts: dict[str, int]
+
+    def validate_business_rules(self) -> None:
+        """Reject impossible or ambiguous exposure counters."""
+
+        invalid = any(
+            not item_id or count < 0 or count > self.total_sessions
+            for item_id, count in self.item_administered_counts.items()
+        )
+        if invalid:
+            raise DomainError(
+                code="ITEM_EXPOSURE_INVALID",
+                module="m8",
+                message="item exposure counts must fit the session total",
+            )
+
+
 class AdaptiveSelectionResult(ContractModel):
-    """M8 item selection output; empty until IRT is configured."""
+    """M8 constrained item-selection output."""
 
     selection_id: str = Field(min_length=1)
     policy_id: str = Field(min_length=1)
@@ -467,15 +500,28 @@ class AdaptiveSelectionResult(ContractModel):
     item_ids: list[str]
     ability_estimate: AbilityEstimate | None = None
     status: Literal["empty", "selected", "failed"]
+    failure_code: str | None = Field(default=None, min_length=1)
     selected_at: datetime
 
     def validate_business_rules(self) -> None:
         """Keep item identities unique and empty status empty."""
 
-        if len(self.item_ids) != len(set(self.item_ids)) or (
-            self.status == "empty"
-            and (self.item_ids or self.ability_estimate is not None)
-        ):
+        duplicate_items = len(self.item_ids) != len(set(self.item_ids))
+        invalid_empty = self.status == "empty" and (
+            self.item_ids
+            or self.ability_estimate is not None
+            or self.failure_code is not None
+        )
+        invalid_selected = self.status == "selected" and (
+            not self.item_ids
+            or self.ability_estimate is None
+            or self.ability_estimate.status != "estimated"
+            or self.failure_code is not None
+        )
+        invalid_failed = self.status == "failed" and (
+            self.item_ids or self.failure_code is None
+        )
+        if duplicate_items or invalid_empty or invalid_selected or invalid_failed:
             raise DomainError(
                 code="ADAPTIVE_SELECTION_INVALID",
                 module="m8",
