@@ -300,8 +300,10 @@ def test_dina_consumes_each_source_audit_version_only_once() -> None:
         max_iterations=30,
     )
 
+    baseline = engine.fit(_training_cohort(), _q_matrix())
     model = engine.fit(cohort, _q_matrix())
 
+    assert model == baseline
     assert model.observation_count == 8
     assert {item.item_id: item.sample_size for item in model.item_parameters} == {
         "item_1": 4,

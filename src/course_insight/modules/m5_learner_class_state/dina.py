@@ -379,7 +379,7 @@ class DinaEngine:
         frozen_requirements = {
             key: frozenset(value) for key, value in requirements.items()
         }
-        created_at = max(batch.created_at for batch in cohort)
+        created_at = max(observation.occurred_at for observation in observations)
         return (
             next(iter(course_ids)),
             next(iter(class_ids)),
