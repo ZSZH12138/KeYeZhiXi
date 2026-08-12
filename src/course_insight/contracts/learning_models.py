@@ -155,6 +155,7 @@ class ConceptResponse(ContractModel):
     learner_id: str = Field(min_length=1)
     course_id: str = Field(min_length=1)
     class_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
     concept_id: str = Field(min_length=1)
     is_correct: bool
     source_audit_id: str = Field(min_length=1)

@@ -174,6 +174,13 @@ class DeterministicClassAggregationPolicy:
             concept_status=concept_status,
             misconception_summary=misconception_summary,
             evidence_status="sufficient" if sufficient else "insufficient",
+            model_run_ids=sorted(
+                {
+                    state.model_run_id
+                    for state in states
+                    if state.model_run_id is not None
+                }
+            ),
             updated_at=max(state.updated_at for state in states),
         )
 

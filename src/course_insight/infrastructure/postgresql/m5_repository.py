@@ -256,6 +256,35 @@ class PostgresM5Repository:
         except psycopg.Error:
             raise PostgresOperationError(_OPERATION_ERROR) from None
 
+    def get_latest_dina_model(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> DinaModelArtifact | None:
+        """Load the latest DINA model for one teaching scope."""
+
+        try:
+            with self._pool.connection() as connection:
+                rows = connection.execute(
+                    f"""
+                    SELECT {_DINA_MODEL_COLUMNS}
+                    FROM m5_dina_models
+                    WHERE course_id = %s
+                    ORDER BY created_at DESC, model_id DESC
+                    """,
+                    (course_id,),
+                ).fetchall()
+                for row in rows:
+                    model = _dina_model_from_row(row)
+                    if model.class_id == class_id:
+                        return model
+                return None
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
     def insert_or_get_bkt_model(
         self,
         model: BktModelArtifact,
@@ -272,6 +301,18 @@ class PostgresM5Repository:
             self._pool,
             course_id=course_id,
             model_version=model_version,
+        )
+
+    def get_latest_bkt_model(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> BktModelArtifact | None:
+        return m5_bkt_runtime.get_latest_bkt_model(
+            self._pool,
+            course_id=course_id,
+            class_id=class_id,
         )
 
     def insert_or_get_knowledge_trace(

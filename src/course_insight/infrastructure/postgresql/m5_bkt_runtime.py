@@ -124,6 +124,43 @@ def get_bkt_model(
         raise PostgresOperationError(_OPERATION_ERROR) from None
 
 
+def get_latest_bkt_model(
+    pool: PostgresPool,
+    *,
+    course_id: str,
+    class_id: str,
+) -> BktModelArtifact | None:
+    """Load the latest BKT model for one teaching scope."""
+
+    try:
+        with pool.connection() as connection:
+            rows = connection.execute(
+                """
+                SELECT
+                    model_id,
+                    course_id,
+                    model_version,
+                    created_at,
+                    payload,
+                    payload_checksum,
+                    schema_version
+                FROM m5_bkt_models
+                WHERE course_id = %s
+                ORDER BY created_at DESC, model_id DESC
+                """,
+                (course_id,),
+            ).fetchall()
+            for row in rows:
+                model = _model_from_row(row)
+                if model.class_id == class_id:
+                    return model
+            return None
+    except PostgresError:
+        raise
+    except psycopg.Error:
+        raise PostgresOperationError(_OPERATION_ERROR) from None
+
+
 def insert_or_get_knowledge_trace(
     pool: PostgresPool,
     trace: KnowledgeTraceSnapshot,

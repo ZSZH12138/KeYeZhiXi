@@ -45,6 +45,7 @@ def _synthetic_bkt_case() -> tuple[
                         learner_id=learner_id,
                         course_id="course_1",
                         class_id="class_1",
+                        attempt_id=f"attempt_{concept_id}_{learner_index}",
                         concept_id=concept_id,
                         is_correct=correct,
                         source_audit_id=(

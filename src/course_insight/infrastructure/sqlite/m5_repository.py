@@ -552,6 +552,38 @@ class SQLiteM5Repository:
         finally:
             connection.close()
 
+    def get_latest_dina_model(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> DinaModelArtifact | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT
+                    model_id,
+                    course_id,
+                    model_version,
+                    created_at,
+                    payload,
+                    payload_checksum,
+                    schema_version
+                FROM m5_dina_models
+                WHERE course_id = ?
+                ORDER BY created_at DESC, model_id DESC
+                """,
+                (course_id,),
+            ).fetchall()
+            for row in rows:
+                model = self._dina_model_from_row(row)
+                if model.class_id == class_id:
+                    return model.model_copy(deep=True)
+            return None
+        finally:
+            connection.close()
+
     def insert_or_get_bkt_model(
         self,
         model: BktModelArtifact,
@@ -568,6 +600,18 @@ class SQLiteM5Repository:
             self._database_path,
             course_id=course_id,
             model_version=model_version,
+        )
+
+    def get_latest_bkt_model(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> BktModelArtifact | None:
+        return m5_bkt_runtime.get_latest_bkt_model(
+            self._database_path,
+            course_id=course_id,
+            class_id=class_id,
         )
 
     def insert_or_get_knowledge_trace(

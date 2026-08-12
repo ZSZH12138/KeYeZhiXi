@@ -175,6 +175,10 @@ def test_postgres_m5_persists_observations_and_dina_model_versions() -> None:
         course_id="course_1",
         model_version=model.model_version,
     ) == model
+    assert repository.get_latest_dina_model(
+        course_id="course_1",
+        class_id="class_1",
+    ) == model
 
     inserted_payloads = [
         parameter.obj
@@ -226,6 +230,10 @@ def test_postgres_m5_persists_bkt_models_and_knowledge_traces() -> None:
     assert repository.get_bkt_model(
         course_id=model.course_id,
         model_version=model.model_version,
+    ) == model
+    assert repository.get_latest_bkt_model(
+        course_id=model.course_id,
+        class_id=model.class_id,
     ) == model
     assert repository.insert_or_get_knowledge_trace(trace) == trace
     assert repository.get_knowledge_trace(trace_id=trace.trace_id) == trace

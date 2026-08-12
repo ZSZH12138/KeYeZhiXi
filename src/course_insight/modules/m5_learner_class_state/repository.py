@@ -54,6 +54,14 @@ class M5Repository(Protocol):
     ) -> DinaModelArtifact | None:
         """Load one exact course-scoped DINA model version."""
 
+    def get_latest_dina_model(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> DinaModelArtifact | None:
+        """Load the latest DINA model for one teaching scope."""
+
     def insert_or_get_bkt_model(
         self,
         model: BktModelArtifact,
@@ -67,6 +75,14 @@ class M5Repository(Protocol):
         model_version: str,
     ) -> BktModelArtifact | None:
         """Load one exact course-scoped BKT model version."""
+
+    def get_latest_bkt_model(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> BktModelArtifact | None:
+        """Load the latest BKT model for one teaching scope."""
 
     def insert_or_get_knowledge_trace(
         self,

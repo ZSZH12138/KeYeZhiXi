@@ -18,6 +18,7 @@ from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.learning_models import (
     AbilityEstimate,
     AdaptiveSelectionPolicy,
+    LearningModelRun,
     LearningObservationBatch,
 )
 from course_insight.contracts.platform import (
@@ -286,6 +287,11 @@ class AppCoordinator:
         )
         self._m0.append_learning_events(events=scoring.learning_events)
         observation_batch = self._build_observation_batch(scoring)
+        learning_model_run = (
+            None
+            if observation_batch is None
+            else self._run_learning_models(observation_batch, knowledge_bundle)
+        )
         state = self._m5.update_state(
             scoring_result_bundle=scoring,
             knowledge_bundle=knowledge_bundle,
@@ -293,6 +299,7 @@ class AppCoordinator:
             previous_class_state_snapshot=None,
             state_policy_path=state_policy_path,
             learning_observation_batch=observation_batch,
+            learning_model_run=learning_model_run,
         )
         tutoring = self._m6.decide_next_action(
             task_plan=task_plan,
@@ -314,7 +321,7 @@ class AppCoordinator:
             state_update_result=state,
             teacher_threshold_policy_path=teacher_threshold_policy_path,
         )
-        return {
+        result: dict[str, ContractModel] = {
             "task_plan": task_plan,
             "assessment_paper": paper,
             "scoring_preparation": preparation,
@@ -326,6 +333,9 @@ class AppCoordinator:
             "feedback": feedback,
             "analytics": analytics,
         }
+        if learning_model_run is not None:
+            result["learning_model_run"] = learning_model_run
+        return result
 
     def run_teacher_review_cycle(
         self,
@@ -349,6 +359,11 @@ class AppCoordinator:
         )
         self._m0.append_learning_events(events=reviewed.learning_events)
         observation_batch = self._build_observation_batch(reviewed)
+        learning_model_run = (
+            None
+            if observation_batch is None
+            else self._run_learning_models(observation_batch, knowledge_bundle)
+        )
         recomputed = self._m5.update_state(
             scoring_result_bundle=reviewed,
             knowledge_bundle=knowledge_bundle,
@@ -356,6 +371,7 @@ class AppCoordinator:
             previous_class_state_snapshot=state_update_result.class_state_snapshot,
             state_policy_path=state_policy_path,
             learning_observation_batch=observation_batch,
+            learning_model_run=learning_model_run,
         )
         refreshed = self._m9.build_teacher_analytics(
             knowledge_bundle=knowledge_bundle,
@@ -363,12 +379,15 @@ class AppCoordinator:
             state_update_result=recomputed,
             teacher_threshold_policy_path=teacher_threshold_policy_path,
         )
-        return {
+        result: dict[str, ContractModel] = {
             "review_decision": decision,
             "reviewed_scoring_result": reviewed,
             "recomputed_state_result": recomputed,
             "refreshed_analytics": refreshed,
         }
+        if learning_model_run is not None:
+            result["learning_model_run"] = learning_model_run
+        return result
 
     def _build_observation_batch(
         self,
@@ -378,6 +397,18 @@ class AppCoordinator:
         if not callable(builder):
             return None
         return builder(scoring.paper_id, scoring)
+
+    def _run_learning_models(
+        self,
+        observation_batch: LearningObservationBatch,
+        knowledge_bundle: KnowledgeBundle,
+    ) -> LearningModelRun | None:
+        """Forward authoritative M8 evidence without constructing an empty batch."""
+
+        runner = getattr(self._m5, "run_learning_models", None)
+        if not callable(runner):
+            return None
+        return runner(observation_batch, knowledge_bundle)
 
     def run_intelligence_architecture(
         self,

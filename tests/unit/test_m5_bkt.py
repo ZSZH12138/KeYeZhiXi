@@ -34,6 +34,7 @@ def _response(
         learner_id=learner_id,
         course_id="course_1",
         class_id="class_1",
+        attempt_id=f"attempt_{learner_id}_{index}",
         concept_id=concept_id,
         is_correct=correct,
         source_audit_id=f"audit_{learner_id}_{concept_id}_{index}",
@@ -129,6 +130,43 @@ def test_order_of_answers_changes_the_knowledge_trace() -> None:
     second = _engine().update(_model(), _sequence("learner_1", [False, True]))
 
     assert first.concept_probabilities != second.concept_probabilities
+
+
+def test_equal_timestamp_responses_are_ordered_by_attempt_then_observation() -> None:
+    """Catch nondeterministic ordering when two audits have the same timestamp."""
+
+    from course_insight.contracts.learning_models import ConceptResponseSequence
+
+    early = _response("learner_1", 0, True).model_copy(
+        update={
+            "observation_id": "z_observation",
+            "attempt_id": "attempt_a",
+            "occurred_at": NOW,
+        }
+    )
+    late = _response("learner_1", 1, False).model_copy(
+        update={
+            "observation_id": "a_observation",
+            "attempt_id": "attempt_b",
+            "occurred_at": NOW,
+        }
+    )
+    unordered = ConceptResponseSequence(
+        sequence_id="same_time_unordered",
+        learner_id="learner_1",
+        course_id="course_1",
+        class_id="class_1",
+        concept_id="concept_1",
+        responses=[late, early],
+        watermark="same_time",
+        created_at=NOW,
+    )
+    ordered = unordered.model_copy(update={"responses": [early, late]})
+
+    assert _engine().update(_model(), unordered) == _engine().update(
+        _model(),
+        ordered,
+    )
 
 
 def test_duplicate_audit_version_is_consumed_only_once() -> None:

@@ -404,6 +404,7 @@ class BktEngine:
             responses,
             key=lambda item: (
                 item.occurred_at,
+                item.attempt_id,
                 item.observation_id,
             ),
         ):

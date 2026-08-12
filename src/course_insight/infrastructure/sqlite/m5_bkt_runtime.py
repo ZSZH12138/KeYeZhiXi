@@ -110,6 +110,41 @@ def get_bkt_model(
         connection.close()
 
 
+def get_latest_bkt_model(
+    database_path: Path,
+    *,
+    course_id: str,
+    class_id: str,
+) -> BktModelArtifact | None:
+    """Load the latest BKT model for one teaching scope."""
+
+    connection = connect_sqlite(database_path)
+    try:
+        rows = connection.execute(
+            """
+            SELECT
+                model_id,
+                course_id,
+                model_version,
+                created_at,
+                payload,
+                payload_checksum,
+                schema_version
+            FROM m5_bkt_models
+            WHERE course_id = ?
+            ORDER BY created_at DESC, model_id DESC
+            """,
+            (course_id,),
+        ).fetchall()
+        for row in rows:
+            model = _model_from_row(row)
+            if model.class_id == class_id:
+                return model.model_copy(deep=True)
+        return None
+    finally:
+        connection.close()
+
+
 def insert_or_get_knowledge_trace(
     database_path: Path,
     trace: KnowledgeTraceSnapshot,

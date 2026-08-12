@@ -10,7 +10,10 @@ from typing import Any
 from course_insight.contracts.assessment import ScoreAuditRecord, ScoringResultBundle
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import KnowledgeBundle
-from course_insight.contracts.learning_models import LearningObservationBatch
+from course_insight.contracts.learning_models import (
+    LearningModelRun,
+    LearningObservationBatch,
+)
 from course_insight.contracts.state import (
     ConceptState,
     DiagnosisResult,
@@ -339,6 +342,7 @@ class DeterministicStateUpdatePolicy:
         diagnosis: DiagnosisResult,
         previous: LearnerStateSnapshot | None,
         policy: StatePolicy,
+        learning_model_run: LearningModelRun | None = None,
     ) -> LearnerStateSnapshot:
         """Build a new immutable version from current latest audit evidence."""
 
@@ -358,6 +362,18 @@ class DeterministicStateUpdatePolicy:
         review_required = bundle.requires_teacher_review()
         priority_concepts = set(diagnosis.priority_concept_ids)
         priority_misconceptions = set(diagnosis.priority_misconception_ids)
+        if learning_model_run is not None:
+            if (
+                learning_model_run.status != "completed"
+                or learning_model_run.diagnosis.learner_id != bundle.learner_id
+                or learning_model_run.knowledge_trace.learner_id != bundle.learner_id
+            ):
+                raise DomainError(
+                    code="LEARNING_MODEL_RUN_INVALID",
+                    module="m5",
+                    message="state updating requires a completed learner model run",
+                    recoverable=True,
+                )
         concept_states: list[ConceptState] = []
         for concept in knowledge.concepts:
             governed_misconceptions = [
@@ -384,11 +400,47 @@ class DeterministicStateUpdatePolicy:
                 for item in governed_misconceptions
             ]
             is_priority = concept.concept_id in priority_concepts
+            model_mastery = (
+                None
+                if learning_model_run is None
+                else learning_model_run.knowledge_trace.concept_probabilities.get(
+                    concept.concept_id
+                )
+            )
+            if learning_model_run is not None and model_mastery is None:
+                raise DomainError(
+                    code="LEARNING_MODEL_EVIDENCE_INCOMPLETE",
+                    module="m5",
+                    message="BKT model run does not cover every governed concept",
+                    details={"concept_id": concept.concept_id},
+                    recoverable=True,
+                )
+            diagnosis_mastery = (
+                None
+                if learning_model_run is None
+                else learning_model_run.diagnosis.concept_mastery.get(
+                    concept.concept_id
+                )
+            )
+            mastery_probability = (
+                model_mastery
+                if model_mastery is not None
+                else score_ratio
+                if is_priority
+                else max(0.5, score_ratio)
+            )
+            confidence = (
+                0.5 + 0.5 * abs(diagnosis_mastery - 0.5) * 2.0
+                if diagnosis_mastery is not None
+                else 0.6
+                if is_priority
+                else 0.5
+            )
             concept_states.append(
                 ConceptState(
                     concept_id=concept.concept_id,
-                    mastery_probability=(score_ratio if is_priority else max(0.5, score_ratio)),
-                    mastery_confidence=(0.6 if is_priority else 0.5),
+                    mastery_probability=mastery_probability,
+                    mastery_confidence=confidence,
                     misconceptions=misconception_states,
                     hint_dependency=(0.5 if is_priority and review_required else 0.0),
                     recent_correction_rate=(0.0 if review_required else score_ratio),
@@ -409,6 +461,24 @@ class DeterministicStateUpdatePolicy:
             concept_states=concept_states,
             overall_mastery=overall,
             evidence_count=len(audits),
+            model_run_id=(
+                None if learning_model_run is None else learning_model_run.run_id
+            ),
+            dina_model_version=(
+                None
+                if learning_model_run is None
+                else learning_model_run.diagnosis.model_version
+            ),
+            bkt_model_version=(
+                None
+                if learning_model_run is None
+                else learning_model_run.knowledge_trace.model_version
+            ),
+            observation_watermark=(
+                None
+                if learning_model_run is None
+                else learning_model_run.knowledge_trace.observation_watermark
+            ),
             updated_at=bundle.finalized_at,
         )
 

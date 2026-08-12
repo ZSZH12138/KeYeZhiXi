@@ -2,6 +2,11 @@
   "additionalProperties": false,
   "description": "One immutable binary response projected onto a governed concept.",
   "properties": {
+    "attempt_id": {
+      "minLength": 1,
+      "title": "Attempt Id",
+      "type": "string"
+    },
     "class_id": {
       "minLength": 1,
       "title": "Class Id",
@@ -57,6 +62,7 @@
     "learner_id",
     "course_id",
     "class_id",
+    "attempt_id",
     "concept_id",
     "is_correct",
     "source_audit_id",
