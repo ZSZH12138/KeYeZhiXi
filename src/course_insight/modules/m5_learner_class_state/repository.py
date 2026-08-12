@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Protocol
 
 from course_insight.contracts.learning_models import (
+    BktModelArtifact,
+    ConceptResponseSequence,
     DinaModelArtifact,
+    KnowledgeTraceSnapshot,
     LearningObservation,
     LearningObservationBatch,
 )
@@ -50,6 +53,33 @@ class M5Repository(Protocol):
         model_version: str,
     ) -> DinaModelArtifact | None:
         """Load one exact course-scoped DINA model version."""
+
+    def insert_or_get_bkt_model(
+        self,
+        model: BktModelArtifact,
+    ) -> BktModelArtifact:
+        """Persist or recover one append-only BKT model version."""
+
+    def get_bkt_model(
+        self,
+        *,
+        course_id: str,
+        model_version: str,
+    ) -> BktModelArtifact | None:
+        """Load one exact course-scoped BKT model version."""
+
+    def insert_or_get_knowledge_trace(
+        self,
+        trace: KnowledgeTraceSnapshot,
+    ) -> KnowledgeTraceSnapshot:
+        """Persist or recover one immutable learner trace snapshot."""
+
+    def get_knowledge_trace(
+        self,
+        *,
+        trace_id: str,
+    ) -> KnowledgeTraceSnapshot | None:
+        """Load one exact BKT knowledge-trace snapshot."""
 
     def save_learner_state(self, snapshot: LearnerStateSnapshot) -> None:
         """Persist one versioned learner-state snapshot."""

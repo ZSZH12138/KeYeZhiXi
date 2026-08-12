@@ -11,6 +11,8 @@ from course_insight.contracts.assessment import ScoringResultBundle
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import KnowledgeBundle, QMatrixEntry
 from course_insight.contracts.learning_models import (
+    BktModelArtifact,
+    ConceptResponseSequence,
     CognitiveDiagnosisResult,
     DinaModelArtifact,
     KnowledgeTraceSnapshot,
@@ -24,6 +26,7 @@ from course_insight.contracts.state import (
 )
 from course_insight.modules.m5_learner_class_state.repository import M5Repository
 from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+from course_insight.modules.m5_learner_class_state.bkt import BktEngine
 from course_insight.modules.m5_learner_class_state.aggregation import (
     DeterministicClassAggregationPolicy,
 )
@@ -74,11 +77,13 @@ class M5StateService:
         class_aggregation_policy: Any,
         *,
         dina_engine: DinaEngine | None = None,
+        bkt_engine: BktEngine | None = None,
     ) -> None:
         self._repository = repository
         self._state_update_policy = state_update_policy
         self._class_aggregation_policy = class_aggregation_policy
         self._dina_engine = dina_engine or DinaEngine()
+        self._bkt_engine = bkt_engine or BktEngine()
         self._processed_by_scope: dict[
             tuple[str, str, str],
             frozenset[str],
@@ -123,6 +128,42 @@ class M5StateService:
             model.model_copy(deep=True),
             batch.model_copy(deep=True),
         )
+
+    def fit_bkt_model(
+        self,
+        sequences: list[ConceptResponseSequence],
+    ) -> BktModelArtifact:
+        """Fit and persist one append-only four-parameter BKT model."""
+
+        model = self._bkt_engine.fit(
+            [sequence.model_copy(deep=True) for sequence in sequences]
+        )
+        writer = getattr(self._repository, "insert_or_get_bkt_model", None)
+        if callable(writer):
+            authoritative = writer(model.model_copy(deep=True))
+            if authoritative != model:
+                raise RuntimeError("M5 persisted BKT model conflicts with result")
+            model = authoritative
+        return model.model_copy(deep=True)
+
+    def update_knowledge_trace(
+        self,
+        model: BktModelArtifact,
+        sequence: ConceptResponseSequence,
+    ) -> KnowledgeTraceSnapshot:
+        """Replay, persist, and recover one learner-concept BKT trace."""
+
+        trace = self._bkt_engine.update(
+            model.model_copy(deep=True),
+            sequence.model_copy(deep=True),
+        )
+        writer = getattr(self._repository, "insert_or_get_knowledge_trace", None)
+        if callable(writer):
+            authoritative = writer(trace.model_copy(deep=True))
+            if authoritative != trace:
+                raise RuntimeError("M5 persisted BKT trace conflicts with result")
+            trace = authoritative
+        return trace.model_copy(deep=True)
 
     def get_state_update(
         self,

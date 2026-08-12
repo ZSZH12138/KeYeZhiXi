@@ -91,6 +91,28 @@ def _dina_model_row(model: Any) -> dict[str, Any]:
     }
 
 
+def _bkt_model_row(model: Any) -> dict[str, Any]:
+    return {
+        "model_id": model.model_id,
+        "course_id": model.course_id,
+        "model_version": model.model_version,
+        "created_at": model.created_at,
+        **_contract_columns(model),
+    }
+
+
+def _knowledge_trace_row(trace: Any) -> dict[str, Any]:
+    return {
+        "trace_id": trace.trace_id,
+        "course_id": trace.course_id,
+        "class_id": trace.class_id,
+        "learner_id": trace.learner_id,
+        "model_version": trace.model_version,
+        "updated_at": trace.updated_at,
+        **_contract_columns(trace),
+    }
+
+
 def _responder_for(result: Any):
     def respond(statement: str, _: tuple[Any, ...]):
         normalized = " ".join(statement.lower().split())
@@ -163,6 +185,60 @@ def test_postgres_m5_persists_observations_and_dina_model_versions() -> None:
     ]
     assert cohort[0].observations[0].to_dict() in inserted_payloads
     assert model.to_dict() in inserted_payloads
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_persists_bkt_models_and_knowledge_traces() -> None:
+    """Catch PostgreSQL dropping BKT models or restart watermarks."""
+
+    from course_insight.modules.m5_learner_class_state.bkt import BktEngine
+    from tests.unit.test_m5_bkt import _sequence
+
+    sequences = [
+        _sequence("learner_1", [True, True, False, True, True]),
+        _sequence("learner_2", [False, True, True, True, False]),
+        _sequence("learner_3", [False, False, True, True, True]),
+        _sequence("learner_4", [True, False, False, True, False]),
+    ]
+    engine = BktEngine(
+        min_students=4,
+        min_observations_per_student=5,
+        max_iterations=50,
+    )
+    model = engine.fit(sequences)
+    trace = engine.update(model, sequences[0])
+
+    def respond(statement: str, _: tuple[Any, ...]):
+        normalized = " ".join(statement.lower().split())
+        if "from m5_bkt_models" in normalized:
+            return _bkt_model_row(model)
+        if "from m5_knowledge_traces" in normalized:
+            return _knowledge_trace_row(trace)
+        return None
+
+    connection = FakeConnection(respond)
+    repository = PostgresM5Repository(FakePool(connection))
+
+    assert repository.insert_or_get_bkt_model(model) == model
+    assert repository.get_bkt_model(
+        course_id=model.course_id,
+        model_version=model.model_version,
+    ) == model
+    assert repository.insert_or_get_knowledge_trace(trace) == trace
+    assert repository.get_knowledge_trace(trace_id=trace.trace_id) == trace
+
+    inserted_payloads = [
+        parameter.obj
+        for statement, parameters in connection.executions
+        if "INSERT INTO m5_" in statement
+        for parameter in parameters
+        if isinstance(parameter, Jsonb)
+    ]
+    assert model.to_dict() in inserted_payloads
+    assert trace.to_dict() in inserted_payloads
 
 
 @pytest.mark.skipif(

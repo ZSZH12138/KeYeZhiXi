@@ -148,6 +148,90 @@ class DinaModelArtifact(ContractModel):
             )
 
 
+class ConceptResponse(ContractModel):
+    """One immutable binary response projected onto a governed concept."""
+
+    observation_id: str = Field(min_length=1)
+    learner_id: str = Field(min_length=1)
+    course_id: str = Field(min_length=1)
+    class_id: str = Field(min_length=1)
+    concept_id: str = Field(min_length=1)
+    is_correct: bool
+    source_audit_id: str = Field(min_length=1)
+    source_audit_version: int = Field(ge=1)
+    occurred_at: datetime
+
+
+class ConceptResponseSequence(ContractModel):
+    """Time-ordered BKT input for one learner and concept."""
+
+    sequence_id: str = Field(min_length=1)
+    learner_id: str = Field(min_length=1)
+    course_id: str = Field(min_length=1)
+    class_id: str = Field(min_length=1)
+    concept_id: str = Field(min_length=1)
+    responses: list[ConceptResponse]
+    watermark: str = Field(min_length=1)
+    created_at: datetime
+
+    def validate_business_rules(self) -> None:
+        """Require every response to remain in the sequence scope."""
+
+        observation_ids = [item.observation_id for item in self.responses]
+        scope_mismatch = any(
+            item.learner_id != self.learner_id
+            or item.course_id != self.course_id
+            or item.class_id != self.class_id
+            or item.concept_id != self.concept_id
+            for item in self.responses
+        )
+        if len(observation_ids) != len(set(observation_ids)) or scope_mismatch:
+            raise DomainError(
+                code="BKT_SEQUENCE_INVALID",
+                module="m5",
+                message="BKT response identities and scope must be consistent",
+            )
+
+
+class BktConceptParameters(ContractModel):
+    """Four fitted BKT probabilities for one course concept."""
+
+    concept_id: str = Field(min_length=1)
+    prior: float = Field(ge=0.01, le=0.99, allow_inf_nan=False)
+    learn: float = Field(ge=0.01, le=0.40, allow_inf_nan=False)
+    guess: float = Field(ge=0.01, le=0.40, allow_inf_nan=False)
+    slip: float = Field(ge=0.01, le=0.40, allow_inf_nan=False)
+    learner_count: int = Field(ge=1)
+    observation_count: int = Field(ge=1)
+
+
+class BktModelArtifact(ContractModel):
+    """Versioned four-parameter BKT model for one teaching scope."""
+
+    model_id: str = Field(min_length=1)
+    course_id: str = Field(min_length=1)
+    class_id: str = Field(min_length=1)
+    model_version: str = Field(min_length=1)
+    concept_parameters: list[BktConceptParameters] = Field(min_length=1)
+    learner_count: int = Field(ge=1)
+    observation_count: int = Field(ge=1)
+    log_likelihood: float = Field(allow_inf_nan=False)
+    iteration_count: int = Field(ge=1)
+    converged: bool
+    created_at: datetime
+
+    def validate_business_rules(self) -> None:
+        """Require one parameter record for every concept."""
+
+        concept_ids = [item.concept_id for item in self.concept_parameters]
+        if len(concept_ids) != len(set(concept_ids)):
+            raise DomainError(
+                code="BKT_MODEL_INVALID",
+                module="m5",
+                message="BKT concept parameters must be unique",
+            )
+
+
 class CognitiveDiagnosisResult(ContractModel):
     """Versioned DINA-family output; empty until the engine is configured."""
 
@@ -177,11 +261,14 @@ class KnowledgeTraceSnapshot(ContractModel):
 
     trace_id: str = Field(min_length=1)
     learner_id: str = Field(min_length=1)
+    course_id: str | None = Field(default=None, min_length=1)
+    class_id: str | None = Field(default=None, min_length=1)
     model_type: Literal["BKT", "BKT_FORGETTING", "DKT"]
     model_version: str = Field(min_length=1)
     concept_probabilities: dict[str, float]
     observation_watermark: str = Field(min_length=1)
     observation_count: int = Field(ge=0)
+    processed_audit_keys: list[str] = Field(default_factory=list)
     status: Literal["empty", "estimated", "failed"]
     updated_at: datetime
 
@@ -192,7 +279,16 @@ class KnowledgeTraceSnapshot(ContractModel):
             not 0.0 <= value <= 1.0
             for value in self.concept_probabilities.values()
         )
-        if invalid or (self.status == "empty" and self.concept_probabilities):
+        scope_is_partial = (self.course_id is None) != (self.class_id is None)
+        duplicate_audits = len(self.processed_audit_keys) != len(
+            set(self.processed_audit_keys)
+        )
+        if (
+            invalid
+            or scope_is_partial
+            or duplicate_audits
+            or (self.status == "empty" and self.concept_probabilities)
+        ):
             raise DomainError(
                 code="KNOWLEDGE_TRACE_INVALID",
                 module="m5",

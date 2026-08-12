@@ -6,7 +6,9 @@ import sqlite3
 from pathlib import Path
 
 from course_insight.contracts.learning_models import (
+    BktModelArtifact,
     DinaModelArtifact,
+    KnowledgeTraceSnapshot,
     LearningObservation,
     LearningObservationBatch,
 )
@@ -18,6 +20,7 @@ from course_insight.contracts.state import (
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import migrate
+from course_insight.infrastructure.sqlite import m5_bkt_runtime
 
 
 _UNSPECIFIED_CLASS_BASELINE = object()
@@ -548,6 +551,43 @@ class SQLiteM5Repository:
             )
         finally:
             connection.close()
+
+    def insert_or_get_bkt_model(
+        self,
+        model: BktModelArtifact,
+    ) -> BktModelArtifact:
+        return m5_bkt_runtime.insert_or_get_bkt_model(self._database_path, model)
+
+    def get_bkt_model(
+        self,
+        *,
+        course_id: str,
+        model_version: str,
+    ) -> BktModelArtifact | None:
+        return m5_bkt_runtime.get_bkt_model(
+            self._database_path,
+            course_id=course_id,
+            model_version=model_version,
+        )
+
+    def insert_or_get_knowledge_trace(
+        self,
+        trace: KnowledgeTraceSnapshot,
+    ) -> KnowledgeTraceSnapshot:
+        return m5_bkt_runtime.insert_or_get_knowledge_trace(
+            self._database_path,
+            trace,
+        )
+
+    def get_knowledge_trace(
+        self,
+        *,
+        trace_id: str,
+    ) -> KnowledgeTraceSnapshot | None:
+        return m5_bkt_runtime.get_knowledge_trace(
+            self._database_path,
+            trace_id=trace_id,
+        )
 
     def list_latest_learner_states(
         self,

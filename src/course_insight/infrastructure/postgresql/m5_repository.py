@@ -10,7 +10,9 @@ from psycopg.types.json import Jsonb
 
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.learning_models import (
+    BktModelArtifact,
     DinaModelArtifact,
+    KnowledgeTraceSnapshot,
     LearningObservation,
     LearningObservationBatch,
 )
@@ -24,6 +26,7 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.infrastructure.postgresql import m5_bkt_runtime
 
 
 _OPERATION_ERROR = "PostgreSQL repository operation failed"
@@ -252,6 +255,40 @@ class PostgresM5Repository:
             raise
         except psycopg.Error:
             raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def insert_or_get_bkt_model(
+        self,
+        model: BktModelArtifact,
+    ) -> BktModelArtifact:
+        return m5_bkt_runtime.insert_or_get_bkt_model(self._pool, model)
+
+    def get_bkt_model(
+        self,
+        *,
+        course_id: str,
+        model_version: str,
+    ) -> BktModelArtifact | None:
+        return m5_bkt_runtime.get_bkt_model(
+            self._pool,
+            course_id=course_id,
+            model_version=model_version,
+        )
+
+    def insert_or_get_knowledge_trace(
+        self,
+        trace: KnowledgeTraceSnapshot,
+    ) -> KnowledgeTraceSnapshot:
+        return m5_bkt_runtime.insert_or_get_knowledge_trace(self._pool, trace)
+
+    def get_knowledge_trace(
+        self,
+        *,
+        trace_id: str,
+    ) -> KnowledgeTraceSnapshot | None:
+        return m5_bkt_runtime.get_knowledge_trace(
+            self._pool,
+            trace_id=trace_id,
+        )
 
     def insert_or_get_state_update(
         self,
