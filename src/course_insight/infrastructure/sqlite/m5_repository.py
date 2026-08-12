@@ -50,6 +50,28 @@ class SQLiteM5Repository:
         try:
             connection.execute("BEGIN IMMEDIATE")
             if expected_previous_class_snapshot_id is not _UNSPECIFIED_CLASS_BASELINE:
+                existing = connection.execute(
+                    """
+                    SELECT
+                        attempt_id,
+                        course_id,
+                        class_id,
+                        learner_id,
+                        state_version,
+                        payload
+                    FROM m5_state_updates
+                    WHERE attempt_id = ? AND state_version = ?
+                    """,
+                    (attempt_id, learner.state_version),
+                ).fetchone()
+                if existing is not None:
+                    stored = self._state_result_from_row(existing)
+                    if stored != result:
+                        raise RuntimeError(
+                            "M5 state-update conflict for the same attempt version"
+                        )
+                    connection.execute("COMMIT")
+                    return stored.model_copy(deep=True)
                 row = connection.execute(
                     """
                     SELECT snapshot_id

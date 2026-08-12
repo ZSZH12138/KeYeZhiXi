@@ -36,6 +36,12 @@ _LEGACY_ENV_PATHS: dict[str, tuple[str, ...]] = {
     "DATABASE_PATH": ("database", "sqlite_path"),
     "LOG_LEVEL": ("logging", "level"),
 }
+_TEST_HARNESS_ENVIRONMENT_KEYS = frozenset(
+    {
+        "COURSE_INSIGHT_TEST_DATABASE_URL",
+        "COURSE_INSIGHT_TEST_DATABASE_NAME",
+    }
+)
 
 
 def safe_defaults() -> dict[str, Any]:
@@ -209,6 +215,8 @@ def environment_to_settings(
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for raw_key, raw_value in environment.items():
+        if raw_key in _TEST_HARNESS_ENVIRONMENT_KEYS:
+            continue
         if raw_key in _LEGACY_ENV_PATHS:
             _assign(result, _LEGACY_ENV_PATHS[raw_key], _parse_value(raw_value))
             continue

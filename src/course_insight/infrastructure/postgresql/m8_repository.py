@@ -24,6 +24,11 @@ from course_insight.infrastructure.postgresql.pool import PostgresPool
 from course_insight.modules.m8_assessment_scoring.paper_record import (
     FrozenAssessmentRecord,
 )
+from course_insight.modules.m8_assessment_scoring.retry_equivalence import (
+    same_paper_generation,
+    same_score_audit_result,
+    same_scoring_result,
+)
 
 
 _OPERATION_ERROR = "PostgreSQL repository operation failed"
@@ -120,11 +125,21 @@ class PostgresM8Repository:
                         course_id=candidate.course_id,
                         class_id=candidate.class_id,
                     )
-                    if authoritative_paper != candidate.paper:
+                    if (
+                        authoritative_paper != candidate.paper
+                        and not same_paper_generation(
+                            authoritative_paper,
+                            candidate.paper,
+                        )
+                    ):
                         raise PostgresOperationError(_CONFLICT_ERROR)
+                    authoritative_record = candidate.model_copy(
+                        update={"paper": authoritative_paper},
+                        deep=True,
+                    )
                     return _insert_or_validate_paper_record(
                         connection,
-                        candidate,
+                        authoritative_record,
                     )
         except PostgresError:
             raise
@@ -322,7 +337,10 @@ class PostgresM8Repository:
                         (candidate.attempt_id, result_key),
                     ).fetchone()
                     stored = _scoring_from_row(row)
-                    if stored != candidate:
+                    if stored != candidate and not same_scoring_result(
+                        stored,
+                        candidate,
+                    ):
                         raise PostgresOperationError(_CONFLICT_ERROR)
                     return stored
         except PostgresError:
@@ -457,7 +475,9 @@ def _insert_or_validate_paper(
         _required_text(row, "course_id"),
         _required_text(row, "class_id"),
     )
-    if stored != candidate or stored_scope != (course_id, class_id):
+    if stored_scope != (course_id, class_id) or (
+        stored != candidate and not same_paper_generation(stored, candidate)
+    ):
         raise PostgresOperationError(_CONFLICT_ERROR)
     return stored
 
@@ -531,7 +551,10 @@ def _insert_or_validate_audit(
         """,
         (candidate.audit_id, candidate.audit_version),
     ).fetchone()
-    if row is None or _audit_from_row(row) != candidate:
+    if row is None:
+        raise PostgresOperationError(_CONFLICT_ERROR)
+    stored = _audit_from_row(row)
+    if stored != candidate and not same_score_audit_result(stored, candidate):
         raise PostgresOperationError(_CONFLICT_ERROR)
 
 

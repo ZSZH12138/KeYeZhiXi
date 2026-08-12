@@ -182,3 +182,130 @@ def test_postgres_feedback_insert_or_get_is_concurrency_safe(
             (feedback.task_id, feedback.learner_id),
         ).fetchone()
     assert row == {"row_count": 1}
+
+
+def test_postgres_m5_identical_retries_keep_one_class_version(
+    postgres_pool: PostgresPool,
+) -> None:
+    result = _state_result(
+        attempt_id="attempt_retry",
+        course_id="course_1",
+        class_id="class_1",
+        state_version=1,
+    )
+
+    def insert_once(_: int):
+        return PostgresM5Repository(postgres_pool).insert_or_get_state_update(
+            result,
+            expected_previous_class_snapshot_id=None,
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        winners = list(executor.map(insert_once, range(16)))
+
+    assert winners == [result] * 16
+    with postgres_pool.connection() as connection:
+        class_count = connection.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM m5_class_states
+            WHERE course_id = %s AND class_id = %s
+            """,
+            ("course_1", "class_1"),
+        ).fetchone()
+        update_count = connection.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM m5_state_updates
+            WHERE attempt_id = %s
+            """,
+            ("attempt_retry",),
+        ).fetchone()
+    assert class_count == {"row_count": 1}
+    assert update_count == {"row_count": 1}
+
+
+def test_postgres_m8_time_only_retries_return_first_paper_and_score(
+    postgres_pool: PostgresPool,
+) -> None:
+    repository = PostgresM8Repository(postgres_pool)
+    paper = _paper()
+    assert repository.insert_or_get_paper(
+        paper,
+        course_id="course_1",
+        class_id="class_1",
+    ) == paper
+
+    def retry_paper(offset_minutes: int):
+        changed_payload = {
+            **paper.model_dump(mode="python"),
+            "generated_at": paper.generated_at + timedelta(
+                minutes=offset_minutes
+            ),
+            "immutable_checksum": "pending",
+        }
+        candidate = type(paper)(**changed_payload)
+        retried = type(paper)(
+            **{
+                **changed_payload,
+                "immutable_checksum": candidate.freeze(),
+            }
+        )
+        return PostgresM8Repository(postgres_pool).insert_or_get_paper(
+            retried,
+            course_id="course_1",
+            class_id="class_1",
+        )
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        papers = list(executor.map(retry_paper, range(1, 17)))
+    assert papers == [paper] * 16
+
+    scoring = _vector_scoring_bundle(
+        first_version=1,
+        second_version=1,
+        finalized_at=NOW,
+    )
+    assert repository.insert_or_get_scoring_result(scoring) == scoring
+
+    def retry_scoring(offset_minutes: int):
+        retried_at = NOW + timedelta(minutes=offset_minutes)
+        retried = scoring.model_copy(
+            update={
+                "score_audit_records": [
+                    audit.model_copy(update={"created_at": retried_at})
+                    for audit in scoring.score_audit_records
+                ],
+                "remediation_plan": scoring.remediation_plan.model_copy(
+                    update={"created_at": retried_at}
+                ),
+                "finalized_at": retried_at,
+            }
+        )
+        return PostgresM8Repository(
+            postgres_pool
+        ).insert_or_get_scoring_result(retried)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        scores = list(executor.map(retry_scoring, range(1, 17)))
+    assert scores == [scoring] * 16
+
+    with postgres_pool.connection() as connection:
+        paper_count = connection.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM m8_assessment_papers
+            WHERE paper_id = %s
+            """,
+            (paper.paper_id,),
+        ).fetchone()
+        scoring_count = connection.execute(
+            """
+            SELECT COUNT(*) AS row_count
+            FROM m8_scoring_results
+            WHERE attempt_id = %s
+            """,
+            (scoring.attempt_id,),
+        ).fetchone()
+    assert paper_count == {"row_count": 1}
+    assert scoring_count == {"row_count": 1}

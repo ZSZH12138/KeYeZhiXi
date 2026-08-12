@@ -301,7 +301,11 @@ def test_postgres_m8_insert_or_get_rejects_same_vector_different_payload() -> No
         finalized_at=NOW,
     )
     conflicting = stored.model_copy(
-        update={"finalized_at": NOW + timedelta(minutes=1)}
+        update={
+            "remediation_plan": stored.remediation_plan.model_copy(
+                update={"plan_id": "different_plan"}
+            )
+        }
     )
     repository = PostgresM8Repository(
         FakePool(FakeConnection(_responder(paper, [stored])))
@@ -315,11 +319,72 @@ def test_postgres_m8_insert_or_get_rejects_same_vector_different_payload() -> No
     PostgresM8Repository is None,
     reason="adapter is the RED-phase missing feature",
 )
+def test_postgres_m8_returns_first_result_when_only_retry_times_change() -> None:
+    paper = _paper()
+    stored = _vector_scoring_bundle(
+        first_version=1,
+        second_version=1,
+        finalized_at=NOW,
+    )
+    retry_time = NOW + timedelta(minutes=5)
+    retried = stored.model_copy(
+        update={
+            "score_audit_records": [
+                audit.model_copy(update={"created_at": retry_time})
+                for audit in stored.score_audit_records
+            ],
+            "remediation_plan": stored.remediation_plan.model_copy(
+                update={"created_at": retry_time}
+            ),
+            "finalized_at": retry_time,
+        }
+    )
+    repository = PostgresM8Repository(
+        FakePool(FakeConnection(_responder(paper, [stored])))
+    )
+
+    assert repository.insert_or_get_scoring_result(retried) == stored
+
+
+@pytest.mark.skipif(
+    PostgresM8Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m8_returns_first_paper_when_only_retry_time_changes() -> None:
+    stored = _paper()
+    changed_payload = {
+        **stored.model_dump(mode="python"),
+        "generated_at": stored.generated_at + timedelta(minutes=5),
+        "immutable_checksum": "pending",
+    }
+    candidate = type(stored)(**changed_payload)
+    retried = type(stored)(
+        **{**changed_payload, "immutable_checksum": candidate.freeze()}
+    )
+    repository = PostgresM8Repository(
+        FakePool(FakeConnection(_responder(stored, [])))
+    )
+
+    assert repository.insert_or_get_paper(
+        retried,
+        course_id="course_1",
+        class_id="class_1",
+    ) == stored
+
+
+@pytest.mark.skipif(
+    PostgresM8Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
 def test_postgres_m8_rejects_paper_and_frozen_record_conflicts() -> None:
     paper = _paper()
+    changed_sections = [
+        paper.sections[0].model_copy(update={"name": "Changed section"}),
+        *paper.sections[1:],
+    ]
     changed_payload = {
         **paper.model_dump(mode="python"),
-        "generated_at": paper.generated_at + timedelta(minutes=1),
+        "sections": changed_sections,
         "immutable_checksum": "pending",
     }
     unfrozen = type(paper)(**changed_payload)

@@ -27,9 +27,13 @@ def test_same_paper_identity_cannot_overwrite_frozen_content(tmp_path) -> None:
     repository = SQLiteM8Repository(tmp_path / "history.sqlite3")
     repository.initialize()
     original = make_paper()
+    changed_sections = [
+        original.sections[0].model_copy(update={"name": "Changed section"}),
+        *original.sections[1:],
+    ]
     changed_payload = {
         **original.model_dump(mode="python"),
-        "generated_at": original.generated_at + timedelta(minutes=1),
+        "sections": changed_sections,
         "immutable_checksum": "pending",
     }
     candidate = AssessmentPaper(**changed_payload)
@@ -50,9 +54,13 @@ def test_direct_paper_conflict_rolls_back_and_preserves_original(tmp_path) -> No
     repository = SQLiteM8Repository(tmp_path / "paper-conflict.sqlite3")
     repository.initialize()
     original = make_paper()
+    changed_sections = [
+        original.sections[0].model_copy(update={"name": "Changed section"}),
+        *original.sections[1:],
+    ]
     changed_payload = {
         **original.model_dump(mode="python"),
-        "generated_at": original.generated_at + timedelta(minutes=1),
+        "sections": changed_sections,
         "immutable_checksum": "pending",
     }
     candidate = AssessmentPaper(**changed_payload)
@@ -73,6 +81,25 @@ def test_direct_paper_conflict_rolls_back_and_preserves_original(tmp_path) -> No
         )
 
     assert repository.get_paper(original.paper_id) == original
+
+
+def test_direct_paper_retry_rejects_an_invalid_immutable_checksum(tmp_path) -> None:
+    repository = SQLiteM8Repository(tmp_path / "paper-freeze.sqlite3")
+    repository.initialize()
+    original = make_paper()
+    repository.insert_or_get_paper(
+        original,
+        course_id="course_1",
+        class_id="class_1",
+    )
+
+    tampered = original.model_copy(update={"immutable_checksum": "tampered"})
+    with pytest.raises(ValueError, match="immutable checksum"):
+        repository.insert_or_get_paper(
+            tampered,
+            course_id="course_1",
+            class_id="class_1",
+        )
 
 
 def test_repository_validates_scope_and_empty_recovery_paths(tmp_path) -> None:

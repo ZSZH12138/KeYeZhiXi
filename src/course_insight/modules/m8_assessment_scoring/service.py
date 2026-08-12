@@ -45,6 +45,11 @@ from course_insight.modules.m8_assessment_scoring.paper_record import (
 )
 from course_insight.modules.m8_assessment_scoring.repository import M8Repository
 from course_insight.modules.m8_assessment_scoring.recovery import M8HistoricalRecoveryMixin
+from course_insight.modules.m8_assessment_scoring.retry_equivalence import (
+    same_frozen_generation,
+    same_paper_generation,
+    same_scoring_result,
+)
 
 
 class M8AssessmentService(M8HistoricalRecoveryMixin):
@@ -121,7 +126,10 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
             authoritative_record = record_insert_or_get(
                 record.model_copy(deep=True)
             )
-            if authoritative_record != record:
+            if (
+                authoritative_record != record
+                and not same_frozen_generation(authoritative_record, record)
+            ):
                 raise RuntimeError("M8 persisted paper record conflicts with result")
             return authoritative_record.paper.model_copy(deep=True)
         insert_or_get = getattr(self._repository, "insert_or_get_paper", None)
@@ -131,7 +139,10 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
                 course_id=task_plan.course_id,
                 class_id=task_plan.class_id,
             )
-            if authoritative != paper:
+            if (
+                authoritative != paper
+                and not same_paper_generation(authoritative, paper)
+            ):
                 raise RuntimeError("M8 persisted paper conflicts with result")
             return authoritative.model_copy(deep=True)
         saver = getattr(self._repository, "save_paper", None)
@@ -649,7 +660,10 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
         )
         if callable(insert_or_get):
             authoritative = insert_or_get(bundle.model_copy(deep=True))
-            if authoritative != bundle:
+            if (
+                authoritative != bundle
+                and not same_scoring_result(authoritative, bundle)
+            ):
                 raise RuntimeError(
                     "M8 persisted scoring result conflicts with result"
                 )

@@ -66,21 +66,21 @@
 - Consumes: 最新 `origin/main`，当前远程主线数据库版本 13。
 - Produces: 不含旧分支冲突迁移的新修复分支 `codex/m5-m8-complete-repair`。
 
-- [ ] **Step 1: 从最新主线创建修复分支**
+- [x] **Step 1: 从最新主线创建修复分支**
 
 ```powershell
 git fetch origin
 git switch -c codex/m5-m8-complete-repair origin/main
 ```
 
-- [ ] **Step 2: 记录旧分支中可以移植和必须丢弃的内容**
+- [x] **Step 2: 记录旧分支中可以移植和必须丢弃的内容**
 
 ```text
 移植：已有的边界测试、Q-matrix 观测转换思路、薄弱知识点排序测试。
 丢弃：SCHEMA_VERSION=4 迁移、任何 ON CONFLICT DO UPDATE 历史写入、答对率冒充 2PL、内存 paper context。
 ```
 
-- [ ] **Step 3: 运行主线基线测试**
+- [x] **Step 3: 运行主线基线测试**
 
 ```powershell
 python -m pytest tests -q
@@ -88,7 +88,7 @@ python -m pytest tests -q
 
 Expected: 主线既有测试全部通过；若主线本身失败，先单独记录并修复基线，不把失败混入 M5/M8 改动。
 
-- [ ] **Step 4: 提交基线说明**
+- [x] **Step 4: 提交基线说明**
 
 ```powershell
 git add docs/superpowers/plans/2026-08-12-m5-m8-complete-repair.md
@@ -121,7 +121,7 @@ Exact types:
 - `M8AssessmentService.build_observation_batch(paper_id: str, bundle: ScoringResultBundle) -> LearningObservationBatch`：从 Repository 读取冻结记录后调用构造器。
 - `LearningObservation.response_outcome: Literal["correct", "incorrect"]` 和 `outcome_policy_version: str`：保证三个模型使用同一、可追溯的二值结果。
 
-- [ ] **Step 1: 写失败测试，证明不能再通过题目实例命名规则猜测题目身份**
+- [x] **Step 1: 写失败测试，证明不能再通过题目实例命名规则猜测题目身份**
 
 ```python
 def test_observation_uses_frozen_item_identity_not_instance_name():
@@ -131,7 +131,7 @@ def test_observation_uses_frozen_item_identity_not_instance_name():
     assert batch.observations[0].concept_ids == ["concept_2"]
 ```
 
-- [ ] **Step 2: 写失败测试，证明量规升级不能改变旧试卷评分依据**
+- [x] **Step 2: 写失败测试，证明量规升级不能改变旧试卷评分依据**
 
 ```python
 def test_old_paper_uses_its_frozen_rubric_version():
@@ -141,7 +141,7 @@ def test_old_paper_uses_its_frozen_rubric_version():
     assert preparation.rubric_scoring_tasks[0].rubric.version == "1.0.0"
 ```
 
-- [ ] **Step 3: 实现冻结记录与观测构造器**
+- [x] **Step 3: 实现冻结记录与观测构造器**
 
 ```python
 items = {item.item_instance_id: item for item in record.paper.all_items()}
@@ -173,14 +173,14 @@ for audit in latest_audits(bundle):
 
 Repository 同时提供 `insert_or_get_paper_record(record: FrozenAssessmentRecord) -> FrozenAssessmentRecord` 与 `get_paper_record(paper_id: str) -> FrozenAssessmentRecord | None`；对外旧的 `get_paper()` 继续只返回其中的试卷，避免破坏消费者。
 
-- [ ] **Step 4: 重新生成契约 Schema 并运行契约测试**
+- [x] **Step 4: 重新生成契约 Schema 并运行契约测试**
 
 ```powershell
 python scripts/generate_contract_schemas.py
 python -m pytest tests/contract/test_m5_m8_contracts.py tests/unit/test_m8_observation_builder.py -q
 ```
 
-- [ ] **Step 5: 提交权威数据链**
+- [x] **Step 5: 提交权威数据链**
 
 ```powershell
 git add src/course_insight/contracts src/course_insight/modules/m8_assessment_scoring contracts/schemas tests
@@ -213,7 +213,7 @@ Exact signatures:
 - `aggregate_all(learner_states: list[LearnerStateSnapshot], policy: StatePolicy, *, class_version: int) -> ClassStateSnapshot`
 - `list_latest_learner_states(course_id: str, class_id: str) -> list[LearnerStateSnapshot]`
 
-- [ ] **Step 1: 写四个失败测试**
+- [x] **Step 1: 写四个失败测试**
 
 ```python
 def test_each_item_uses_its_own_q_matrix_concepts(policy, bundle, knowledge, observations):
@@ -261,7 +261,7 @@ Expected assertions:
 任一步骤故障后，学生状态、班级状态、处理水位均保持更新前状态。
 ```
 
-- [ ] **Step 2: 改为根据同班最新学生状态重新聚合**
+- [x] **Step 2: 改为根据同班最新学生状态重新聚合**
 
 ```python
 states_by_learner = {state.learner_id: state for state in persisted_states}
@@ -273,7 +273,7 @@ class_state = aggregate_all(
 )
 ```
 
-- [ ] **Step 3: 使用课程、班级、学习者完整范围保存水位和版本**
+- [x] **Step 3: 使用课程、班级、学习者完整范围保存水位和版本**
 
 ```text
 processed key = (course_id, class_id, learner_id, audit_id, audit_version)
@@ -281,7 +281,7 @@ learner version key = (course_id, class_id, learner_id, state_version)
 class version key = (course_id, class_id, class_version)
 ```
 
-- [ ] **Step 4: 在主线迁移链末尾建立模型运行历史表**
+- [x] **Step 4: 在主线迁移链末尾建立模型运行历史表**
 
 ```text
 SQLite 从主线版本 13 增加到版本 14，不改写版本 1—13。
@@ -291,7 +291,7 @@ m5_knowledge_traces、m8_irt_calibration_runs、m8_irt_parameter_sets、
 m8_ability_estimates、m8_adaptive_selections、m8_calibration_reviews。
 ```
 
-- [ ] **Step 5: 在一个事务中保存完整状态更新**
+- [x] **Step 5: 在一个事务中保存完整状态更新**
 
 ```python
 repository.insert_or_get_state_update(
@@ -302,13 +302,13 @@ repository.insert_or_get_state_update(
 
 同一版本、相同内容返回原记录；同一版本、不同内容抛出 `STATE_VERSION_CONFLICT`。
 
-- [ ] **Step 6: 同时验证 SQLite 和 PostgreSQL**
+- [x] **Step 6: 同时验证 SQLite 和 PostgreSQL**
 
 ```powershell
 python -m pytest tests/unit/test_m5_diagnosis_mapping.py tests/unit/test_m5_class_replacement.py tests/integration/test_m5_atomic_update.py tests/unit/test_postgres_m5_repository.py -q
 ```
 
-- [ ] **Step 7: 提交 M5 基础修复和模型历史迁移**
+- [x] **Step 7: 提交 M5 基础修复和模型历史迁移**
 
 ```powershell
 git add src/course_insight/modules/m5_learner_class_state src/course_insight/infrastructure tests
@@ -335,7 +335,7 @@ git commit -m "fix: make M5 state updates scoped atomic and correct"
 
 Exact signature: `allocate_concept_targets(concept_weights: dict[str, float], item_count: int) -> dict[str, int]`.
 
-- [ ] **Step 1: 写概念权重失败测试**
+- [x] **Step 1: 写概念权重失败测试**
 
 ```python
 def test_ten_items_follow_ten_ninety_concept_weights():
@@ -343,7 +343,7 @@ def test_ten_items_follow_ten_ninety_concept_weights():
     assert assigned_quota_counts(paper) == {"c1": 1, "c2": 9}
 ```
 
-- [ ] **Step 2: 实现最大余数配额和确定性回溯选题**
+- [x] **Step 2: 实现最大余数配额和确定性回溯选题**
 
 ```text
 1. weight * item_count 后取整数部分。
@@ -352,7 +352,7 @@ def test_ten_items_follow_ten_ninety_concept_weights():
 4. 找不到满足题型、分值、难度、锚题和概念配额的组合时，返回 BLUEPRINT_UNSATISFIABLE。
 ```
 
-- [ ] **Step 3: 写并修复重启恢复测试**
+- [x] **Step 3: 写并修复重启恢复测试**
 
 ```python
 paper = service_a.generate_paper(task_plan, knowledge_bundle, None, None)
@@ -364,7 +364,7 @@ assert bundle.learning_events[0].course_id == "course_1"
 
 `service_b` 必须从 `FrozenAssessmentRecord` 读取课程、班级和量规，不再依赖内存字典。
 
-- [ ] **Step 4: 写并修复不可变历史测试**
+- [x] **Step 4: 写并修复不可变历史测试**
 
 ```python
 repository.insert_or_get_paper(original_record)
@@ -376,7 +376,7 @@ with pytest.raises(SCORE_AUDIT_VERSION_CONFLICT):
     repository.save_score_audit(changed_same_version)
 ```
 
-- [ ] **Step 5: 更换生产默认时钟**
+- [x] **Step 5: 更换生产默认时钟**
 
 ```python
 self._clock = clock if clock is not None else SystemUTCClock()
@@ -384,7 +384,7 @@ self._clock = clock if clock is not None else SystemUTCClock()
 
 `FixedClock` 仅保留在 `stubs.py` 和测试 fixtures 中。
 
-- [ ] **Step 6: 运行 M8 基础测试并提交**
+- [x] **Step 6: 运行 M8 基础测试并提交**
 
 ```powershell
 python -m pytest tests/unit/test_m8_weighted_blueprint.py tests/integration/test_m8_restart_recovery.py tests/integration/test_m8_append_only_history.py tests/unit/test_postgres_m8_repository.py -q

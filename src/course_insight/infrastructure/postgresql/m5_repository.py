@@ -94,6 +94,19 @@ class PostgresM5Repository:
                             learner.course_id,
                             learner.class_id,
                         )
+                        existing_row = connection.execute(
+                            f"""
+                            SELECT {_UPDATE_COLUMNS}
+                            FROM m5_state_updates
+                            WHERE attempt_id = %s AND state_version = %s
+                            """,
+                            (attempt_id, learner.state_version),
+                        ).fetchone()
+                        if existing_row is not None:
+                            stored = _state_result_from_row(existing_row)
+                            if stored != candidate:
+                                raise PostgresOperationError(_CONFLICT_ERROR)
+                            return stored
                         baseline_row = connection.execute(
                             """
                             SELECT snapshot_id

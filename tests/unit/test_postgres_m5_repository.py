@@ -440,14 +440,51 @@ def test_postgres_m5_checks_locked_class_baseline_atomically() -> None:
         expected_previous_class_snapshot_id=None,
     ) == result
 
+    persisted = _responder_for(result)
+
+    def stale_baseline(statement: str, parameters: tuple[Any, ...]):
+        if "from m5_state_updates" in " ".join(statement.lower().split()):
+            return None
+        return persisted(statement, parameters)
+
     conflict_repository = PostgresM5Repository(
-        FakePool(FakeConnection(_responder_for(result)))
+        FakePool(FakeConnection(stale_baseline))
     )
     with pytest.raises(PostgresOperationError, match="conflict"):
         conflict_repository.insert_or_get_state_update(
             result,
             expected_previous_class_snapshot_id="stale_snapshot",
         )
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_returns_identical_retry_before_class_baseline_check() -> None:
+    result = _state_result(
+        attempt_id="attempt_1",
+        course_id="course_1",
+        class_id="class_1",
+        state_version=1,
+    )
+    connection = FakeConnection(_responder_for(result))
+    repository = PostgresM5Repository(FakePool(connection))
+
+    assert repository.insert_or_get_state_update(
+        result,
+        expected_previous_class_snapshot_id=None,
+    ) == result
+    assert not any(
+        "select snapshot_id from m5_class_states" in " ".join(
+            statement.lower().split()
+        )
+        for statement, _ in connection.executions
+    )
+    assert not any(
+        "insert into m5_learner_states" in " ".join(statement.lower().split())
+        for statement, _ in connection.executions
+    )
 
 
 @pytest.mark.skipif(

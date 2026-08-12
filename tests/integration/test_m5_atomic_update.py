@@ -89,6 +89,30 @@ def test_stale_class_baseline_leaves_no_partial_rows(tmp_path) -> None:
     ) is None
 
 
+def test_identical_state_update_retry_returns_original_before_baseline_check(
+    tmp_path,
+) -> None:
+    repository = SQLiteM5Repository(tmp_path / "state-retry.sqlite3")
+    repository.initialize()
+    result = _state_result()
+
+    first = repository.insert_or_get_state_update(
+        result,
+        expected_previous_class_snapshot_id=None,
+    )
+    retried = repository.insert_or_get_state_update(
+        result.model_copy(deep=True),
+        expected_previous_class_snapshot_id=None,
+    )
+
+    assert first == result
+    assert retried == result
+    assert repository.list_latest_learner_states("course_1", "class_1") == [
+        result.learner_state_snapshot
+    ]
+    assert repository.get_latest_class_state_version("course_1", "class_1") == 1
+
+
 def test_v14_creates_all_m5_m8_model_runtime_tables(tmp_path) -> None:
     database_path = tmp_path / "runtime.sqlite3"
     repository = SQLiteM5Repository(database_path)

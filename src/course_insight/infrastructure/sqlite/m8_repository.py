@@ -18,6 +18,11 @@ from course_insight.infrastructure.sqlite.migrations import migrate
 from course_insight.modules.m8_assessment_scoring.paper_record import (
     FrozenAssessmentRecord,
 )
+from course_insight.modules.m8_assessment_scoring.retry_equivalence import (
+    same_paper_generation,
+    same_score_audit_result,
+    same_scoring_result,
+)
 
 
 class SQLiteM8Repository:
@@ -75,11 +80,18 @@ class SQLiteM8Repository:
                 course_id=record.course_id,
                 class_id=record.class_id,
             )
-            if authoritative_paper != record.paper:
+            if (
+                authoritative_paper != record.paper
+                and not same_paper_generation(authoritative_paper, record.paper)
+            ):
                 raise RuntimeError("M8 paper record conflict")
+            authoritative_record = record.model_copy(
+                update={"paper": authoritative_paper},
+                deep=True,
+            )
             stored = self._insert_or_validate_paper_record(
                 connection,
-                record,
+                authoritative_record,
             )
             connection.execute("COMMIT")
             return stored.model_copy(deep=True)
@@ -274,7 +286,7 @@ class SQLiteM8Repository:
                 (bundle.attempt_id, result_key),
             ).fetchone()
             stored = self._scoring_from_row(row)
-            if stored != bundle:
+            if stored != bundle and not same_scoring_result(stored, bundle):
                 raise RuntimeError(
                     "M8 scoring-result conflict for the same attempt version"
                 )
@@ -353,6 +365,8 @@ class SQLiteM8Repository:
         course_id: str,
         class_id: str,
     ) -> AssessmentPaper:
+        if paper.immutable_checksum != paper.freeze():
+            raise ValueError("M8 paper immutable checksum is invalid")
         connection.execute(
             """
             INSERT INTO m8_assessment_papers(
@@ -393,7 +407,9 @@ class SQLiteM8Repository:
         ).fetchone()
         stored = SQLiteM8Repository._paper_from_row(row)
         stored_scope = (str(row["course_id"]), str(row["class_id"]))
-        if stored != paper or stored_scope != (course_id, class_id):
+        if stored_scope != (course_id, class_id) or (
+            stored != paper and not same_paper_generation(stored, paper)
+        ):
             raise RuntimeError("M8 paper identity or scope conflict")
         return stored
 
@@ -508,7 +524,8 @@ class SQLiteM8Repository:
             """,
             (record.audit_id, record.audit_version),
         ).fetchone()
-        if SQLiteM8Repository._audit_from_row(row) != record:
+        stored = SQLiteM8Repository._audit_from_row(row)
+        if stored != record and not same_score_audit_result(stored, record):
             raise RuntimeError("M8 score-audit version conflict")
 
     @staticmethod
