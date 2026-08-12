@@ -27,6 +27,10 @@ from course_insight.infrastructure.postgresql.base import (
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
 from course_insight.infrastructure.postgresql import m5_bkt_runtime
+from course_insight.modules.m5_learner_class_state.learning_observation_evidence import (
+    learning_observation_evidence_checksum,
+    normalize_learning_observations,
+)
 
 
 _OPERATION_ERROR = "PostgreSQL repository operation failed"
@@ -108,6 +112,55 @@ class PostgresM5Repository:
                     for observation in candidate.observations:
                         connection.execute(
                             """
+                            INSERT INTO m5_learning_observation_audits(
+                                source_audit_id,
+                                source_audit_version,
+                                observation_id
+                            ) VALUES (%s, %s, %s)
+                            ON CONFLICT (
+                                source_audit_id,
+                                source_audit_version
+                            ) DO NOTHING
+                            """,
+                            (
+                                observation.source_audit_id,
+                                observation.source_audit_version,
+                                observation.observation_id,
+                            ),
+                        )
+                        audit_row = connection.execute(
+                            """
+                            SELECT observation_id
+                            FROM m5_learning_observation_audits
+                            WHERE source_audit_id = %s
+                              AND source_audit_version = %s
+                            """,
+                            (
+                                observation.source_audit_id,
+                                observation.source_audit_version,
+                            ),
+                        ).fetchone()
+                        canonical_observation_id = _required_text(
+                            audit_row,
+                            "observation_id",
+                        )
+                        if canonical_observation_id != observation.observation_id:
+                            canonical_row = connection.execute(
+                                f"""
+                                SELECT {_OBSERVATION_COLUMNS}
+                                FROM m5_learning_observations
+                                WHERE observation_id = %s
+                                """,
+                                (canonical_observation_id,),
+                            ).fetchone()
+                            canonical = _learning_observation_from_row(canonical_row)
+                            if learning_observation_evidence_checksum(
+                                canonical
+                            ) != learning_observation_evidence_checksum(observation):
+                                raise PostgresOperationError(_CONFLICT_ERROR)
+                            continue
+                        connection.execute(
+                            """
                             INSERT INTO m5_learning_observations(
                                 observation_id,
                                 course_id,
@@ -168,7 +221,9 @@ class PostgresM5Repository:
                     """,
                     (course_id, class_id),
                 ).fetchall()
-                return [_learning_observation_from_row(row) for row in rows]
+                return normalize_learning_observations(
+                    _learning_observation_from_row(row) for row in rows
+                )
         except PostgresError:
             raise
         except psycopg.Error:

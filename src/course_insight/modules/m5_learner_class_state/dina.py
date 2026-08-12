@@ -28,11 +28,13 @@ from course_insight.modules.m5_learner_class_state.dina_components import (
     merge_component_models,
     validate_inference_scope,
 )
+from course_insight.modules.m5_learner_class_state.learning_observation_evidence import (
+    normalize_learning_observations,
+)
 
 
 ItemKey: TypeAlias = tuple[str, str]
 Profile: TypeAlias = tuple[bool, ...]
-
 
 def _clip(value: float, lower: float, upper: float) -> float:
     return min(upper, max(lower, value))
@@ -330,14 +332,16 @@ class DinaEngine:
         if not cohort or not requirements:
             self._raise_insufficient("cohort and active Q-matrix are required")
 
-        observations = sorted(
-            (observation for batch in cohort for observation in batch.observations),
-            key=lambda item: (
-                item.learner_id,
-                item.occurred_at,
-                item.attempt_id,
-                item.observation_id,
-            ),
+        observations = normalize_learning_observations(
+            sorted(
+                (observation for batch in cohort for observation in batch.observations),
+                key=lambda item: (
+                    item.learner_id,
+                    item.occurred_at,
+                    item.attempt_id,
+                    item.observation_id,
+                ),
+            )
         )
         course_ids = {item.course_id for item in observations}
         class_ids = {item.class_id for item in observations}

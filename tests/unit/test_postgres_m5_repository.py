@@ -151,9 +151,16 @@ def test_postgres_m5_persists_observations_and_dina_model_versions() -> None:
     ).fit(cohort, _q_matrix())
     observations = [item for batch in cohort for item in batch.observations]
     observation_by_id = {item.observation_id: item for item in observations}
+    observation_by_audit = {
+        (item.source_audit_id, item.source_audit_version): item
+        for item in observations
+    }
 
     def respond(statement: str, parameters: tuple[Any, ...]):
         normalized = " ".join(statement.lower().split())
+        if "from m5_learning_observation_audits" in normalized:
+            observation = observation_by_audit[(str(parameters[0]), int(parameters[1]))]
+            return {"observation_id": observation.observation_id}
         if "from m5_learning_observations" in normalized:
             if len(parameters) == 1:
                 return _observation_row(observation_by_id[str(parameters[0])])
@@ -189,6 +196,73 @@ def test_postgres_m5_persists_observations_and_dina_model_versions() -> None:
     ]
     assert cohort[0].observations[0].to_dict() in inserted_payloads
     assert model.to_dict() in inserted_payloads
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_consumes_one_row_per_source_audit_version() -> None:
+    """Catch PostgreSQL storing one audit projection under multiple IDs."""
+
+    from course_insight.contracts.learning_models import LearningObservation
+    from tests.unit.test_m5_dina import _batch
+
+    original_batch = _batch("learner_1", (True, False))
+    original = original_batch.observations[0]
+    replay = original.model_copy(update={"observation_id": "postgres_replay_alias"})
+    replay_batch = original_batch.model_copy(
+        update={
+            "batch_id": "postgres_replay_batch",
+            "observations": [replay],
+            "watermark": "postgres_replay_watermark",
+        }
+    )
+    stored: dict[str, LearningObservation] = {}
+    audit_guards: dict[tuple[str, int], str] = {}
+
+    def respond(statement: str, parameters: tuple[Any, ...]):
+        normalized = " ".join(statement.lower().split())
+        if normalized.startswith("insert into m5_learning_observation_audits"):
+            key = (str(parameters[0]), int(parameters[1]))
+            audit_guards.setdefault(key, str(parameters[2]))
+            return None
+        if "from m5_learning_observation_audits" in normalized:
+            key = (str(parameters[0]), int(parameters[1]))
+            observation_id = audit_guards.get(key)
+            return (
+                None
+                if observation_id is None
+                else {"observation_id": observation_id}
+            )
+        if normalized.startswith("insert into m5_learning_observations"):
+            payload = next(
+                parameter.obj
+                for parameter in parameters
+                if isinstance(parameter, Jsonb)
+            )
+            observation = LearningObservation.model_validate(payload)
+            stored.setdefault(observation.observation_id, observation)
+            return None
+        if "from m5_learning_observations" in normalized:
+            if "where observation_id" in normalized:
+                observation = stored.get(str(parameters[0]))
+                return None if observation is None else _observation_row(observation)
+            return [_observation_row(item) for item in stored.values()]
+        return None
+
+    repository = PostgresM5Repository(FakePool(FakeConnection(respond)))
+
+    repository.insert_or_get_learning_observation_batch(original_batch)
+    repository.insert_or_get_learning_observation_batch(replay_batch)
+
+    listed = repository.list_learning_observations(
+        course_id="course_1",
+        class_id="class_1",
+    )
+    assert [item.observation_id for item in listed] == [
+        item.observation_id for item in original_batch.observations
+    ]
 
 
 @pytest.mark.skipif(

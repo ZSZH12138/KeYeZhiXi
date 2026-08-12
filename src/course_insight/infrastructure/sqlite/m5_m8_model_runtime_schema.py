@@ -148,4 +148,36 @@ MODEL_RUNTIME_TABLES = (
 )
 
 
-__all__ = ["MODEL_RUNTIME_TABLES"]
+LEARNING_OBSERVATION_AUDIT_TABLE = (
+    "m5_learning_observation_audits",
+    """
+CREATE TABLE IF NOT EXISTS m5_learning_observation_audits (
+    source_audit_id TEXT NOT NULL CHECK (length(source_audit_id) > 0),
+    source_audit_version INTEGER NOT NULL CHECK (source_audit_version > 0),
+    observation_id TEXT NOT NULL UNIQUE CHECK (length(observation_id) > 0),
+    PRIMARY KEY (source_audit_id, source_audit_version)
+)
+""",
+)
+
+
+LEARNING_OBSERVATION_AUDIT_BACKFILL_SQL = """
+INSERT OR IGNORE INTO m5_learning_observation_audits (
+    source_audit_id,
+    source_audit_version,
+    observation_id
+)
+SELECT
+    json_extract(payload, '$.source_audit_id'),
+    CAST(json_extract(payload, '$.source_audit_version') AS INTEGER),
+    observation_id
+FROM m5_learning_observations
+ORDER BY occurred_at, attempt_id, observation_id
+"""
+
+
+__all__ = [
+    "LEARNING_OBSERVATION_AUDIT_BACKFILL_SQL",
+    "LEARNING_OBSERVATION_AUDIT_TABLE",
+    "MODEL_RUNTIME_TABLES",
+]

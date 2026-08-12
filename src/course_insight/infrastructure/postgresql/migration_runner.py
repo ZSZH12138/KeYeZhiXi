@@ -18,7 +18,7 @@ from course_insight.infrastructure.postgresql.base import (
 )
 
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 MIGRATION_LOCK_ID = 0x434F55525345494E
 MIGRATIONS_DIRECTORY = Path(__file__).with_name("migrations")
 
@@ -43,6 +43,7 @@ CORE_TABLES = (
     "m5_class_states",
     "m5_learner_states",
     "m5_learning_observations",
+    "m5_learning_observation_audits",
     "m5_dina_models",
     "m5_bkt_models",
     "m5_knowledge_traces",
@@ -77,6 +78,7 @@ _DROP_TABLE_STATEMENTS = (
     "DROP TABLE IF EXISTS m5_class_states",
     "DROP TABLE IF EXISTS m5_learner_states",
     "DROP TABLE IF EXISTS m5_learning_observations",
+    "DROP TABLE IF EXISTS m5_learning_observation_audits",
     "DROP TABLE IF EXISTS m5_dina_models",
     "DROP TABLE IF EXISTS m5_bkt_models",
     "DROP TABLE IF EXISTS m5_knowledge_traces",

@@ -276,6 +276,73 @@ def test_fit_is_deterministic_and_keeps_parameters_in_dina_bounds() -> None:
     )
 
 
+def test_dina_consumes_each_source_audit_version_only_once() -> None:
+    """Catch duplicate audit evidence inflating DINA item sample sizes."""
+
+    from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+
+    cohort = _training_cohort()
+    replay = cohort[0].observations[0].model_copy(
+        update={"observation_id": "obs_replayed_under_a_new_id"}
+    )
+    cohort.append(
+        LearningObservationBatch(
+            batch_id="batch_replayed_audit",
+            learner_id=replay.learner_id,
+            observations=[replay],
+            watermark="watermark_replayed_audit",
+            created_at=NOW + timedelta(hours=5),
+        )
+    )
+    engine = DinaEngine(
+        min_students=4,
+        min_responses_per_item=4,
+        max_iterations=30,
+    )
+
+    model = engine.fit(cohort, _q_matrix())
+
+    assert model.observation_count == 8
+    assert {item.item_id: item.sample_size for item in model.item_parameters} == {
+        "item_1": 4,
+        "item_2": 4,
+    }
+
+
+def test_dina_rejects_conflicting_content_for_one_source_audit_version() -> None:
+    """Catch silently choosing one of two conflicting authoritative audits."""
+
+    from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+
+    cohort = _training_cohort()
+    original = cohort[0].observations[0]
+    conflicting = original.model_copy(
+        update={
+            "observation_id": "obs_conflicting_replay",
+            "score": 0.0,
+            "response_outcome": "incorrect",
+        }
+    )
+    cohort.append(
+        LearningObservationBatch(
+            batch_id="batch_conflicting_audit",
+            learner_id=conflicting.learner_id,
+            observations=[conflicting],
+            watermark="watermark_conflicting_audit",
+            created_at=NOW + timedelta(hours=5),
+        )
+    )
+
+    with pytest.raises(DomainError) as captured:
+        DinaEngine(
+            min_students=4,
+            min_responses_per_item=4,
+            max_iterations=30,
+        ).fit(cohort, _q_matrix())
+
+    assert captured.value.code == "LEARNING_OBSERVATION_AUDIT_CONFLICT"
+
+
 def test_profile_posterior_is_normalized_and_drives_mastery_direction() -> None:
     """Catch invalid posterior mass or diagnosis unrelated to responses."""
 
@@ -426,6 +493,70 @@ def test_sqlite_repository_persists_observations_and_append_only_dina_models(
         repository.insert_or_get_dina_model(
             model.model_copy(update={"observation_count": model.observation_count + 1})
         )
+
+
+def test_sqlite_repository_does_not_store_audit_replay_under_a_new_id(
+    tmp_path: Path,
+) -> None:
+    """Catch database identity relying only on observation_id."""
+
+    from course_insight.infrastructure.sqlite.m5_repository import SQLiteM5Repository
+
+    repository = SQLiteM5Repository(tmp_path / "m5-audit-replay.sqlite3")
+    repository.initialize()
+    original_batch = _batch("learner_1", (True, False))
+    replay = original_batch.observations[0].model_copy(
+        update={"observation_id": "obs_same_audit_new_id"}
+    )
+    replay_batch = LearningObservationBatch(
+        batch_id="batch_same_audit_new_id",
+        learner_id=replay.learner_id,
+        observations=[replay],
+        watermark="watermark_same_audit_new_id",
+        created_at=NOW + timedelta(hours=1),
+    )
+
+    repository.insert_or_get_learning_observation_batch(original_batch)
+    repository.insert_or_get_learning_observation_batch(replay_batch)
+
+    stored = repository.list_learning_observations(
+        course_id="course_1",
+        class_id="class_1",
+    )
+    assert [item.observation_id for item in stored] == [
+        item.observation_id for item in original_batch.observations
+    ]
+
+
+def test_sqlite_repository_rejects_conflicting_audit_replay(
+    tmp_path: Path,
+) -> None:
+    """Catch persisting two different outcomes for one authoritative audit."""
+
+    from course_insight.infrastructure.sqlite.m5_repository import SQLiteM5Repository
+
+    repository = SQLiteM5Repository(tmp_path / "m5-audit-conflict.sqlite3")
+    repository.initialize()
+    original_batch = _batch("learner_1", (True, False))
+    original = original_batch.observations[0]
+    conflicting = original.model_copy(
+        update={
+            "observation_id": "obs_same_audit_conflict",
+            "score": 0.0,
+            "response_outcome": "incorrect",
+        }
+    )
+    conflicting_batch = LearningObservationBatch(
+        batch_id="batch_same_audit_conflict",
+        learner_id=conflicting.learner_id,
+        observations=[conflicting],
+        watermark="watermark_same_audit_conflict",
+        created_at=NOW + timedelta(hours=1),
+    )
+
+    repository.insert_or_get_learning_observation_batch(original_batch)
+    with pytest.raises(RuntimeError, match="audit conflict"):
+        repository.insert_or_get_learning_observation_batch(conflicting_batch)
 
 
 def test_m5_service_trains_persists_and_applies_dina(tmp_path: Path) -> None:

@@ -282,7 +282,7 @@ def test_sqlite_current_ledger_repairs_v11_and_preserves_m4_rows(
         )
         assert restarted.insert_or_get_intent_decision(candidate) == candidate
 
-    assert SCHEMA_VERSION == 14
+    assert SCHEMA_VERSION == 15
 
 
 @pytest.mark.parametrize(

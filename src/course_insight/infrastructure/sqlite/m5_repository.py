@@ -21,6 +21,10 @@ from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import migrate
 from course_insight.infrastructure.sqlite import m5_bkt_runtime
+from course_insight.modules.m5_learner_class_state.learning_observation_evidence import (
+    learning_observation_evidence_checksum,
+    normalize_learning_observations,
+)
 
 
 _UNSPECIFIED_CLASS_BASELINE = object()
@@ -359,6 +363,58 @@ class SQLiteM5Repository:
         try:
             connection.execute("BEGIN IMMEDIATE")
             for observation in candidate.observations:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO m5_learning_observation_audits (
+                        source_audit_id,
+                        source_audit_version,
+                        observation_id
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (
+                        observation.source_audit_id,
+                        observation.source_audit_version,
+                        observation.observation_id,
+                    ),
+                )
+                audit_row = connection.execute(
+                    """
+                    SELECT observation_id
+                    FROM m5_learning_observation_audits
+                    WHERE source_audit_id = ? AND source_audit_version = ?
+                    """,
+                    (
+                        observation.source_audit_id,
+                        observation.source_audit_version,
+                    ),
+                ).fetchone()
+                if audit_row is None:
+                    raise RuntimeError("M5 learning observation audit insert failed")
+                canonical_observation_id = str(audit_row["observation_id"])
+                if canonical_observation_id != observation.observation_id:
+                    canonical_row = connection.execute(
+                        """
+                        SELECT
+                            observation_id,
+                            course_id,
+                            class_id,
+                            learner_id,
+                            attempt_id,
+                            occurred_at,
+                            payload,
+                            payload_checksum,
+                            schema_version
+                        FROM m5_learning_observations
+                        WHERE observation_id = ?
+                        """,
+                        (canonical_observation_id,),
+                    ).fetchone()
+                    canonical = self._learning_observation_from_row(canonical_row)
+                    if learning_observation_evidence_checksum(
+                        canonical
+                    ) != learning_observation_evidence_checksum(observation):
+                        raise RuntimeError("M5 learning observation audit conflict")
+                    continue
                 payload = dumps_json(observation.to_dict())
                 connection.execute(
                     """
@@ -445,10 +501,11 @@ class SQLiteM5Repository:
                 """,
                 (course_id, class_id),
             ).fetchall()
-            return [
+            observations = [
                 self._learning_observation_from_row(row).model_copy(deep=True)
                 for row in rows
             ]
+            return normalize_learning_observations(observations)
         finally:
             connection.close()
 

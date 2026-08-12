@@ -6,6 +6,7 @@ from typing import Iterator
 
 import pytest
 
+from course_insight.infrastructure.postgresql.base import PostgresOperationError
 from course_insight.infrastructure.postgresql.m5_repository import (
     PostgresM5Repository,
 )
@@ -183,6 +184,25 @@ def test_postgres_m5_model_runtime_round_trip(
         course_id=dina_model.course_id,
         class_id=dina_model.class_id,
     ) == dina_model
+    original = cohort[0].observations[0]
+    replay = original.model_copy(update={"observation_id": "postgres_audit_replay"})
+    replay_batch = cohort[0].model_copy(
+        update={
+            "batch_id": "postgres_audit_replay_batch",
+            "observations": [replay],
+            "watermark": "postgres_audit_replay_watermark",
+        }
+    )
+    assert repository.insert_or_get_learning_observation_batch(
+        replay_batch
+    ) == replay_batch
+    conflicting = replay.model_copy(
+        update={"score": 0.0, "response_outcome": "incorrect"}
+    )
+    with pytest.raises(PostgresOperationError, match="identity conflict"):
+        repository.insert_or_get_learning_observation_batch(
+            replay_batch.model_copy(update={"observations": [conflicting]})
+        )
     recovered_observations = repository.list_learning_observations(
         course_id="course_1",
         class_id="class_1",

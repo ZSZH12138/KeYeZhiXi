@@ -5,6 +5,8 @@ from __future__ import annotations
 import sqlite3
 
 from course_insight.infrastructure.sqlite.m5_m8_model_runtime_schema import (
+    LEARNING_OBSERVATION_AUDIT_BACKFILL_SQL as _LEARNING_OBSERVATION_AUDIT_BACKFILL_SQL,
+    LEARNING_OBSERVATION_AUDIT_TABLE as _LEARNING_OBSERVATION_AUDIT_TABLE,
     MODEL_RUNTIME_TABLES as _M5_M8_MODEL_RUNTIME_TABLES,
 )
 from course_insight.infrastructure.sqlite.module_recovery_schema import (
@@ -35,7 +37,7 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     migrate_workflow_v10_to_v11,
 )
 
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
@@ -53,6 +55,9 @@ _ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME = (
 _M6_POLICY_LEARNING_MIGRATION_NAME = "m6_policy_learning"
 _ASSESSMENT_POLICY_FREEZE_MIGRATION_NAME = "m0_policy_freeze"
 _M5_M8_MODEL_RUNTIME_MIGRATION_NAME = "m5_m8_model_runtime"
+_M5_LEARNING_OBSERVATION_AUDIT_MIGRATION_NAME = (
+    "m5_learning_observation_audit_identity"
+)
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -925,6 +930,17 @@ def _validate_m5_m8_model_runtime_schema(
             raise RuntimeError(f"{table_name} schema is incompatible")
 
 
+def _validate_learning_observation_audit_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    table_name, expected_sql = _LEARNING_OBSERVATION_AUDIT_TABLE
+    if _normalized_table_schema_sql(
+        connection,
+        table_name,
+    ) != _normalize_create_table_sql(expected_sql):
+        raise RuntimeError(f"{table_name} schema is incompatible")
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     """Apply every pending migration in one explicit immediate transaction."""
 
@@ -1128,6 +1144,17 @@ def migrate(connection: sqlite3.Connection) -> None:
             applied_versions.add(14)
         else:
             _validate_m5_m8_model_runtime_schema(connection)
+        if 15 not in applied_versions:
+            connection.execute(_LEARNING_OBSERVATION_AUDIT_TABLE[1])
+            connection.execute(_LEARNING_OBSERVATION_AUDIT_BACKFILL_SQL)
+            _validate_learning_observation_audit_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (15, _M5_LEARNING_OBSERVATION_AUDIT_MIGRATION_NAME),
+            )
+            applied_versions.add(15)
+        else:
+            _validate_learning_observation_audit_schema(connection)
         validate_outbox_schema(connection, schema_version=SCHEMA_VERSION)
         connection.execute("COMMIT")
     except Exception:
