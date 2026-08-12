@@ -6,7 +6,7 @@ import hashlib
 import json
 import math
 from collections.abc import Sequence
-from datetime import datetime
+from datetime import UTC, datetime
 
 import numpy as np
 from scipy.optimize import minimize
@@ -19,6 +19,39 @@ from course_insight.contracts.learning_models import (
     IRTParameterSet,
     LearningObservation,
 )
+
+
+def _utc_iso(value: datetime) -> str:
+    if value.tzinfo is None or value.utcoffset() is None:
+        raise ValueError("IRT timestamps must be timezone-aware")
+    return value.astimezone(UTC).isoformat()
+
+
+def _evidence_created_at(
+    observations: Sequence[LearningObservation],
+    requested_at: datetime,
+) -> datetime:
+    if not observations:
+        return requested_at.astimezone(UTC)
+    return max(item.occurred_at for item in observations).astimezone(UTC)
+
+
+def _run_digest(
+    *,
+    parameter_set_id: str,
+    status: str,
+    failure_code: str | None,
+    requested_at: datetime,
+) -> str:
+    payload = {
+        "parameter_set_id": parameter_set_id,
+        "status": status,
+        "failure_code": failure_code,
+        "requested_at": _utc_iso(requested_at),
+    }
+    return hashlib.sha256(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    ).hexdigest()
 
 
 class TwoPLCalibrator:
@@ -89,6 +122,8 @@ class TwoPLCalibrator:
     ) -> CalibrationRunResult:
         """Fit a shadow 2PL parameter set with marginal maximum likelihood."""
 
+        _utc_iso(requested_at)
+        requested_at = requested_at.astimezone(UTC)
         prepared = self._prepare(observations)
         if prepared is None:
             return self._failure_result(observations, requested_at)
@@ -193,18 +228,26 @@ class TwoPLCalibrator:
                 "utf-8"
             )
         ).hexdigest()
+        evidence_created_at = _evidence_created_at(observations, requested_at)
         if not converged:
+            parameter_set = IRTParameterSet(
+                parameter_set_id=f"irt_failed_{digest[:24]}",
+                model_type="2PL",
+                version=f"irt-failed-{digest[:16]}",
+                item_parameters=[],
+                sample_size=0,
+                status="empty",
+                created_at=evidence_created_at,
+            )
+            run_digest = _run_digest(
+                parameter_set_id=parameter_set.parameter_set_id,
+                status="failed",
+                failure_code="CALIBRATION_DID_NOT_CONVERGE",
+                requested_at=requested_at,
+            )
             return CalibrationRunResult(
-                run_id=f"calibration_failed_{digest[:24]}",
-                parameter_set=IRTParameterSet(
-                    parameter_set_id=f"irt_failed_{digest[:24]}",
-                    model_type="2PL",
-                    version=f"irt-failed-{digest[:16]}",
-                    item_parameters=[],
-                    sample_size=0,
-                    status="empty",
-                    created_at=requested_at,
-                ),
+                run_id=f"calibration_failed_{run_digest[:24]}",
+                parameter_set=parameter_set,
                 converged=False,
                 metrics=metrics,
                 status="failed",
@@ -218,10 +261,16 @@ class TwoPLCalibrator:
             item_parameters=[IRTItemParameters(**item) for item in payload["item_parameters"]],
             sample_size=sample_size,
             status="shadow",
-            created_at=requested_at,
+            created_at=evidence_created_at,
+        )
+        run_digest = _run_digest(
+            parameter_set_id=parameter_set.parameter_set_id,
+            status="shadow",
+            failure_code=None,
+            requested_at=requested_at,
         )
         return CalibrationRunResult(
-            run_id=f"calibration_{digest[:24]}",
+            run_id=f"calibration_{run_digest[:24]}",
             parameter_set=parameter_set,
             converged=True,
             metrics=metrics,
@@ -402,22 +451,48 @@ class TwoPLCalibrator:
         observations: Sequence[LearningObservation],
         requested_at: datetime,
     ) -> CalibrationRunResult:
-        digest = hashlib.sha256(
-            ",".join(sorted(item.observation_id for item in observations)).encode(
-                "utf-8"
-            )
-        ).hexdigest()
-        return CalibrationRunResult(
-            run_id=f"calibration_insufficient_{digest[:24]}",
-            parameter_set=IRTParameterSet(
-                parameter_set_id=f"irt_insufficient_{digest[:24]}",
-                model_type="2PL",
-                version=f"irt-insufficient-{digest[:16]}",
-                item_parameters=[],
-                sample_size=0,
-                status="empty",
-                created_at=requested_at,
+        evidence_created_at = _evidence_created_at(observations, requested_at)
+        identity_payload = {
+            "observations": [
+                item.model_dump(mode="json")
+                for item in sorted(
+                    observations,
+                    key=lambda item: (
+                        item.source_audit_id,
+                        item.source_audit_version,
+                        item.observation_id,
+                    ),
+                )
+            ],
+            "empty_request_time": (
+                _utc_iso(requested_at) if not observations else None
             ),
+        }
+        digest = hashlib.sha256(
+            json.dumps(
+                identity_payload,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()
+        parameter_set = IRTParameterSet(
+            parameter_set_id=f"irt_insufficient_{digest[:24]}",
+            model_type="2PL",
+            version=f"irt-insufficient-{digest[:16]}",
+            item_parameters=[],
+            sample_size=0,
+            status="empty",
+            created_at=evidence_created_at,
+        )
+        run_digest = _run_digest(
+            parameter_set_id=parameter_set.parameter_set_id,
+            status="failed",
+            failure_code="INSUFFICIENT_CALIBRATION_DATA",
+            requested_at=requested_at,
+        )
+        return CalibrationRunResult(
+            run_id=f"calibration_insufficient_{run_digest[:24]}",
+            parameter_set=parameter_set,
             converged=False,
             metrics={},
             status="failed",

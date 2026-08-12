@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
 
@@ -179,3 +179,74 @@ def test_service_flattens_multiple_single_learner_batches_for_calibration() -> N
 
     assert result.failure_code == "INSUFFICIENT_CALIBRATION_DATA"
     assert spy.observation_ids == ["obs_0_0", "obs_1_0"]
+
+
+def test_identical_irt_request_replays_an_equal_result() -> None:
+    """Catch nondeterministic identities for an exact calibration retry."""
+
+    observations = [
+        _observation(learner, item, (learner + item) % 2 == 0)
+        for learner in range(8)
+        for item in range(3)
+    ]
+    calibrator = _calibrator(
+        min_students=8,
+        min_responses_per_item=8,
+        min_items=3,
+        max_iterations=100,
+    )
+
+    first = calibrator.fit(observations, NOW)
+    replay = calibrator.fit(list(reversed(observations)), NOW)
+
+    assert first.status == "shadow"
+    assert replay == first
+
+
+def test_later_irt_run_reuses_parameters_without_reusing_run_identity() -> None:
+    """Catch one run ID referring to timestamp-dependent result content."""
+
+    observations = [
+        _observation(learner, item, (learner + item) % 2 == 0)
+        for learner in range(8)
+        for item in range(3)
+    ]
+    calibrator = _calibrator(
+        min_students=8,
+        min_responses_per_item=8,
+        min_items=3,
+        max_iterations=100,
+    )
+
+    first = calibrator.fit(observations, NOW)
+    later = calibrator.fit(observations, NOW + timedelta(minutes=5))
+
+    assert first.status == "shadow"
+    assert later.parameter_set == first.parameter_set
+    assert later.run_id != first.run_id
+    assert later.generated_at == NOW + timedelta(minutes=5)
+
+
+def test_equivalent_irt_request_timezones_have_one_immutable_payload() -> None:
+    """Catch one run ID serializing two offsets for the same instant."""
+
+    observations = [
+        _observation(learner, item, (learner + item) % 2 == 0)
+        for learner in range(8)
+        for item in range(3)
+    ]
+    calibrator = _calibrator(
+        min_students=8,
+        min_responses_per_item=8,
+        min_items=3,
+        max_iterations=100,
+    )
+
+    utc_result = calibrator.fit(observations, NOW)
+    offset_result = calibrator.fit(
+        observations,
+        NOW.astimezone(timezone(timedelta(hours=8))),
+    )
+
+    assert offset_result.run_id == utc_result.run_id
+    assert offset_result.content_checksum() == utc_result.content_checksum()
