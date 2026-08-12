@@ -28,10 +28,12 @@ from course_insight.contracts.platform import (
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.json_io import write_json
 from course_insight.application.assessment_workflow import AssessmentWorkflow
+from course_insight.application.retrieval import retrieve_for_application
 from course_insight.modules.m0_platform.service import M0PlatformService
 from course_insight.modules.m1_course_governance.service import M1CourseGovernanceService
 from course_insight.modules.m2_evidence_retrieval.service import M2EvidenceRetrievalService
 from course_insight.modules.m3_knowledge_bundle.service import M3KnowledgeBundleService
+from course_insight.modules.m3_knowledge_bundle.teacher_review import TeacherReviewRecord
 from course_insight.modules.m4_task_orchestration.service import M4TaskOrchestrationService
 from course_insight.modules.m5_learner_class_state.service import M5StateService
 from course_insight.modules.m6_tutoring_fsm.service import M6TutoringControlService
@@ -200,6 +202,8 @@ class AppCoordinator:
         blueprint_seed_path: Path,
         prerequisite_seed_path: Path | None,
         misconception_seed_path: Path | None,
+        teacher_review_id: str | None = None,
+        teacher_review_version: int | None = None,
     ) -> dict[str, ContractModel]:
         """Produce steps 1-3 from governed course files and teacher seeds."""
 
@@ -211,8 +215,62 @@ class AppCoordinator:
             output_dir=output_dir,
         )
         index_ref = self._m2.build_index(course_package=course_package)
-        knowledge_bundle = self._m3.build_knowledge_bundle(
-            course_package=course_package,
+        if (teacher_review_id is None) != (teacher_review_version is None):
+            raise DomainError(
+                code="M3_REVIEW_INPUT_INVALID",
+                module="application",
+                message="teacher review id and version must be supplied together",
+                recoverable=True,
+            )
+        if teacher_review_id is None:
+            knowledge_bundle = self._m3.build_knowledge_bundle(
+                course_package=course_package,
+                concept_seed_path=concept_seed_path,
+                item_seed_path=item_seed_path,
+                rubric_seed_path=rubric_seed_path,
+                blueprint_seed_path=blueprint_seed_path,
+                prerequisite_seed_path=prerequisite_seed_path,
+                misconception_seed_path=misconception_seed_path,
+            )
+        else:
+            knowledge_bundle = self._m3.build_knowledge_bundle_after_approval(
+                review_id=teacher_review_id,
+                review_version=teacher_review_version,
+                course_package=course_package,
+                concept_seed_path=concept_seed_path,
+                item_seed_path=item_seed_path,
+                rubric_seed_path=rubric_seed_path,
+                blueprint_seed_path=blueprint_seed_path,
+                prerequisite_seed_path=prerequisite_seed_path,
+                misconception_seed_path=misconception_seed_path,
+            )
+        return {
+            "course_package": course_package,
+            "index_ref": index_ref,
+            "knowledge_bundle": knowledge_bundle,
+        }
+
+    def create_knowledge_review_draft(
+        self,
+        *,
+        review_id: str,
+        subject_id: str,
+        validation_report_ref: str,
+        now: datetime,
+        concept_seed_path: Path,
+        item_seed_path: Path,
+        rubric_seed_path: Path,
+        blueprint_seed_path: Path,
+        prerequisite_seed_path: Path | None = None,
+        misconception_seed_path: Path | None = None,
+    ) -> TeacherReviewRecord:
+        """Start the M3 S4 review against a captured seed checksum."""
+
+        return self._m3.create_teacher_review_draft(
+            review_id=review_id,
+            subject_id=subject_id,
+            validation_report_ref=validation_report_ref,
+            now=now,
             concept_seed_path=concept_seed_path,
             item_seed_path=item_seed_path,
             rubric_seed_path=rubric_seed_path,
@@ -220,11 +278,62 @@ class AppCoordinator:
             prerequisite_seed_path=prerequisite_seed_path,
             misconception_seed_path=misconception_seed_path,
         )
-        return {
-            "course_package": course_package,
-            "index_ref": index_ref,
-            "knowledge_bundle": knowledge_bundle,
-        }
+
+    def submit_knowledge_review(
+        self,
+        review_id: str,
+        reviewer_pseudonym: str,
+        reason: str,
+        expected_version: int,
+        now: datetime,
+    ) -> TeacherReviewRecord:
+        """Submit one M3 S4 review through its CAS transition."""
+
+        return self._m3.submit_teacher_review(
+            review_id, reviewer_pseudonym, reason, expected_version, now
+        )
+
+    def approve_knowledge_review(
+        self,
+        review_id: str,
+        reviewer_pseudonym: str,
+        reason: str,
+        expected_version: int,
+        now: datetime,
+    ) -> TeacherReviewRecord:
+        """Approve one M3 S4 review through its CAS transition."""
+
+        return self._m3.approve_teacher_review(
+            review_id, reviewer_pseudonym, reason, expected_version, now
+        )
+
+    def reject_knowledge_review(
+        self,
+        review_id: str,
+        reviewer_pseudonym: str,
+        reason: str,
+        expected_version: int,
+        now: datetime,
+    ) -> TeacherReviewRecord:
+        """Reject one M3 S4 review through its CAS transition."""
+
+        return self._m3.reject_teacher_review(
+            review_id, reviewer_pseudonym, reason, expected_version, now
+        )
+
+    def recall_knowledge_review(
+        self,
+        review_id: str,
+        reviewer_pseudonym: str,
+        reason: str,
+        expected_version: int,
+        now: datetime,
+    ) -> TeacherReviewRecord:
+        """Recall one published M3 S4 review through its CAS transition."""
+
+        return self._m3.recall_teacher_review(
+            review_id, reviewer_pseudonym, reason, expected_version, now
+        )
 
     def run_assessment_cycle(
         self,
@@ -272,9 +381,11 @@ class AppCoordinator:
             )
         scoring_task = preparation.rubric_scoring_tasks[0]
         scoring_query = preparation.query_for_task(scoring_task.scoring_task_id)
-        scoring_evidence = self._m2.retrieve(
-            evidence_query=scoring_query,
-            evidence_index_ref=index_ref,
+        scoring_evidence = retrieve_for_application(
+            self._m2,
+            scoring_query,
+            index_ref,
+            request_id=f"assessment:{scoring_query.query_id}:grading",
         )
         rubric_result = self._m7.score_subjective_answer(
             rubric_scoring_task=scoring_task,
@@ -298,9 +409,11 @@ class AppCoordinator:
             state_update_result=state,
             previous_session_state_snapshot=None,
         )
-        feedback_evidence = self._m2.retrieve(
-            evidence_query=tutoring.evidence_query,
-            evidence_index_ref=index_ref,
+        feedback_evidence = retrieve_for_application(
+            self._m2,
+            tutoring.evidence_query,
+            index_ref,
+            request_id=f"assessment:{tutoring.evidence_query.query_id}:feedback",
         )
         feedback = self._m7.generate_student_feedback(
             feedback_generation_task=tutoring.feedback_generation_task,

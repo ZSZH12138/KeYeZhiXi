@@ -7,7 +7,7 @@ import hmac
 import json
 import re
 import unicodedata
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
@@ -20,7 +20,11 @@ from course_insight.contracts.course import (
     SourceDocument,
 )
 from course_insight.contracts.errors import DomainError
-from course_insight.infrastructure.json_io import write_json
+from course_insight.infrastructure.json_io import dumps_json, write_json
+from course_insight.modules.m1_course_governance.parser_protocol import (
+    ParserEntry,
+    ParserRegistry,
+)
 from course_insight.modules.m1_course_governance.parsers import (
     ParsedBlock,
     ParsedSource,
@@ -73,6 +77,15 @@ class M1CourseGovernanceService:
 
     def __init__(self, parser_registry: Any, hash_tool: Any, repository: M1Repository) -> None:
         self._parser_registry = parser_registry
+        self._parser_dispatch = (
+            parser_registry
+            if isinstance(parser_registry, ParserRegistry)
+            else (
+                ParserRegistry.from_legacy(parser_registry)
+                if isinstance(parser_registry, Mapping)
+                else None
+            )
+        )
         self._hash_tool = hash_tool
         self._repository = repository
 
@@ -140,7 +153,15 @@ class M1CourseGovernanceService:
             self._write_failures(output_dir, failures)
             raise _domain("UNAUTHORIZED_SOURCE", "authorization manifest sources must exactly match input sources")
 
-        imported: list[tuple[SourceDocument, SourceAuthorization, list[ContentChunk], bytes]] = []
+        imported: list[
+            tuple[
+                SourceDocument,
+                SourceAuthorization,
+                list[ContentChunk],
+                bytes,
+                dict[str, Any],
+            ]
+        ] = []
         for path in paths:
             try:
                 imported.append(
@@ -162,7 +183,15 @@ class M1CourseGovernanceService:
         imported.sort(key=lambda value: (value[0].source_id, value[0].file_name))
         documents = [value[0] for value in imported]
         authorizations_out = [value[1] for value in imported]
-        chunks = [chunk for _, _, source_chunks, _ in imported for chunk in source_chunks]
+        chunks = [
+            chunk for _, _, source_chunks, _, _ in imported for chunk in source_chunks
+        ]
+        snapshot_metadata = dict(metadata)
+        snapshot_metadata["parser_metadata"] = {
+            document.source_id: parser_metadata
+            for document, _, _, _, parser_metadata in imported
+        }
+        snapshot_metadata_bytes = dumps_json(snapshot_metadata).encode("utf-8")
         try:
             candidate = CoursePackage(
                 course_package_id=_required_text(metadata, "course_package_id"),
@@ -196,7 +225,7 @@ class M1CourseGovernanceService:
                 save_complete(
                     package,
                     CourseImportSnapshot(
-                        course_metadata_bytes=metadata_bytes,
+                        course_metadata_bytes=snapshot_metadata_bytes,
                         source_authorization_bytes=authorization_bytes,
                         source_payloads=tuple(
                             SourcePayload(
@@ -204,7 +233,7 @@ class M1CourseGovernanceService:
                                 file_name=document.file_name,
                                 raw_bytes=raw_bytes,
                             )
-                            for document, _, _, raw_bytes in imported
+                            for document, _, _, raw_bytes, _ in imported
                         ),
                     ),
                 )
@@ -273,7 +302,13 @@ class M1CourseGovernanceService:
         prior_chunk_count: int,
         *,
         source_count: int = 1,
-    ) -> tuple[SourceDocument, SourceAuthorization, list[ContentChunk], bytes]:
+    ) -> tuple[
+        SourceDocument,
+        SourceAuthorization,
+        list[ContentChunk],
+        bytes,
+        dict[str, Any],
+    ]:
         del prior_chunk_count
         if not path.is_file():
             raise _domain("COURSE_PARSE_FAILED", "course source file does not exist")
@@ -292,7 +327,7 @@ class M1CourseGovernanceService:
         if not _SHA256_RE.fullmatch(expected) or not hmac.compare_digest(digest, expected):
             code = "UNAUTHORIZED_SOURCE" if not _SHA256_RE.fullmatch(expected) else "SOURCE_HASH_MISMATCH"
             raise _domain(code, "source authorization hash is invalid" if code == "UNAUTHORIZED_SOURCE" else "course source hash differs from authorization manifest", file_name=path.name)
-        parsed = self._parse(path, raw_bytes)
+        parsed, parser_metadata = self._parse_with_metadata(path, raw_bytes)
         source_id = authorization.source_id
         try:
             document = SourceDocument(
@@ -341,18 +376,32 @@ class M1CourseGovernanceService:
             ) from error
         if not chunks:
             raise _domain("COURSE_PARSE_FAILED", "course source contains no text blocks", file_name=path.name)
-        return document, source_authorization, chunks, raw_bytes
+        return document, source_authorization, chunks, raw_bytes, parser_metadata
 
     def _parse(self, path: Path, raw_bytes: bytes) -> ParsedSource:
+        parsed, _ = self._parse_with_metadata(path, raw_bytes)
+        return parsed
+
+    def _parse_with_metadata(
+        self,
+        path: Path,
+        raw_bytes: bytes,
+    ) -> tuple[ParsedSource, dict[str, Any]]:
         parser = self._resolve_parser(path)
         try:
-            result = parser(path.name, raw_bytes)
+            result = parser.parse(path.name, raw_bytes)
             if isinstance(result, ParsedSource):
-                return self._canonicalize_parsed_source(result)
+                parsed = self._canonicalize_parsed_source(result)
+                if parsed.media_type != parser.media_type:
+                    raise ValueError("parser media type does not match registry entry")
+                return parsed, parser.metadata()
             if isinstance(result, str):
-                return self._canonicalize_parsed_source(
+                parsed = self._canonicalize_parsed_source(
                     self._legacy_text_source(result)
                 )
+                if parsed.media_type != parser.media_type:
+                    raise ValueError("parser media type does not match registry entry")
+                return parsed, parser.metadata()
             raise ValueError("parser did not return ParsedSource")
         except Exception as error:
             raise _domain("COURSE_PARSE_FAILED", "authorized course source could not be parsed", file_name=path.name, reason=type(error).__name__) from error
@@ -431,15 +480,15 @@ class M1CourseGovernanceService:
             blocks=tuple(sorted(canonical_blocks, key=lambda block: block.ordinal)),
         )
 
-    def _resolve_parser(self, path: Path) -> Callable[..., object]:
+    def _resolve_parser(self, path: Path) -> ParserEntry:
         if path.suffix.casefold() == ".ppt":
             raise _domain("COURSE_PARSE_FAILED", "legacy PowerPoint sources are not supported", file_name=path.name)
-        if not isinstance(self._parser_registry, Mapping):
+        if self._parser_dispatch is None:
             raise _domain("COURSE_PARSE_FAILED", "parser registry is unavailable")
-        parser = self._parser_registry.get(path.suffix.casefold())
-        if not callable(parser):
+        try:
+            return self._parser_dispatch.resolve(path.name)
+        except (KeyError, ValueError):
             raise _domain("COURSE_PARSE_FAILED", "course source type has no registered parser", file_name=path.name)
-        return parser
 
     def _hash_bytes(self, payload: bytes) -> str:
         if not callable(self._hash_tool):

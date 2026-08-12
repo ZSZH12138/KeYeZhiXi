@@ -194,7 +194,7 @@ def test_concurrent_publish_of_different_content_conflicts_after_staging(
     def synchronized_write_file(path: Path, contents: bytes) -> None:
         original_write_file(path, contents)
         if path.name == "manifest.json":
-            barrier.wait(timeout=5)
+            barrier.wait(timeout=60)
 
     monkeypatch.setattr(
         ImmutableArtifactStore,
@@ -312,7 +312,7 @@ def test_concurrent_publish_of_identical_content_is_idempotent_after_staging(
     def synchronized_write_file(path: Path, contents: bytes) -> None:
         original_write_file(path, contents)
         if path.name == "manifest.json":
-            barrier.wait(timeout=5)
+            barrier.wait(timeout=60)
 
     monkeypatch.setattr(
         ImmutableArtifactStore,

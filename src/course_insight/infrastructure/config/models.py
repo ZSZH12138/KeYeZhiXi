@@ -87,6 +87,56 @@ class DatabaseSettings(_FrozenModel):
         return self
 
 
+class EmbeddingSettings(_FrozenModel):
+    """Portable OpenAI-compatible embedding deployment settings."""
+
+    backend: Literal["disabled", "openai_compatible"] = "disabled"
+    endpoint: str | None = None
+    api_key_env: str = "OPENAI_API_KEY"
+    model_name: str | None = None
+    model_version: str | None = None
+    dimension: int | None = Field(default=None, ge=1, le=1_000_000)
+    timeout_seconds: Annotated[FiniteFloat, Field(gt=0, le=300)] = 10.0
+    max_retries: int = Field(default=2, ge=0, le=8)
+    verify_tls: bool = True
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _validate_api_key_env(cls, value: str) -> str:
+        if not _ENV_NAME.fullmatch(value):
+            raise ValueError("invalid environment variable name")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_embedding(self) -> Self:
+        configured = self.backend == "openai_compatible"
+        if configured and any(
+            value is None or not str(value).strip()
+            for value in (self.endpoint, self.model_name, self.model_version)
+        ):
+            raise ConfigurationError(
+                code="MISSING_REQUIRED_SETTING",
+                fields=("embedding.endpoint", "embedding.model_name", "embedding.model_version"),
+                reason="required",
+            )
+        if configured and self.dimension is None:
+            raise ConfigurationError(
+                code="MISSING_REQUIRED_SETTING",
+                fields=("embedding.dimension",),
+                reason="required",
+            )
+        if not configured and any(
+            value is not None
+            for value in (self.endpoint, self.model_name, self.model_version, self.dimension)
+        ):
+            raise ConfigurationError(
+                code="INVALID_EMBEDDING_CONFIGURATION",
+                fields=("embedding.backend",),
+                reason="disabled_with_values",
+            )
+        return self
+
+
 class LoggingSettings(_FrozenModel):
     level: LogLevel = "INFO"
     mode: LogMode = "rotating_file"
@@ -397,6 +447,7 @@ class PlatformSettings(BaseSettings):
     runtime_dir: Path
     config_dir: Path
     database: DatabaseSettings
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     logging: LoggingSettings
     outbox: OutboxSettings = Field(default_factory=OutboxSettings)
     web: WebSettings = Field(default_factory=WebSettings)

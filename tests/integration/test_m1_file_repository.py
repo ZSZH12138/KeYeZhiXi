@@ -88,7 +88,21 @@ def test_import_publishes_byte_exact_artifact_and_fresh_repository_recovers_it(
         if path.is_dir()
     )
     assert (artifact / "sources" / "source-1" / "lesson.txt").read_bytes() == source_bytes
-    assert (artifact / "inputs" / "course_metadata.json").read_bytes() == metadata.read_bytes()
+    stored_metadata = json.loads(
+        (artifact / "inputs" / "course_metadata.json").read_text(encoding="utf-8")
+    )
+    original_metadata = json.loads(metadata.read_text(encoding="utf-8"))
+    assert {
+        key: stored_metadata[key] for key in original_metadata
+    } == original_metadata
+    assert stored_metadata["parser_metadata"]["source-1"] == {
+        "extension": ".txt",
+        "media_type": "text/plain",
+        "parser_id": "m1.legacy-parser.txt",
+        "parser_version": "legacy-v1",
+        "capabilities": ["byte-input"],
+        "max_bytes": 25 * 1024 * 1024,
+    }
     assert (artifact / "inputs" / "source_authorization.csv").read_bytes() == authorization.read_bytes()
     assert json.loads((artifact / "parse_failures.json").read_text(encoding="utf-8")) == []
 

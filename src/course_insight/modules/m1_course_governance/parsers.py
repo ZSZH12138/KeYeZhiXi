@@ -12,8 +12,13 @@ from pathlib import PurePath
 import unicodedata
 from zipfile import BadZipFile, ZipFile
 
+from course_insight.modules.m1_course_governance.parser_protocol import (
+    DEFAULT_MAX_BYTES,
+    ParserEntry,
+    ParserRegistry,
+)
 
-_MAX_RAW_BYTES = 25 * 1024 * 1024
+_MAX_RAW_BYTES = DEFAULT_MAX_BYTES
 _MAX_PDF_PAGES = 200
 _MAX_PPTX_SLIDES = 200
 _MAX_OOXML_MEMBERS = 4_096
@@ -66,6 +71,64 @@ def parse_source(file_name: str, payload: bytes) -> ParsedSource:
     if suffix == ".pptx":
         return _parse_pptx(payload)
     raise _ParserError("unsupported source file type")
+
+
+def default_parser_registry() -> ParserRegistry:
+    """Build the versioned registry for the built-in M1 byte parsers."""
+
+    return ParserRegistry(
+        (
+            ParserEntry(
+                extension=".md",
+                media_type="text/markdown",
+                parser_version="parse-source-v1",
+                capabilities=frozenset({"byte-input", "text"}),
+                max_bytes=_MAX_RAW_BYTES,
+                parser=parse_source,
+                parser_id="m1.parse_source",
+            ),
+            ParserEntry(
+                extension=".txt",
+                media_type="text/plain",
+                parser_version="parse-source-v1",
+                capabilities=frozenset({"byte-input", "text"}),
+                max_bytes=_MAX_RAW_BYTES,
+                parser=parse_source,
+                parser_id="m1.parse_source",
+            ),
+            ParserEntry(
+                extension=".pdf",
+                media_type="application/pdf",
+                parser_version="parse-source-v1",
+                capabilities=frozenset({"byte-input", "paged"}),
+                max_bytes=_MAX_RAW_BYTES,
+                parser=parse_source,
+                parser_id="m1.parse_source",
+            ),
+            ParserEntry(
+                extension=".docx",
+                media_type=(
+                    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+                ),
+                parser_version="parse-source-v1",
+                capabilities=frozenset({"byte-input", "structured"}),
+                max_bytes=_MAX_RAW_BYTES,
+                parser=parse_source,
+                parser_id="m1.parse_source",
+            ),
+            ParserEntry(
+                extension=".pptx",
+                media_type=(
+                    "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+                ),
+                parser_version="parse-source-v1",
+                capabilities=frozenset({"byte-input", "paged", "structured"}),
+                max_bytes=_MAX_RAW_BYTES,
+                parser=parse_source,
+                parser_id="m1.parse_source",
+            ),
+        )
+    )
 
 
 def _parse_plain_text(payload: bytes, *, media_type: str) -> ParsedSource:

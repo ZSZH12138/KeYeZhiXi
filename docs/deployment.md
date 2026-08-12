@@ -2,10 +2,12 @@
 
 ## 文档边界
 
-本文件描述截至 `2026-07-27` 已实现的 M0 部署面、M6 私有策略配置与进程角色。它不把未实测的
-PostgreSQL 联调写成“已通过”，也不把开发服务器当成生产 WSGI/ASGI 部署。
+本文件描述截至 `2026-08-12` 已实现的 M0 部署面、M1—M3 S1-S6 能力、M6 私有策略
+配置与进程角色。它不把未实测的 PostgreSQL+pgvector 联调写成“已通过”，也不把开发
+服务器当成生产 WSGI/ASGI 部署。SQLite 仅用于离线、测试和迁移演练；生产必须使用
+PostgreSQL+pgvector。
 M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M7/M9 的 DeepSeek 网络调用仍是
-空实现；部署持久化和 Web 外层不会自动启用这些算法。
+空实现；M2 的 embedding/pgvector 代码已经实现，但当前尚未完成真实 live 联调。
 
 M6 已实现 rules/shadow/active runtime、artifact 校验、奖励/OPE 与私有持久化，
 但默认是 `rules`、零 rollout、零探索。本阶段没有真实教学训练、线上 rollout 或
@@ -95,7 +97,10 @@ Web 进程启动前需要：
 1. 有效的平台配置
 2. 当前核心 schema 与完整 Django migration
 3. 已执行 `sync_roles --apply`
-4. `runtime/snapshots/course_runtime_manifest.json` 及其中全部快照与 policy 可校验
+4. SQLite/离线模式：校验 `runtime/snapshots/course_runtime_manifest.json`、其中全部
+   快照与 policy，以及 `runtime/artifacts/` 下完整 M1/M2/M3 immutable artifacts；
+   生产 PostgreSQL 模式：校验 v15（0014/0015）schema、共享仓储中的 M1/M2/M3 制品、审计、review
+   和 ready pgvector 引用
 
 建议命令：
 
@@ -126,6 +131,13 @@ PostgreSQL 核心 schema migration 与 Django migration 是两套：
 
 - Django migration：只覆盖 M0 Web identity / authorization 表
 - PostgreSQL core migration：`src/course_insight/infrastructure/postgresql/migration_runner.py`
+
+SQLite 的 `m1_course_packages`、`m2_evidence_indexes`、`m3_knowledge_bundles`
+用于离线/测试和迁移演练；SQLite 不是生产权威后端。生产 PostgreSQL core migration
+0014 创建 `m1_m2_m3_artifacts`、`m2_vector_indexes`、`m2_vector_documents`、
+`m2_retrieval_audits` 和 `m3_teacher_reviews`，0015 为向量索引补充受治理的
+package/model metadata；当前 PostgreSQL core schema 为 v15。两者由共享的
+`PostgresM1M2M3Repository` 与 pgvector 适配器接收 M1—M3 业务写入。
 
 SQLite→PostgreSQL 数据迁移入口：
 
@@ -164,11 +176,34 @@ Web 第一次恢复课程上下文时读取
 }
 ```
 
-所有引用必须是 `runtime/` 内无 `..` 的相对路径。启动时会：
+当前 `schema_version=1` 的 manifest 协议要求随 manifest 保留三份
+`runtime/snapshots/` 契约快照。SQLite/离线模式下它们与完整
+`runtime/artifacts/` 一起用于恢复和 cross-check；生产 PostgreSQL 模式下，M1—M3
+制品、审计和 review 由共享仓储恢复，manifest/snapshot 仅作显式配置的引用和身份
+cross-check。部署备份和恢复必须覆盖所选后端的权威数据、manifest 与必要快照；不能
+只复制 manifest、单个契约 JSON 或数据库表。当前不把 ready 向量索引的自动发现写成
+已完成能力。
 
-- 以现有 `CoursePackage`、`EvidenceIndexRef`、`KnowledgeBundle` 契约重载快照；
-- 校验课程/包/索引身份、package checksum 与发布/ready 状态；
-- 重建 M2 词法索引并比较 index ID、版本、storage ref、统计和 checksum；
+所有引用必须是 `runtime/` 内无 `..` 的相对路径。部署启动前必须先校验：
+
+- 校验 `runtime/artifacts/` 中 M1 完整课程导入、M2 完整 lexical snapshot，以及
+  M3 bundle + seed snapshot + validation report；
+
+SQLite/离线启动时会：
+
+- 由 `FileM1Repository.get_course_package`、
+  `FileM2Repository.load_index_artifact`、`FileM3Repository.load_bundle_artifact`
+  读取完整 immutable artifacts；
+- 校验课程/包/索引身份、package checksum 与发布/ready 状态，并将必需的 snapshots
+  仅作身份 cross-check；
+- 直接恢复完整 M2 lexical snapshot，不重新 `build_index`；
+
+生产 PostgreSQL 启动时还必须：
+
+- 通过 v15（0014/0015）schema 和 `PostgresM1M2M3Repository` 校验 M1—M3 制品、审计与 review；
+- 为 vector/hybrid 检索显式提供并校验 `EvidenceIndexRef`，调用
+  `restore_vector_index`；自动发现 ready 向量索引已通过 durable metadata 恢复路径实现，
+  但当前尚未完成真实 PostgreSQL+pgvector live 联调；
 - 用真实 `StatePolicy.from_path()` 和 `TeacherThresholdPolicy.from_path()` 解析两份
   policy，而不只是检查文件存在。
 
@@ -329,8 +364,10 @@ cookie 和 stdout 模式。不要把实际值写回 `config/app.json`。
 
 ### 5. 备份 SQLite 并创建 PostgreSQL 应用库
 
-在切换前停止旧写入，复制现有 SQLite 数据库和 `-wal`/`-shm`（若存在），再由
-DBA 创建专用应用库与最小权限账号。示例：
+在切换前停止旧写入，复制现有 SQLite 数据库和 `-wal`/`-shm`（若存在），保留离线
+模式的 `runtime/artifacts/` 作为迁移输入，再由 DBA 创建专用 PostgreSQL 应用库与
+最小权限账号。生产备份必须同时覆盖 PostgreSQL 0014/0015 中的 M1—M3 制品、向量索引/文档、
+检索审计和教师复核记录；不能只备份 SQLite 文件或只复制 manifest。示例：
 
 ```shell
 createdb --host 127.0.0.1 --username course_insight_owner course_insight_app
@@ -419,8 +456,12 @@ python manage.py changepassword pseudonym_teacher_001
 
 ### 10. 准备并验证 course runtime manifest 与两份状态/教师 policy
 
-将课程初始化产生并由 M0 保存的 `CoursePackage`、`EvidenceIndexRef`、
-`KnowledgeBundle` 快照放入 `runtime/snapshots/`；把真实可解析的
+SQLite/离线验收时，将课程初始化产生并由 M0 保存的 `CoursePackage`、
+`EvidenceIndexRef`、`KnowledgeBundle` 快照放入 `runtime/snapshots/`；同时保留
+M1/M2/M3 File repository 写入的完整 `runtime/artifacts/`。快照不能替代 artifact：
+M2 要有完整 lexical snapshot，M3 要有 bundle、seed snapshot 和 validation report。
+生产 PostgreSQL 验收则校验 v15（0014/0015）migration、共享仓储中的 M1—M3 制品、审计、review
+和 ready pgvector 引用，不把 SQLite 文件当成生产数据源。把真实可解析的
 `StatePolicy` 与 `TeacherThresholdPolicy` 放入 `runtime/policies/`，再写上述
 manifest。不要手工伪造 checksum。验证命令：
 
@@ -551,23 +592,27 @@ delivered_count 增加；运行日志不含密码、Cookie、Authorization、Ses
 
 ### 19. 验证 PostgreSQL、live tests 与重启恢复
 
-先在应用库用只读 SQL 核对 migration ledger、关键表计数和追加版本，再正常停止并
-重启 Web/Worker，重新访问已有结果与复核上下文。destructive live tests 必须使用
-另一个可丢弃数据库：
+先在生产应用库用只读 SQL 核对 migration ledger、0014/0015 的 M1—M3/pgvector/review
+表、关键计数和追加版本；SQLite/离线模式才核对 `runtime/artifacts/` 中每个完整制品
+的 manifest、身份、版本和 payload checksum。正常停止并重启 Web/Worker 后，重新
+恢复已有课程、索引和知识包，再访问结果与复核上下文。destructive live tests 必须
+使用另一个可丢弃数据库：
 
 ```powershell
 $env:COURSE_INSIGHT_TEST_DATABASE_URL='<dsn-ending-in-course_insight_test>'
 $env:COURSE_INSIGHT_TEST_DATABASE_NAME='course_insight_test'
-python -m pytest tests/integration/test_postgres_m0_repository.py tests/integration/test_postgresql_m4_m6_repository_parity.py tests/integration/test_postgres_m5_m9_repositories.py tests/integration/test_sqlite_to_postgres_migration.py -q
+python -m pytest tests/integration/test_postgres_m0_repository.py tests/integration/test_postgresql_m4_m6_repository_parity.py tests/integration/test_postgres_m5_m9_repositories.py tests/integration/test_sqlite_to_postgres_migration.py tests/unit/test_postgres_s1_s6_migration.py tests/unit/test_postgres_m1_m2_m3_repository.py -q
 ```
 
-预期：重启后稳定 ID、评分、状态、反馈与分析可恢复；live tests 实际运行而不是
-skip。任一变量缺失会 skip；名称不匹配、保留库或无分隔 marker 会 fail。绝不把
-生产应用库 URL 复用为测试 URL。
+预期：重启后稳定 ID、评分、状态、反馈与分析可恢复，且 M1—M3 制品、审计、review
+和 ready 向量引用可校验；live tests 必须实际运行而不是 skip。任一变量缺失会 skip，
+验收报告必须明确“未执行真实 PostgreSQL+pgvector 联调”；名称不匹配、保留库或无
+分隔 marker 会 fail。绝不把生产应用库 URL 复用为测试 URL。
 
 ### 20. 演练回切 SQLite
 
-先停止 Web/Worker，确认没有写入，再恢复迁移前 SQLite 备份并切换：
+先停止 Web/Worker，确认没有写入，再成对恢复迁移前 SQLite 备份和同一备份点的
+`runtime/artifacts/`（以及 manifest 所引用的 snapshots），然后切换：
 
 ```powershell
 $env:COURSE_INSIGHT_DATABASE__BACKEND='sqlite'
@@ -578,8 +623,9 @@ python manage.py check
 python manage.py run_outbox_worker --once
 ```
 
-预期：SQLite migration 仍可前向到 version 11，应用可读取切换前的 SQLite 基线。
-失败时检查备份、文件权限和 schema ledger。仓库没有 PostgreSQL→SQLite 自动
+预期：SQLite 历史 core migration 仍可前向到 version 13，M1—M3 S1-S6 独立 ledger
+为 version 1，应用可读取切换前的 SQLite 基线。失败时检查备份、文件权限和 schema
+ledger。仓库没有 PostgreSQL→SQLite 自动
 反向迁移；切到 PostgreSQL 后产生的新数据不会出现在旧 SQLite。只有在明确接受
 该数据水位差异、或另行完成受审计的数据回迁后，才能把回切用于生产。
 
@@ -590,7 +636,7 @@ python manage.py run_outbox_worker --once
 Web 回滚是部署层回滚：
 
 - 回到上一版应用包
-- 保留当前数据库与 runtime 目录
+- 保留当前数据库与完整 runtime 目录，尤其不能丢失 M1/M2/M3 artifacts
 - 若上一版不兼容新的 Django migration，需要先确认 schema 兼容性
 
 ### Worker 回滚
@@ -620,6 +666,9 @@ policy 记录或热更新 settings 的安全入口。
 
 - PostgreSQL 测试 schema 销毁/重建辅助函数 `destroy_schema_for_tests()` 与 `rebuild_schema_for_tests()`
 - SQLite→PostgreSQL 单批失败的事务回滚和原 SQLite 保留
+- SQLite/离线回滚可恢复经过 checksum 验证的完整 `runtime/artifacts/` 版本；生产
+  PostgreSQL 回滚必须恢复经过校验的 0014/0015 数据库备份或 manifest，不是 migration 降级，
+  也不能只恢复 SQLite 预留表
 
 这些不是生产 schema 回退工具。上线前必须由数据库平台创建可恢复备份并记录
 core/Django migration ledger。仓库不支持生产一键降级 PostgreSQL migration，
@@ -654,7 +703,66 @@ SQLite 数据集”。回切不包含 PostgreSQL 期间新增的数据；两个�
 
 部署时不应把真实课程原始文件、数据库文件、runtime 快照、日志或审计 JSONL 打进可分发产物。
 
-配置文件、PostgreSQL/SQLite 数据、runtime snapshots、日志、审计、用户密码与
-secret manager 变更必须分别备份/回滚。删除数据库、覆盖备份、清理源 SQLite、
-确认 outbox 投递和外部日志保留策略都可能不可逆；执行前必须解析精确目标并由部署
-负责人确认。
+配置文件、PostgreSQL/SQLite 数据、`runtime/artifacts/`、runtime snapshots、日志、
+审计、用户密码与 secret manager 变更必须分别备份/回滚；其中 M1/M2/M3 必须分别
+覆盖完整课程导入、完整 lexical snapshot、bundle + seed snapshot + validation
+report。删除数据库、覆盖备份、清理源 SQLite 或删除单个 artifact payload、确认
+outbox 投递和外部日志保留策略都可能不可逆；执行前必须解析精确目标并由部署负责
+人确认。
+
+## S1-S6 上线补充（当前权威）
+
+### 生产后端与配置
+
+生产必须选择 `database.backend=postgresql`，并运行 PostgreSQL migration 至 v15：
+`0014_m1_m2_m3_capabilities.sql` 创建完整 M1/M2/M3 制品表、pgvector 索引/文档表、
+检索审计表和教师复核 CAS 表，`0015_vector_index_metadata.sql` 补充向量索引的
+课程包/embedding 模型 metadata；M1/M2/M3 在应用组合根共用一个
+`PostgresM1M2M3Repository`，不会在 SQLite 与 PostgreSQL 之间隐式 fallback。
+
+向量检索启用时还必须设置：
+
+- `COURSE_INSIGHT_EMBEDDING__BACKEND=openai_compatible`
+- `COURSE_INSIGHT_EMBEDDING__ENDPOINT`（生产必须 HTTPS）
+- `COURSE_INSIGHT_EMBEDDING__API_KEY_ENV` 与对应 secret manager 环境变量
+- `COURSE_INSIGHT_EMBEDDING__MODEL_NAME`
+- `COURSE_INSIGHT_EMBEDDING__MODEL_VERSION`
+- `COURSE_INSIGHT_EMBEDDING__DIMENSION`
+
+密钥只从环境变量读取，不写入 settings、审计、数据库 payload 或日志。embedding 模型
+身份和维度属于索引身份；替换模型必须新建 index version，完成 staging 校验后发布。
+
+### 正式链路与恢复
+
+M1 导入保存 parser id/version 和完整输入快照；M2 使用 lexical、vector 或 hybrid
+策略，正式业务入口是 `retrieve_with_policy`，对成功/无结果写入脱敏审计；旧
+`retrieve` 仅兼容已有 lexical 调用。M3 生产发布必须先完成教师复核 CAS，再使用
+`build_knowledge_bundle_after_approval`。重启时从所选后端恢复 M1/M2/M3 制品、审计和
+review，并显式校验 lexical 或 ready pgvector 引用；向量恢复调用
+`restore_vector_index`，不会重新请求 embedding。自动发现 ready 向量索引已通过 durable
+metadata 恢复路径实现，但真实 PostgreSQL+pgvector live 联调尚未完成。当前 `AppCoordinator` 和
+`assessment_workflow` 已通过 `retrieve_for_application -> retrieve_with_policy` 进入
+正式 M2 边界；旧 `retrieve` 仅作兼容。完整 vector/hybrid 生产链仍须完成真实
+PostgreSQL+pgvector live 联调后才能写成生产验收事实。
+`AppCoordinator.initialize_course` 生产调用必须同时提供已批准的
+`teacher_review_id`/`teacher_review_version`；现有 M0 教师 Web 的
+`TeacherReviewSubmission` 仍属于 M8/M9 评分复核；M3 S4 已提供应用层 CAS 门面，
+专用 Django 操作页仍需在上层产品界面中接入。
+
+迁移使用 `export_manifest` / `import_manifest`：目标端会先验证每条记录、每个 payload
+checksum 和 manifest checksum，再在一个事务中发布；同身份同内容幂等，冲突或任一失败
+整体回滚。SQLite 适配器用于离线/测试/迁移演练，不应与生产 PostgreSQL 双写。
+
+### Readiness 与验收
+
+生产缺失 provider、pgvector、审计仓储或教师复核 CAS 能力时必须 fail closed；不会返回
+“成功的空索引/空审计”。上线前至少执行：
+
+```powershell
+.venv\Scripts\python.exe -m pytest -q
+.venv\Scripts\python.exe -m compileall -q src tests
+```
+
+真实 PostgreSQL+pgvector 还需设置专用、可销毁的
+`COURSE_INSIGHT_TEST_DATABASE_URL` 和匹配的 `COURSE_INSIGHT_TEST_DATABASE_NAME`。
+若环境未提供它们，live 用例只能 skip，验收报告必须明确“未执行真实数据库联调”。

@@ -19,22 +19,26 @@ def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
 ) -> None:
     """Keep published M4 versions while appending M6 and its M0 freeze."""
 
-    expected_tail = (
+    expected_sqlite_tail = (
         "0010_m4_intent_decisions.sql",
         "0011_m4_intent_runtime_statuses.sql",
         "0012_m6_policy_learning.sql",
         "0013_m0_policy_freeze.sql",
     )
+    expected_postgres_tail = expected_sqlite_tail + (
+        "0014_m1_m2_m3_capabilities.sql",
+        "0015_vector_index_metadata.sql",
+    )
 
     assert SQLITE_SCHEMA_VERSION == 13
-    assert POSTGRES_SCHEMA_VERSION == 13
+    assert POSTGRES_SCHEMA_VERSION == 15
     assert tuple(
         migration.path.name for migration in load_migrations()
-    )[-4:] == expected_tail
+    )[-6:] == expected_postgres_tail
     assert tuple(
         path.name
         for path in sorted(MIGRATIONS_DIRECTORY.glob("*.sql"))
-    )[-4:] == expected_tail
+    )[-6:] == expected_postgres_tail
 
     database_path = tmp_path / "runtime" / "course_insight.sqlite3"
     with connect_sqlite(database_path) as connection:

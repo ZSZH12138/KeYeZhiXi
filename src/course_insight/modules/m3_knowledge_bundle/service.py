@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,16 +24,192 @@ from course_insight.modules.m3_knowledge_bundle.seed_snapshot import (
     validation_report_to_bytes,
 )
 from course_insight.modules.m3_knowledge_bundle.selection import select_blueprint_items
+from course_insight.modules.m3_knowledge_bundle.teacher_review import (
+    TeacherReviewRecord,
+    TeacherReviewWorkflow,
+)
 from course_insight.modules.m3_knowledge_bundle.validation import validate_seed_snapshot
+
+
+_VALIDATION_ERROR_FALLBACK = "KNOWLEDGE_SEED_INVALID"
+_PUBLIC_VALIDATION_PRIORITY = {
+    "Q_MATRIX_CONFLICT": 60,
+    "KNOWLEDGE_SEED_READ_FAILED": 50,
+    "KNOWLEDGE_SEED_INVALID": 40,
+    "KNOWLEDGE_COURSE_BINDING_INVALID": 30,
+    "KNOWLEDGE_REFERENCE_MISSING": 20,
+    "KNOWLEDGE_ENTITY_INVALID": 10,
+}
+_VALIDATION_ERROR_CODE_BY_ISSUE = {
+    "SEED_READ_FAILED": "KNOWLEDGE_SEED_READ_FAILED",
+    "SEED_TOO_LARGE": "KNOWLEDGE_SEED_INVALID",
+    "SEED_SCHEMA_INVALID": "KNOWLEDGE_SEED_INVALID",
+    "SEED_JSON_INVALID": "KNOWLEDGE_SEED_INVALID",
+    "SCHEMA_VALIDATOR_ERROR": "KNOWLEDGE_SEED_INVALID",
+    "SCHEMA_VALIDATOR_REJECTED": "KNOWLEDGE_SEED_INVALID",
+    "COURSE_PACKAGE_INVALID": "KNOWLEDGE_COURSE_BINDING_INVALID",
+    "COURSE_PACKAGE_NOT_READY": "KNOWLEDGE_COURSE_BINDING_INVALID",
+    "COURSE_PACKAGE_CHECKSUM_INVALID": "KNOWLEDGE_COURSE_BINDING_INVALID",
+    "COURSE_BINDING_MISMATCH": "KNOWLEDGE_COURSE_BINDING_INVALID",
+    "BLUEPRINT_COURSE_INVALID": "KNOWLEDGE_COURSE_BINDING_INVALID",
+    "CONCEPT_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "ITEM_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "RUBRIC_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "BLUEPRINT_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "PREREQUISITE_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "MISCONCEPTION_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "CONCEPT_STATUS_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "ITEM_STATUS_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "RUBRIC_STATUS_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "BLUEPRINT_STATUS_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "CONCEPT_NAME_COLLISION": "KNOWLEDGE_ENTITY_INVALID",
+    "CONCEPT_ALIAS_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "CONCEPT_IDENTIFIER_DUPLICATE": "KNOWLEDGE_ENTITY_INVALID",
+    "ITEM_VERSION_DUPLICATE": "KNOWLEDGE_ENTITY_INVALID",
+    "RUBRIC_IDENTIFIER_DUPLICATE": "KNOWLEDGE_ENTITY_INVALID",
+    "BLUEPRINT_IDENTIFIER_DUPLICATE": "KNOWLEDGE_ENTITY_INVALID",
+    "MISCONCEPTION_IDENTIFIER_DUPLICATE": "KNOWLEDGE_ENTITY_INVALID",
+    "ITEM_MULTIPLE_APPROVED_VERSIONS": "KNOWLEDGE_ENTITY_INVALID",
+    "SUBJECTIVE_RUBRIC_REQUIRED": "KNOWLEDGE_ENTITY_INVALID",
+    "RUBRIC_TOTAL_MISMATCH": "KNOWLEDGE_ENTITY_INVALID",
+    "PREREQUISITE_CYCLE": "KNOWLEDGE_ENTITY_INVALID",
+    "RUBRIC_CRITERIA_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "BLUEPRINT_UNSATISFIABLE": "KNOWLEDGE_ENTITY_INVALID",
+    "KNOWLEDGE_BUNDLE_INVALID": "KNOWLEDGE_ENTITY_INVALID",
+    "PREREQUISITE_REFERENCE_MISSING": "KNOWLEDGE_REFERENCE_MISSING",
+    "MISCONCEPTION_REFERENCE_MISSING": "KNOWLEDGE_REFERENCE_MISSING",
+    "ITEM_MISCONCEPTION_REFERENCE_MISSING": "KNOWLEDGE_REFERENCE_MISSING",
+    "ITEM_CONCEPT_REFERENCE_MISSING": "KNOWLEDGE_REFERENCE_MISSING",
+    "ITEM_RUBRIC_REFERENCE_MISSING": "KNOWLEDGE_REFERENCE_MISSING",
+    "CONCEPT_EVIDENCE_INVALID": "KNOWLEDGE_REFERENCE_MISSING",
+    "ITEM_EVIDENCE_INVALID": "KNOWLEDGE_REFERENCE_MISSING",
+    "RUBRIC_EVIDENCE_INVALID": "KNOWLEDGE_REFERENCE_MISSING",
+    "BLUEPRINT_CONCEPT_INVALID": "KNOWLEDGE_REFERENCE_MISSING",
+    "ANCHOR_ITEM_VERSION_INVALID": "KNOWLEDGE_REFERENCE_MISSING",
+    "Q_MATRIX_CONFLICT": "Q_MATRIX_CONFLICT",
+}
 
 
 class M3KnowledgeBundleService:
     """Publish and restore only complete, deterministic M3 artifacts."""
 
-    def __init__(self, repository: M3Repository, schema_validator: Any) -> None:
+    def __init__(
+        self,
+        repository: M3Repository,
+        schema_validator: Any,
+        *,
+        review_workflow: TeacherReviewWorkflow | None = None,
+        require_teacher_approval: bool = False,
+    ) -> None:
         self._repository = repository
         self._schema_validator = schema_validator
+        self._review_workflow = review_workflow
+        self._require_teacher_approval = require_teacher_approval
         self._last_course_package: CoursePackage | None = None
+
+    def create_teacher_review_draft(
+        self,
+        *,
+        review_id: str,
+        subject_id: str,
+        validation_report_ref: str,
+        now: datetime,
+        concept_seed_path: Path,
+        item_seed_path: Path,
+        rubric_seed_path: Path,
+        blueprint_seed_path: Path,
+        prerequisite_seed_path: Path | None = None,
+        misconception_seed_path: Path | None = None,
+    ) -> TeacherReviewRecord:
+        """Create a review bound to the exact captured seed snapshot checksum."""
+
+        snapshot = capture_seed_snapshot(
+            concept_seed_path=concept_seed_path,
+            item_seed_path=item_seed_path,
+            rubric_seed_path=rubric_seed_path,
+            blueprint_seed_path=blueprint_seed_path,
+            prerequisite_seed_path=prerequisite_seed_path,
+            misconception_seed_path=misconception_seed_path,
+        )
+        return self._require_review_workflow().create_draft(
+            review_id=review_id,
+            subject_id=subject_id,
+            input_checksum=snapshot.checksum,
+            validation_report_ref=validation_report_ref,
+            now=now,
+        )
+
+    def submit_teacher_review(
+        self,
+        review_id: str,
+        reviewer_pseudonym: str,
+        reason: str,
+        expected_version: int,
+        now: datetime,
+    ) -> TeacherReviewRecord:
+        """Submit one teacher review through the CAS workflow."""
+
+        return self._require_review_workflow().submit(
+            review_id,
+            reviewer_pseudonym,
+            reason,
+            expected_version,
+            now,
+        )
+
+    def approve_teacher_review(
+        self,
+        review_id: str,
+        reviewer_pseudonym: str,
+        reason: str,
+        expected_version: int,
+        now: datetime,
+    ) -> TeacherReviewRecord:
+        """Approve one submitted teacher review through the CAS workflow."""
+
+        return self._require_review_workflow().approve(
+            review_id,
+            reviewer_pseudonym,
+            reason,
+            expected_version,
+            now,
+        )
+
+    def reject_teacher_review(
+        self,
+        review_id: str,
+        reviewer_pseudonym: str,
+        reason: str,
+        expected_version: int,
+        now: datetime,
+    ) -> TeacherReviewRecord:
+        """Reject one submitted teacher review through the CAS workflow."""
+
+        return self._require_review_workflow().reject(
+            review_id,
+            reviewer_pseudonym,
+            reason,
+            expected_version,
+            now,
+        )
+
+    def recall_teacher_review(
+        self,
+        review_id: str,
+        reviewer_pseudonym: str,
+        reason: str,
+        expected_version: int,
+        now: datetime,
+    ) -> TeacherReviewRecord:
+        """Recall one published review through the CAS workflow."""
+
+        return self._require_review_workflow().recall(
+            review_id,
+            reviewer_pseudonym,
+            reason,
+            expected_version,
+            now,
+        )
 
     def build_knowledge_bundle(
         self,
@@ -45,7 +222,13 @@ class M3KnowledgeBundleService:
         misconception_seed_path: Path | None = None,
     ) -> KnowledgeBundle:
         """Capture six seed roles once, validate, then persist before returning."""
-
+        if self._require_teacher_approval:
+            raise DomainError(
+                code="M3_REVIEW_REQUIRED",
+                module="m3",
+                message="teacher approval is required before publication",
+                recoverable=True,
+            )
         snapshot = capture_seed_snapshot(
             concept_seed_path=concept_seed_path,
             item_seed_path=item_seed_path,
@@ -54,6 +237,78 @@ class M3KnowledgeBundleService:
             prerequisite_seed_path=prerequisite_seed_path,
             misconception_seed_path=misconception_seed_path,
         )
+        return self._build_from_snapshot(course_package, snapshot)
+
+    def build_knowledge_bundle_after_approval(
+        self,
+        *,
+        workflow: TeacherReviewWorkflow | None = None,
+        review_id: str,
+        review_version: int,
+        course_package: CoursePackage,
+        concept_seed_path: Path,
+        item_seed_path: Path,
+        rubric_seed_path: Path,
+        blueprint_seed_path: Path,
+        prerequisite_seed_path: Path | None = None,
+        misconception_seed_path: Path | None = None,
+    ) -> KnowledgeBundle:
+        """Publish only a teacher-approved, checksum-bound seed snapshot."""
+
+        workflow = workflow or self._review_workflow
+        if workflow is None:
+            raise DomainError(
+                code="M3_REVIEW_WORKFLOW_UNAVAILABLE",
+                module="m3",
+                message="teacher review workflow is unavailable",
+                recoverable=True,
+            )
+        snapshot = capture_seed_snapshot(
+            concept_seed_path=concept_seed_path,
+            item_seed_path=item_seed_path,
+            rubric_seed_path=rubric_seed_path,
+            blueprint_seed_path=blueprint_seed_path,
+            prerequisite_seed_path=prerequisite_seed_path,
+            misconception_seed_path=misconception_seed_path,
+        )
+        review = workflow.require_approved(review_id, review_version)
+        if review.input_checksum != snapshot.checksum:
+            raise DomainError(
+                code="M3_REVIEW_INPUT_MISMATCH",
+                module="m3",
+                message="approved review does not match current seed snapshot",
+                recoverable=True,
+            )
+        result = workflow.publish_approved(
+            review_id,
+            lambda: self._build_from_snapshot(course_package, snapshot),
+            expected_version=review.version,
+        )
+        if not isinstance(result, KnowledgeBundle):
+            raise DomainError(
+                code="KNOWLEDGE_ARTIFACT_INVALID",
+                module="m3",
+                message="approved publication did not return a knowledge bundle",
+            )
+        return result
+
+    def _require_review_workflow(self) -> TeacherReviewWorkflow:
+        if self._review_workflow is None:
+            raise DomainError(
+                code="M3_REVIEW_WORKFLOW_UNAVAILABLE",
+                module="m3",
+                message="teacher review workflow is unavailable",
+                recoverable=True,
+            )
+        return self._review_workflow
+
+    def _build_from_snapshot(
+        self,
+        course_package: CoursePackage,
+        snapshot: M3SeedSnapshot,
+    ) -> KnowledgeBundle:
+        """Build from one captured immutable snapshot shared by approval and publish."""
+
         outcome = validate_seed_snapshot(
             course_package=course_package,
             snapshot=snapshot,
@@ -62,11 +317,11 @@ class M3KnowledgeBundleService:
         if outcome.bundle is None:
             self._save_rejected(outcome.report, snapshot)
             raise DomainError(
-                code="Q_MATRIX_CONFLICT",
+                code=_validation_error_code(outcome.report),
                 module="m3",
                 message="knowledge validation rejected the bundle",
                 details={"report_id": outcome.report.report_id},
-            )
+            ) from None
         bundle_bytes = _bundle_bytes(outcome.bundle)
         expected_bundle = _bundle_from_bytes(bundle_bytes)
         bundle_to_save = _bundle_from_bytes(bundle_bytes)
@@ -166,20 +421,34 @@ class M3KnowledgeBundleService:
 
         try:
             payload = read_json(path)
-        except (OSError, UnicodeError, ValueError):
+        except OSError:
             raise DomainError(
-                code="Q_MATRIX_CONFLICT",
+                code="KNOWLEDGE_SEED_READ_FAILED",
                 module="m3",
                 message="knowledge seed file could not be read",
-                details={"input": "knowledge_seed"},
+                details={},
+            ) from None
+        except (UnicodeError, ValueError, RecursionError):
+            raise DomainError(
+                code="KNOWLEDGE_SEED_INVALID",
+                module="m3",
+                message="knowledge seed JSON is invalid",
+                details={},
+            ) from None
+        except Exception:
+            raise DomainError(
+                code="KNOWLEDGE_SEED_READ_FAILED",
+                module="m3",
+                message="knowledge seed file could not be read",
+                details={},
             ) from None
         if not isinstance(payload, Mapping):
             raise DomainError(
-                code="Q_MATRIX_CONFLICT",
+                code="KNOWLEDGE_SEED_INVALID",
                 module="m3",
                 message="knowledge seed root must be a JSON object",
-                details={"input": "knowledge_seed"},
-            )
+                details={},
+            ) from None
         return dict(payload)
 
     def _verify_saved_artifact(
@@ -273,3 +542,19 @@ def _bundle_from_bytes(payload: bytes) -> KnowledgeBundle:
     if dumps_json(value).encode("utf-8") != payload:
         raise ValueError
     return KnowledgeBundle.model_validate(value)
+
+
+def _validation_error_code(report: M3ValidationReport) -> str:
+    """Project report issues to one deterministic, path-free public code."""
+
+    selected_code = _VALIDATION_ERROR_FALLBACK
+    selected_priority = -1
+    for issue in report.issues:
+        public_code = _VALIDATION_ERROR_CODE_BY_ISSUE.get(issue.code)
+        if public_code is None:
+            continue
+        priority = _PUBLIC_VALIDATION_PRIORITY[public_code]
+        if priority > selected_priority:
+            selected_code = public_code
+            selected_priority = priority
+    return selected_code

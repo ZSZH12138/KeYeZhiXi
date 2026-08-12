@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 from datetime import datetime
+from datetime import timezone
 from decimal import Decimal
 from pathlib import Path
 from typing import Any
@@ -18,7 +20,15 @@ from course_insight.contracts.evidence import (
     chunk_id_for_evidence_id,
     evidence_id_for_chunk,
 )
-from course_insight.contracts.intelligence import RetrievalAudit
+from course_insight.contracts.intelligence import RetrievalAudit, RetrievalPolicy
+from course_insight.modules.m2_evidence_retrieval.audit import (
+    RetrievalAuditStore,
+    create_retrieval_audit,
+    persist_retrieval_audit,
+)
+from course_insight.modules.m2_evidence_retrieval.embedding import (
+    EmbeddingProvider,
+)
 from course_insight.modules.m2_evidence_retrieval.lexical import (
     LexicalIndexSnapshot,
     compile_snapshot,
@@ -26,6 +36,15 @@ from course_insight.modules.m2_evidence_retrieval.lexical import (
     snapshot_to_payloads,
 )
 from course_insight.modules.m2_evidence_retrieval.repository import M2Repository
+from course_insight.modules.m2_evidence_retrieval.ranking import (
+    rank_hybrid,
+    validate_strategy_dependencies,
+)
+from course_insight.modules.m2_evidence_retrieval.vector_store import (
+    VectorDocument,
+    VectorIndexMetadata,
+    VectorStore,
+)
 
 
 def _error(code: str, message: str, *, recoverable: bool = False) -> DomainError:
@@ -44,10 +63,19 @@ class M2EvidenceRetrievalService:
         index_dir: Path,
         tokenizer_or_embedding_adapter: Any,
         repository: M2Repository,
+        *,
+        embedding_provider: EmbeddingProvider | None = None,
+        vector_store: VectorStore | None = None,
+        audit_store: RetrievalAuditStore | None = None,
+        production: bool = False,
     ) -> None:
         self._index_dir = index_dir
         self._tokenizer_or_embedding_adapter = tokenizer_or_embedding_adapter
         self._repository = repository
+        self._embedding_provider = embedding_provider
+        self._vector_store = vector_store
+        self._audit_store = audit_store
+        self._production = production
         self._indexed_packages: dict[tuple[str, str], CoursePackage] = {}
         self._index_refs: dict[tuple[str, str], EvidenceIndexRef] = {}
         self._snapshots: dict[tuple[str, str], LexicalIndexSnapshot] = {}
@@ -236,7 +264,39 @@ class M2EvidenceRetrievalService:
     def initialize_vector_store(
         self, course_package_id: str, requested_at: datetime
     ) -> EvidenceIndexRef:
-        """Return the unchanged path-free empty pgvector declaration."""
+        """Validate the configured vector path and return a usable declaration."""
+
+        if self._embedding_provider is None or self._vector_store is None:
+            if self._production:
+                raise _error(
+                    "VECTOR_STORE_UNAVAILABLE",
+                    "vector store is unavailable",
+                    recoverable=True,
+                )
+            return self._empty_vector_ref(course_package_id, requested_at)
+        model = self._embedding_provider.model_ref
+        index_id = f"{course_package_id}_vector_index"
+        return EvidenceIndexRef(
+            index_id=index_id,
+            course_package_id=course_package_id,
+            course_package_checksum=None,
+            index_version=model.model_version,
+            storage_ref=f"pgvector:{index_id}",
+            backend="pgvector",
+            embedding_model_id=(
+                f"{model.provider}:{model.model_name}:{model.model_version}:"
+                f"{model.dimension}"
+            ),
+            source_count=0,
+            chunk_count=0,
+            built_at=requested_at,
+            checksum=hashlib.sha256(index_id.encode("utf-8")).hexdigest(),
+            status="building",
+        )
+
+    @staticmethod
+    def _empty_vector_ref(course_package_id: str, requested_at: datetime) -> EvidenceIndexRef:
+        """Keep the historical explicit empty result for offline discovery only."""
 
         index_id = f"pgvector_empty_{course_package_id}"
         checksum = hashlib.sha256(
@@ -256,10 +316,481 @@ class M2EvidenceRetrievalService:
             status="empty",
         )
 
+    def build_vector_index(
+        self,
+        course_package: CoursePackage,
+        *,
+        index_version: str | None = None,
+    ) -> EvidenceIndexRef:
+        """Embed every governed chunk, stage it, then publish one ready index."""
+
+        if self._embedding_provider is None or self._vector_store is None:
+            raise _error("VECTOR_STORE_UNAVAILABLE", "vector store is unavailable", recoverable=True)
+        package = self._validated_package(course_package)
+        provider = self._embedding_provider
+        model = provider.model_ref
+        version = index_version or model.model_version
+        index_id = f"{package.course_package_id}_vector_index"
+        texts = [chunk.text for chunk in package.content_chunks]
+        try:
+            # Keep a lexical snapshot beside the vector ref so hybrid retrieval
+            # remains available after a vector index is built or restored.
+            lexical_snapshot = compile_snapshot(package)
+        except Exception:
+            raise _error(
+                "INDEX_NOT_READY",
+                "course package is not ready for retrieval indexing",
+                recoverable=True,
+            ) from None
+        try:
+            vectors = provider.embed_documents(texts)
+            if len(vectors) != len(texts):
+                raise ValueError
+            self._vector_store.begin(index_id, version, dimension=model.dimension)
+            rows = []
+            for chunk, vector in zip(package.content_chunks, vectors):
+                rows.append(
+                    VectorDocument(
+                        evidence_id=evidence_id_for_chunk(chunk.chunk_id),
+                        chunk_id=chunk.chunk_id,
+                        vector=tuple(vector),
+                        text_checksum=chunk.sha256,
+                    )
+                )
+            for row in rows:
+                self._vector_store.add(index_id, version, row)
+            checksum = hashlib.sha256(
+                json.dumps(
+                    [
+                        {
+                            "evidence_id": row.evidence_id,
+                            "chunk_id": row.chunk_id,
+                            "text_checksum": row.text_checksum,
+                            "vector": list(row.vector),
+                        }
+                        for row in rows
+                    ],
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            built_at = datetime.now(timezone.utc)
+            self._vector_store.publish(
+                index_id,
+                version,
+                expected_count=len(rows),
+                checksum=checksum,
+                metadata=VectorIndexMetadata(
+                    index_checksum=checksum,
+                    course_package_id=package.course_package_id,
+                    course_package_checksum=package.checksum,
+                    embedding_model_id=(
+                        f"{model.provider}:{model.model_name}:{model.model_version}:"
+                        f"{model.dimension}"
+                    ),
+                    dimension=model.dimension,
+                    source_count=len(package.source_documents),
+                    chunk_count=len(package.content_chunks),
+                    built_at=built_at,
+                ),
+            )
+        except DomainError:
+            raise
+        except Exception:
+            raise _error(
+                "VECTOR_INDEX_BUILD_FAILED",
+                "vector index could not be built",
+                recoverable=True,
+            ) from None
+        ref = EvidenceIndexRef(
+            index_id=index_id,
+            course_package_id=package.course_package_id,
+            course_package_checksum=package.checksum,
+            index_version=version,
+            storage_ref=f"pgvector:{index_id}",
+            backend="pgvector",
+            embedding_model_id=(
+                f"{model.provider}:{model.model_name}:{model.model_version}:"
+                f"{model.dimension}"
+            ),
+            source_count=len(package.source_documents),
+            chunk_count=len(package.content_chunks),
+            built_at=built_at,
+            checksum=checksum,
+            status="ready",
+        )
+        return self._publish_loaded(
+            package=package,
+            ref=ref,
+            snapshot=lexical_snapshot,
+        )
+
+    def restore_vector_index(
+        self,
+        *,
+        course_package: CoursePackage,
+        evidence_index_ref: EvidenceIndexRef,
+    ) -> EvidenceIndexRef:
+        """Restore a ready pgvector declaration without rebuilding embeddings."""
+
+        if self._embedding_provider is None or self._vector_store is None:
+            raise _error("VECTOR_STORE_UNAVAILABLE", "vector store is unavailable", recoverable=True)
+        package = self._validated_package(course_package)
+        ref = self._validated_ref(evidence_index_ref)
+        model = self._embedding_provider.model_ref
+        expected_model_id = (
+            f"{model.provider}:{model.model_name}:{model.model_version}:{model.dimension}"
+        )
+        if (
+            ref.backend != "pgvector"
+            or not ref.matches(package)
+            or ref.embedding_model_id != expected_model_id
+            or ref.storage_ref != f"pgvector:{ref.index_id}"
+            or not self._vector_store.ready(ref.index_id, ref.index_version)
+        ):
+            raise _error("INDEX_NOT_READY", "vector index is not available", recoverable=True)
+        metadata_reader = getattr(self._vector_store, "get_metadata", None)
+        if not callable(metadata_reader):
+            raise _error(
+                "INDEX_NOT_READY",
+                "vector index metadata is unavailable",
+                recoverable=True,
+            )
+        try:
+            metadata = metadata_reader(ref.index_id, ref.index_version)
+        except DomainError:
+            raise _error(
+                "INDEX_NOT_READY",
+                "vector index metadata is unavailable",
+                recoverable=True,
+            ) from None
+        if (
+            not isinstance(metadata, VectorIndexMetadata)
+            or metadata.index_checksum != ref.checksum
+            or metadata.course_package_id != package.course_package_id
+            or metadata.course_package_checksum != package.checksum
+            or metadata.embedding_model_id != expected_model_id
+            or metadata.dimension != model.dimension
+            or metadata.source_count != len(package.source_documents)
+            or metadata.chunk_count != len(package.content_chunks)
+            or metadata.built_at != ref.built_at
+        ):
+            raise _error(
+                "INDEX_NOT_READY",
+                "vector index metadata does not match the governed package",
+                recoverable=True,
+            )
+        try:
+            snapshot = compile_snapshot(package)
+        except Exception:
+            raise _error("INDEX_NOT_READY", "course package is not ready for retrieval indexing", recoverable=True) from None
+        return self._publish_loaded(package=package, ref=ref, snapshot=snapshot)
+
+    def restore_vector_index_from_store(
+        self,
+        *,
+        course_package: CoursePackage,
+        index_id: str,
+        index_version: str,
+    ) -> EvidenceIndexRef:
+        """Discover a ready vector reference from durable store metadata."""
+
+        if self._embedding_provider is None or self._vector_store is None:
+            raise _error(
+                "VECTOR_STORE_UNAVAILABLE",
+                "vector store is unavailable",
+                recoverable=True,
+            )
+        package = self._validated_package(course_package)
+        metadata_reader = getattr(self._vector_store, "get_metadata", None)
+        if not callable(metadata_reader):
+            raise _error(
+                "INDEX_NOT_READY",
+                "vector index metadata is unavailable",
+                recoverable=True,
+            )
+        try:
+            metadata = metadata_reader(index_id, index_version)
+        except DomainError:
+            raise _error(
+                "INDEX_NOT_READY",
+                "vector index metadata is unavailable",
+                recoverable=True,
+            ) from None
+        model = self._embedding_provider.model_ref
+        expected_model_id = (
+            f"{model.provider}:{model.model_name}:{model.model_version}:{model.dimension}"
+        )
+        if (
+            not isinstance(metadata, VectorIndexMetadata)
+            or metadata.course_package_id != package.course_package_id
+            or metadata.course_package_checksum != package.checksum
+            or metadata.embedding_model_id != expected_model_id
+            or metadata.dimension != model.dimension
+            or metadata.source_count != len(package.source_documents)
+            or metadata.chunk_count != len(package.content_chunks)
+        ):
+            raise _error(
+                "INDEX_NOT_READY",
+                "vector index metadata does not match the governed package",
+                recoverable=True,
+            )
+        ref = EvidenceIndexRef(
+            index_id=index_id,
+            course_package_id=package.course_package_id,
+            course_package_checksum=package.checksum,
+            index_version=index_version,
+            storage_ref=f"pgvector:{index_id}",
+            backend="pgvector",
+            embedding_model_id=metadata.embedding_model_id,
+            source_count=metadata.source_count,
+            chunk_count=metadata.chunk_count,
+            built_at=metadata.built_at,
+            checksum=metadata.index_checksum,
+            status="ready",
+        )
+        return self.restore_vector_index(
+            course_package=package,
+            evidence_index_ref=ref,
+        )
+
+    @staticmethod
+    def _audit_bundle(
+        *,
+        audit_store: RetrievalAuditStore | None,
+        query: EvidenceQuery,
+        index: EvidenceIndexRef,
+        policy: RetrievalPolicy,
+        bundle: EvidenceBundle,
+        request_id: str | None,
+        created_at: datetime,
+    ) -> None:
+        if audit_store is None:
+            return
+        envelope = create_retrieval_audit(
+            query=query,
+            index=index,
+            policy=policy,
+            status="succeeded" if bundle.evidence_chunks else "empty",
+            evidence_ids=[chunk.evidence_id for chunk in bundle.evidence_chunks],
+            scores=[chunk.relevance for chunk in bundle.evidence_chunks],
+            latency_ms=0,
+            request_id=request_id or query.query_id,
+            created_at=created_at,
+        )
+        persist_retrieval_audit(audit_store, envelope)
+
+    @staticmethod
+    def _audit_failure(
+        *,
+        audit_store: RetrievalAuditStore | None,
+        query: EvidenceQuery,
+        index: EvidenceIndexRef | None,
+        policy: RetrievalPolicy,
+        request_id: str | None,
+        created_at: datetime,
+    ) -> None:
+        """Record a failed formal retrieval when a ready index identity exists."""
+
+        if audit_store is None or index is None or index.status != "ready":
+            return
+        envelope = create_retrieval_audit(
+            query=query,
+            index=index,
+            policy=policy,
+            status="failed",
+            evidence_ids=[],
+            scores=[],
+            latency_ms=0,
+            request_id=request_id or query.query_id,
+            created_at=created_at,
+        )
+        persist_retrieval_audit(audit_store, envelope)
+
+    def retrieve_with_policy(
+        self,
+        evidence_query: EvidenceQuery,
+        evidence_index_ref: EvidenceIndexRef,
+        policy: RetrievalPolicy,
+        *,
+        request_id: str | None = None,
+        retrieved_at: datetime | None = None,
+    ) -> EvidenceBundle:
+        """Execute lexical/vector/hybrid retrieval through configured ports."""
+
+        policy.validate_business_rules()
+        try:
+            evidence_query = EvidenceQuery.model_validate(
+                evidence_query.model_dump(mode="python", warnings="error")
+            )
+            evidence_index_ref = self._validated_ref(evidence_index_ref)
+        except DomainError:
+            raise
+        except Exception:
+            raise _error("EVIDENCE_QUERY_INVALID", "evidence query or index is invalid") from None
+        key = self._key(evidence_index_ref)
+        package = self._indexed_packages.get(key)
+        ref = self._index_refs.get(key)
+        snapshot = self._snapshots.get(key)
+        lexical_available = package is not None and snapshot is not None
+        vector_available = (
+            self._embedding_provider is not None
+            and self._vector_store is not None
+            and ref is not None
+            and ref.backend == "pgvector"
+            and self._vector_store.ready(ref.index_id, ref.index_version)
+        )
+        try:
+            validate_strategy_dependencies(
+                policy.strategy,
+                lexical_available=lexical_available,
+                vector_available=vector_available,
+            )
+        except DomainError:
+            self._audit_failure(
+                audit_store=self._audit_store,
+                query=evidence_query,
+                index=ref,
+                policy=policy,
+                request_id=request_id,
+                created_at=retrieved_at or datetime.now(timezone.utc),
+            )
+            raise
+        if policy.strategy == "lexical":
+            bundle = self.retrieve(evidence_query, evidence_index_ref)
+            self._audit_bundle(
+                audit_store=self._audit_store,
+                query=evidence_query,
+                index=ref or evidence_index_ref,
+                policy=policy,
+                bundle=bundle,
+                request_id=request_id,
+                created_at=retrieved_at or bundle.retrieved_at,
+            )
+            return bundle
+        if package is None or ref is None or self._embedding_provider is None or self._vector_store is None:
+            raise _error("INDEX_NOT_READY", "evidence index is not loaded", recoverable=True)
+        if (
+            evidence_query.course_package_id != package.course_package_id
+            or (
+                evidence_query.course_package_checksum is not None
+                and evidence_query.course_package_checksum != package.checksum
+            )
+        ):
+            raise _error("INDEX_NOT_READY", "evidence index is not loaded", recoverable=True)
+        try:
+            query_vector = self._embedding_provider.embed_query(evidence_query.query_text)
+        except Exception:
+            self._audit_failure(
+                audit_store=self._audit_store,
+                query=evidence_query,
+                index=ref,
+                policy=policy,
+                request_id=request_id,
+                created_at=retrieved_at or datetime.now(timezone.utc),
+            )
+            raise _error(
+                "EMBEDDING_PROVIDER_UNAVAILABLE",
+                "embedding provider is unavailable",
+                recoverable=True,
+            ) from None
+        try:
+            vector_matches = self._vector_store.search(
+                ref.index_id,
+                ref.index_version,
+                query_vector,
+                top_k=max(policy.top_k, len(package.content_chunks)),
+            )
+        except DomainError:
+            self._audit_failure(
+                audit_store=self._audit_store,
+                query=evidence_query,
+                index=ref,
+                policy=policy,
+                request_id=request_id,
+                created_at=retrieved_at or datetime.now(timezone.utc),
+            )
+            raise
+        vector_scores = {match.evidence_id: match.score for match in vector_matches}
+        lexical_scores = {}
+        if snapshot is not None:
+            lexical_scores = {
+                row.evidence_id: row.relevance
+                for row in rank_snapshot(
+                    snapshot,
+                    query_text=evidence_query.query_text,
+                    concept_ids=evidence_query.concept_ids,
+                )
+            }
+        if policy.strategy == "vector":
+            ranked = tuple(
+                sorted(
+                    vector_scores.items(),
+                    key=lambda item: (-item[1], item[0]),
+                )[: policy.top_k]
+            )
+            score_map = vector_scores
+        else:
+            ranked_candidates = rank_hybrid(
+                lexical_scores,
+                vector_scores,
+                lexical_weight=policy.lexical_weight,
+                vector_weight=policy.vector_weight,
+                top_k=policy.top_k,
+            )
+            ranked = tuple(
+                (candidate.evidence_id, candidate.final_score)
+                for candidate in ranked_candidates
+            )
+            score_map = {candidate.evidence_id: candidate.final_score for candidate in ranked_candidates}
+        chunks = {evidence_id_for_chunk(chunk.chunk_id): chunk for chunk in package.content_chunks}
+        selected = [chunks[evidence_id] for evidence_id, _ in ranked if evidence_id in chunks]
+        now = retrieved_at or datetime.now(timezone.utc)
+        bundle = EvidenceBundle(
+            query_id=evidence_query.query_id,
+            index_id=ref.index_id,
+            course_id=package.course_id,
+            course_package_id=package.course_package_id,
+            course_package_checksum=package.checksum,
+            index_checksum=ref.checksum,
+            evidence_chunks=[
+                EvidenceChunk(
+                    evidence_id=evidence_id_for_chunk(chunk.chunk_id),
+                    source_id=chunk.source_id,
+                    chunk_id=chunk.chunk_id,
+                    text=chunk.text,
+                    locator=chunk.locator,
+                    concept_ids=list(chunk.concept_hints),
+                    relevance=max(0.0, min(1.0, float(score_map[evidence_id_for_chunk(chunk.chunk_id)]))),
+                    checksum=chunk.sha256,
+                )
+                for chunk in selected
+            ],
+            retrieved_at=now,
+        )
+        self._audit_bundle(
+            audit_store=self._audit_store,
+            query=evidence_query,
+            index=ref,
+            policy=policy,
+            bundle=bundle,
+            request_id=request_id,
+            created_at=now,
+        )
+        return bundle
+
     def empty_retrieval_audit(
         self, index_ref: EvidenceIndexRef, requested_at: datetime
     ) -> RetrievalAudit:
         """Record the unchanged unconfigured RAG empty result."""
+
+        if self._production:
+            raise _error(
+                "RETRIEVAL_AUDIT_UNAVAILABLE",
+                "retrieval audit is unavailable",
+                recoverable=True,
+            )
 
         return RetrievalAudit(
             audit_id=f"retrieval_empty_{index_ref.index_id}",

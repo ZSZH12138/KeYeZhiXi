@@ -12,7 +12,6 @@ import pytest
 from pydantic import SecretStr
 
 from course_insight import cli
-from course_insight.application import runtime_context
 from course_insight.application import factory as application_factory
 from course_insight.application.factory import (
     ApplicationContainer,
@@ -27,6 +26,7 @@ from course_insight.application.runtime_context import (
 from course_insight.contracts.course import (
     ContentChunk,
     CoursePackage,
+    SourceAuthorization,
     SourceDocument,
 )
 from course_insight.contracts.assessment import RemediationPlan, ScoringResultBundle
@@ -52,7 +52,14 @@ from course_insight.infrastructure.config.models import M6PolicySettings
 from course_insight.infrastructure.m1_file_repository import FileM1Repository
 from course_insight.infrastructure.m2_file_repository import FileM2Repository
 from course_insight.infrastructure.m3_file_repository import FileM3Repository
+from course_insight.infrastructure.sqlite.m1_m2_m3_repository import (
+    SQLiteM1M2M3Repository,
+)
 from course_insight.modules.m1_course_governance.parsers import parse_source
+from course_insight.modules.m1_course_governance.snapshots import (
+    CourseImportSnapshot,
+    SourcePayload,
+)
 from course_insight.modules.m1_course_governance.stubs import (
     M1CourseGovernanceServiceStub,
 )
@@ -67,6 +74,9 @@ from course_insight.modules.m6_tutoring_fsm.decision_policy import (
 )
 from course_insight.infrastructure.postgresql.m0_repository import (
     PostgresM0Repository,
+)
+from course_insight.infrastructure.postgresql.m1_m2_m3_repository import (
+    PostgresM1M2M3Repository,
 )
 from course_insight.infrastructure.postgresql.m4_repository import (
     PostgresM4Repository,
@@ -109,6 +119,9 @@ from course_insight.modules.m2_evidence_retrieval.service import (
 from course_insight.modules.m3_knowledge_bundle.stubs import (
     M3KnowledgeBundleServiceStub,
     _MemoryM3Repository,
+)
+from course_insight.modules.m3_knowledge_bundle.seed_snapshot import (
+    create_validation_report,
 )
 from course_insight.modules.m4_task_orchestration import sklearn_adapter
 from course_insight.modules.m4_task_orchestration.intent import IntentStatus
@@ -182,10 +195,40 @@ def _course_package() -> CoursePackage:
             )
         ],
         content_chunks=[chunk],
-        source_authorizations=[],
+        source_authorizations=[
+            SourceAuthorization(
+                source_id="source_1",
+                authorized_by="Teacher",
+                license_note="course use",
+                authorized_at=NOW,
+            )
+        ],
         imported_at=NOW,
         status="ready",
         checksum="pending",
+    )
+    return candidate.model_copy(
+        update={"checksum": candidate.recalculate_checksum()},
+        deep=True,
+    )
+
+
+def _runtime_course_package() -> CoursePackage:
+    package = _course_package()
+    chunk = package.content_chunks[0]
+    chunk_id = "chunk_" + hashlib.sha256(
+        f"{chunk.source_id}\0{chunk.locator}\0{chunk.sha256}".encode(
+            "utf-8"
+        )
+    ).hexdigest()
+    candidate = package.model_copy(
+        update={
+            "content_chunks": [
+                chunk.model_copy(update={"chunk_id": chunk_id}, deep=True)
+            ],
+            "checksum": "pending",
+        },
+        deep=True,
     )
     return candidate.model_copy(
         update={"checksum": candidate.recalculate_checksum()},
@@ -216,14 +259,56 @@ def _snapshot_refs(
     *,
     index_update: dict[str, object] | None = None,
 ) -> RuntimeSnapshotRefs:
-    package = _course_package()
-    expected_index = M2EvidenceRetrievalServiceStub().build_index(package)
+    package = _runtime_course_package()
+    source_bytes = b"course"
+    metadata_bytes = json.dumps(
+        {
+            "course_package_id": package.course_package_id,
+            "course_id": package.course_id,
+            "package_version": package.package_version,
+            "course_name": package.source_documents[0].title,
+            "imported_at": package.imported_at.isoformat(),
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    authorization_bytes = (
+        "file_name,source_id,expected_sha256,authorized_by,authorized_at,license_note\n"
+        f"course.md,source_1,{hashlib.sha256(source_bytes).hexdigest()},"
+        f"Teacher,{NOW.isoformat()},course use\n"
+    ).encode("utf-8")
+    container.m1_service._repository.save_course_import(  # noqa: SLF001
+        package,
+        CourseImportSnapshot(
+            course_metadata_bytes=metadata_bytes,
+            source_authorization_bytes=authorization_bytes,
+            source_payloads=(
+                SourcePayload(
+                    source_id="source_1",
+                    file_name="course.md",
+                    raw_bytes=source_bytes,
+                ),
+            ),
+        ),
+    )
+    expected_index = container.m2_service.build_index(package)
+    bundle_paths = _m3_seed_paths(
+        container.settings.runtime_dir / "teacher-seeds", package
+    )
+    bundle = container.m3_service.build_knowledge_bundle(
+        package,
+        bundle_paths["concept"],
+        bundle_paths["item"],
+        bundle_paths["rubric"],
+        bundle_paths["blueprint"],
+        bundle_paths["prerequisite"],
+        bundle_paths["misconception"],
+    )
+    snapshot_index = expected_index
     if index_update:
-        expected_index = expected_index.model_copy(
+        snapshot_index = snapshot_index.model_copy(
             update=index_update,
             deep=True,
         )
-    bundle = _knowledge_bundle()
     snapshot_dir = container.settings.runtime_dir / "snapshots"
     refs = RuntimeSnapshotRefs(
         course_package_ref=Path("snapshots/course-package.json"),
@@ -235,7 +320,7 @@ def _snapshot_refs(
         snapshot_dir / "course-package.json",
     )
     container.m0_service.save_contract_snapshot(
-        expected_index,
+        snapshot_index,
         snapshot_dir / "evidence-index.json",
     )
     container.m0_service.save_contract_snapshot(
@@ -273,6 +358,26 @@ def test_real_django_does_not_break_legacy_empty_architecture_scaffold(
 
 class _RepositorySentinel:
     pass
+
+
+class _RuntimeM1Repository:
+    def __init__(self, package: CoursePackage) -> None:
+        self.package: CoursePackage | None = package
+
+    def get_course_package(
+        self,
+        course_package_id: str,
+        package_version: str,
+    ) -> CoursePackage | None:
+        package = self.package
+        if package is None:
+            return None
+        if (
+            package.course_package_id != course_package_id
+            or package.package_version != package_version
+        ):
+            return None
+        return package.model_copy(deep=True)
 
 
 class _RecordingM2Repository:
@@ -373,6 +478,7 @@ def _m3_seed_paths(
     valid: bool = True,
 ) -> dict[str, Path]:
     tmp_path.mkdir(parents=True, exist_ok=True)
+    evidence_id = f"evidence_{package.content_chunks[0].chunk_id}"
     roles: dict[str, dict[str, object]] = {
         "concept": {
             "knowledge_bundle_id": "bundle_factory",
@@ -391,7 +497,7 @@ def _m3_seed_paths(
                     "status": "published",
                 }
             ],
-            "concept_evidence_ids": {"concept_1": ["evidence_chunk_1"]},
+            "concept_evidence_ids": {"concept_1": [evidence_id]},
         },
         "item": {
             "items": [
@@ -407,7 +513,7 @@ def _m3_seed_paths(
                     "parameter_rules": [],
                     "answer_key": {"answer": True, "max_score": 1.0},
                     "rubric_id": None,
-                    "source_evidence_ids": ["evidence_chunk_1"],
+                    "source_evidence_ids": [evidence_id],
                     "status": "teacher_approved",
                 }
             ],
@@ -461,37 +567,47 @@ def _m3_seed_paths(
     return paths
 
 
-def test_factory_default_m1_uses_runtime_file_repository(tmp_path: Path) -> None:
+def test_factory_default_m1_uses_sqlite_s1_s6_repository(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
 
     container = build_application(settings)
 
     repository = container.m1_service._repository  # noqa: SLF001
-    assert isinstance(repository, FileM1Repository)
-    assert repository._store._runtime_dir == settings.runtime_dir  # noqa: SLF001
+    assert isinstance(repository, SQLiteM1M2M3Repository)
+    assert repository.is_ready()
+    assert repository.database_path == settings.database.sqlite_path
 
 
-def test_factory_default_m2_uses_runtime_file_repository(tmp_path: Path) -> None:
+def test_factory_default_m2_uses_shared_sqlite_s1_s6_repository(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
 
     container = build_application(settings)
 
     repository = container.m2_service._repository  # noqa: SLF001
-    assert isinstance(repository, FileM2Repository)
-    assert repository._store._runtime_dir == settings.runtime_dir  # noqa: SLF001
+    assert isinstance(repository, SQLiteM1M2M3Repository)
+    assert repository is container.m1_service._repository  # noqa: SLF001
 
 
-def test_factory_default_m3_uses_runtime_file_repository(tmp_path: Path) -> None:
+def test_factory_default_m3_uses_shared_sqlite_s1_s6_repository(tmp_path: Path) -> None:
     settings = _settings(tmp_path)
 
     container = build_application(settings)
 
     repository = container.m3_service._repository  # noqa: SLF001
-    assert isinstance(repository, FileM3Repository)
-    assert (  # noqa: SLF001
-        repository._store._runtime_dir.as_posix().removeprefix("//?/")
-        == settings.runtime_dir.resolve().as_posix()
-    )
+    assert isinstance(repository, SQLiteM1M2M3Repository)
+    assert repository is container.m1_service._repository  # noqa: SLF001
+
+
+def test_sqlite_factory_exposes_one_authoritative_s1_s6_backend(
+    tmp_path: Path,
+) -> None:
+    container = build_application(_settings(tmp_path))
+
+    repository = container.m1_service._repository  # noqa: SLF001
+    assert isinstance(repository, SQLiteM1M2M3Repository)
+    assert repository is container.m2_service._repository  # noqa: SLF001
+    assert repository is container.m3_service._repository  # noqa: SLF001
+    assert container.persistence_backend is repository
 
 
 def test_factory_m3_repository_override_preserves_identity_without_default(
@@ -1110,21 +1226,6 @@ class _FalseyRepositorySentinel:
         return False
 
 
-class _FailingM2Repository:
-    @staticmethod
-    def save_index(index: EvidenceIndexRef) -> None:
-        del index
-        raise OSError("repository unavailable")
-
-    @staticmethod
-    def get_index(
-        index_id: str,
-        index_version: str,
-    ) -> EvidenceIndexRef | None:
-        del index_id, index_version
-        return None
-
-
 class _PolicyConfigurationRepository(_RepositorySentinel):
     def __init__(
         self,
@@ -1648,6 +1749,206 @@ def test_container_and_coordinator_share_exact_service_instances(
     assert container.runtime_registry.m2_service is container.m2_service
 
 
+def test_runtime_registry_receives_m1_m2_m3_repository_overrides(
+    tmp_path: Path,
+) -> None:
+    m1_repository = _RuntimeM1Repository(_course_package())
+    m2_repository = _RecordingM2Repository()
+    m3_repository = _RecordingM3Repository()
+
+    container = build_application(
+        _settings(tmp_path),
+        repositories=RepositoryOverrides(
+            m1=m1_repository,  # type: ignore[arg-type]
+            m2=m2_repository,  # type: ignore[arg-type]
+            m3=m3_repository,  # type: ignore[arg-type]
+        ),
+    )
+
+    assert container.runtime_registry.m1_repository is m1_repository
+    assert container.runtime_registry.m2_repository is m2_repository
+    assert container.runtime_registry.m3_repository is m3_repository
+
+
+def _publish_runtime_artifact_fixture(
+    tmp_path: Path,
+) -> tuple[
+    ApplicationContainer,
+    RuntimeSnapshotRefs,
+    _RuntimeM1Repository,
+    _RecordingM2Repository,
+    _RecordingM3Repository,
+    CoursePackage,
+    EvidenceIndexRef,
+    KnowledgeBundle,
+]:
+    package = _course_package()
+    m1_repository = _RuntimeM1Repository(package)
+    m2_repository = _RecordingM2Repository()
+    m3_repository = _RecordingM3Repository()
+    container = build_application(
+        _settings(tmp_path),
+        repositories=RepositoryOverrides(
+            m1=m1_repository,  # type: ignore[arg-type]
+            m2=m2_repository,  # type: ignore[arg-type]
+            m3=m3_repository,  # type: ignore[arg-type]
+        ),
+    )
+    container.m0_service.initialize()
+    index = container.m2_service.build_index(package)
+    seed_paths = _m3_seed_paths(tmp_path / "teacher-seeds", package)
+    bundle = container.m3_service.build_knowledge_bundle(
+        package,
+        seed_paths["concept"],
+        seed_paths["item"],
+        seed_paths["rubric"],
+        seed_paths["blueprint"],
+        seed_paths["prerequisite"],
+        seed_paths["misconception"],
+    )
+    snapshot_dir = container.settings.runtime_dir / "snapshots"
+    refs = RuntimeSnapshotRefs(
+        course_package_ref=Path("snapshots/course-package.json"),
+        evidence_index_ref=Path("snapshots/evidence-index.json"),
+        knowledge_bundle_ref=Path("snapshots/knowledge-bundle.json"),
+    )
+    container.m0_service.save_contract_snapshot(
+        package, snapshot_dir / "course-package.json"
+    )
+    container.m0_service.save_contract_snapshot(
+        index, snapshot_dir / "evidence-index.json"
+    )
+    container.m0_service.save_contract_snapshot(
+        bundle, snapshot_dir / "knowledge-bundle.json"
+    )
+    return (
+        container,
+        refs,
+        m1_repository,
+        m2_repository,
+        m3_repository,
+        package,
+        index,
+        bundle,
+    )
+
+
+def test_runtime_registry_restores_complete_artifacts_without_rebuilding_index(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    (
+        container,
+        refs,
+        _,
+        _,
+        _,
+        package,
+        index,
+        bundle,
+    ) = _publish_runtime_artifact_fixture(tmp_path)
+
+    def fail_build(*args: object, **kwargs: object) -> EvidenceIndexRef:
+        del args, kwargs
+        raise AssertionError("runtime restore must not rebuild M2")
+
+    monkeypatch.setattr(container.m2_service, "build_index", fail_build)
+
+    context = container.runtime_registry.restore("course_1", refs)
+
+    assert context.course_package.model_dump(mode="json") == package.model_dump(
+        mode="json"
+    )
+    assert context.evidence_index_ref.model_dump(mode="json") == index.model_dump(
+        mode="json"
+    )
+    assert context.knowledge_bundle.model_dump(mode="json") == bundle.model_dump(
+        mode="json"
+    )
+
+
+def test_runtime_registry_rejects_m3_artifact_checksum_mismatch(
+    tmp_path: Path,
+) -> None:
+    (
+        container,
+        refs,
+        _,
+        _,
+        m3_repository,
+        package,
+        _,
+        bundle,
+    ) = _publish_runtime_artifact_fixture(tmp_path)
+    loaded = m3_repository.load_bundle_artifact(
+        bundle.knowledge_bundle_id,
+        bundle.bundle_version,
+    )
+    assert loaded is not None
+    _, _, seed_snapshot = loaded
+    forged_checksum = "f" * 64
+    forged_bundle = bundle.model_copy(
+        update={"course_package_checksum": forged_checksum},
+        deep=True,
+    )
+    forged_report = create_validation_report(
+        course_package_id=package.course_package_id,
+        course_package_checksum=forged_checksum,
+        seed_snapshot=seed_snapshot,
+        issues=(),
+        knowledge_bundle_id=forged_bundle.knowledge_bundle_id,
+        bundle_version=forged_bundle.bundle_version,
+        bundle_checksum=forged_bundle.content_checksum(),
+    )
+    m3_repository._approved.clear()  # noqa: SLF001
+    m3_repository.bundles.clear()
+    m3_repository.save_bundle_artifact(
+        forged_bundle,
+        forged_report,
+        seed_snapshot,
+    )
+    container.m0_service.save_contract_snapshot(
+        forged_bundle,
+        container.settings.runtime_dir / "snapshots/knowledge-bundle.json",
+    )
+
+    with pytest.raises(DomainError) as captured:
+        container.runtime_registry.restore("course_1", refs)
+
+    assert captured.value.code == "RUNTIME_SNAPSHOT_INVALID"
+    assert captured.value.details == {"reason": "identity_mismatch"}
+
+
+@pytest.mark.parametrize("artifact", ["m1", "m2", "m3"])
+def test_runtime_registry_fails_closed_when_complete_artifact_is_missing(
+    tmp_path: Path,
+    artifact: str,
+) -> None:
+    (
+        container,
+        refs,
+        m1_repository,
+        m2_repository,
+        m3_repository,
+        _,
+        _,
+        _,
+    ) = _publish_runtime_artifact_fixture(tmp_path)
+    if artifact == "m1":
+        m1_repository.package = None
+    elif artifact == "m2":
+        m2_repository.artifacts.clear()
+    else:
+        m3_repository._approved.clear()  # noqa: SLF001
+        m3_repository.bundles.clear()
+
+    with pytest.raises(DomainError) as captured:
+        container.runtime_registry.restore("course_1", refs)
+
+    assert captured.value.code == "RUNTIME_SNAPSHOT_INVALID"
+    assert captured.value.details == {"reason": "artifact_unavailable"}
+
+
 def test_postgresql_factory_builds_all_real_repositories_on_one_pool(
     tmp_path: Path,
 ) -> None:
@@ -1683,6 +1984,11 @@ def test_postgresql_factory_builds_all_real_repositories_on_one_pool(
             repository = container.m9_service._repository  # noqa: SLF001
         assert isinstance(repository, expected_type)
         assert repository._pool is pool  # noqa: SLF001
+    assert isinstance(
+        container.m1_service._repository, PostgresM1M2M3Repository  # noqa: SLF001
+    )
+    assert container.m1_service._repository is container.m2_service._repository  # noqa: SLF001
+    assert container.m2_service._repository is container.m3_service._repository  # noqa: SLF001
     assert container.database_pool is pool
     assert isinstance(container.outbox_worker, OutboxWorker)
     assert (
@@ -1863,7 +2169,7 @@ def test_service_override_does_not_construct_discarded_default(
         assert getattr(container.coordinator, f"_m{number}") is replacement
 
 
-def test_runtime_registry_restores_snapshots_and_rebuilds_fresh_m2_index(
+def test_runtime_registry_restores_complete_artifacts_and_retrieves_evidence(
     tmp_path: Path,
 ) -> None:
     container = build_application(_settings(tmp_path))
@@ -1888,36 +2194,25 @@ def test_runtime_registry_restores_snapshots_and_rebuilds_fresh_m2_index(
     assert context.course_package.course_id == "course_1"
     assert context.knowledge_bundle.course_id == "course_1"
     assert evidence.course_id == "course_1"
-    assert [item.chunk_id for item in evidence.evidence_chunks] == ["chunk_1"]
+    assert [item.chunk_id for item in evidence.evidence_chunks] == [
+        context.course_package.content_chunks[0].chunk_id
+    ]
     assert container.runtime_registry.require("course_1") == context
 
 
-def test_legacy_v1_runtime_restore_uses_discarding_preview_and_idempotent_real_build(
+def test_runtime_registry_restores_loaded_m2_artifact_idempotently(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     container = build_application(_settings(tmp_path))
     container.m0_service.initialize()
     refs = _snapshot_refs(container)
-    preview_repositories: list[object] = []
 
-    class _PreviewRecordingService(M2EvidenceRetrievalService):
-        def __init__(
-            self,
-            index_dir: Path,
-            tokenizer_or_embedding_adapter: object,
-            repository: object,
-        ) -> None:
-            preview_repositories.append(repository)
-            super().__init__(
-                index_dir,
-                tokenizer_or_embedding_adapter,
-                repository,  # type: ignore[arg-type]
-            )
+    def fail_build(*args: object, **kwargs: object) -> EvidenceIndexRef:
+        del args, kwargs
+        raise AssertionError("runtime restore must not rebuild M2")
 
-    monkeypatch.setattr(
-        runtime_context, "M2EvidenceRetrievalService", _PreviewRecordingService
-    )
+    monkeypatch.setattr(container.m2_service, "build_index", fail_build)
 
     first = container.runtime_registry.restore("course_1", refs)
     second = container.runtime_registry.restore("course_1", refs)
@@ -1926,11 +2221,6 @@ def test_legacy_v1_runtime_restore_uses_discarding_preview_and_idempotent_real_b
         first.evidence_index_ref.index_version,
     )
 
-    assert len(preview_repositories) == 2
-    assert all(
-        isinstance(repository, runtime_context._DiscardingM2Repository)  # noqa: SLF001
-        for repository in preview_repositories
-    )
     assert artifact is not None
     assert artifact[0] == first.evidence_index_ref == second.evidence_index_ref
 
@@ -1938,9 +2228,8 @@ def test_legacy_v1_runtime_restore_uses_discarding_preview_and_idempotent_real_b
 @pytest.mark.parametrize(
     ("index_update", "reason"),
     [
-        ({"checksum": "wrong-checksum"}, "index_mismatch"),
-        ({"course_package_id": "package_other"}, "identity_mismatch"),
-        ({"status": "failed"}, "index_not_ready"),
+        ({"checksum": "wrong-checksum"}, "artifact_binding_mismatch"),
+        ({"course_package_id": "package_other"}, "artifact_binding_mismatch"),
     ],
 )
 def test_runtime_registry_rejects_index_identity_checksum_and_status_mismatch(
@@ -1958,6 +2247,18 @@ def test_runtime_registry_rejects_index_identity_checksum_and_status_mismatch(
     assert captured.value.code == "RUNTIME_SNAPSHOT_INVALID"
     assert captured.value.details == {"reason": reason}
     assert str(tmp_path) not in str(captured.value)
+
+
+def test_runtime_snapshot_status_is_not_authoritative(
+    tmp_path: Path,
+) -> None:
+    container = build_application(_settings(tmp_path))
+    container.m0_service.initialize()
+    refs = _snapshot_refs(container, index_update={"status": "failed"})
+
+    context = container.runtime_registry.restore("course_1", refs)
+
+    assert context.evidence_index_ref.status == "ready"
 
 
 def test_failed_runtime_preflight_does_not_pollute_live_m2_index(
@@ -1991,15 +2292,20 @@ def test_failed_runtime_preflight_does_not_pollute_live_m2_index(
     assert captured.value.code == "INDEX_NOT_READY"
 
 
-def test_failed_m2_repository_save_does_not_pollute_live_index(
+def test_failed_m2_repository_load_does_not_pollute_live_index(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    container = build_application(
-        _settings(tmp_path),
-        repositories=RepositoryOverrides(m2=_FailingM2Repository()),
-    )
+    container = build_application(_settings(tmp_path))
     container.m0_service.initialize()
     refs = _snapshot_refs(container)
+    repository = container.m2_service._repository  # noqa: SLF001
+
+    def fail_load(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise OSError("repository unavailable")
+
+    monkeypatch.setattr(repository, "load_index_artifact", fail_load)
     correct_index = M2EvidenceRetrievalServiceStub().build_index(
         _course_package()
     )
@@ -2020,7 +2326,7 @@ def test_failed_m2_repository_save_does_not_pollute_live_index(
         container.m2_service.retrieve(query, correct_index)
 
     assert restore_error.value.code == "RUNTIME_SNAPSHOT_INVALID"
-    assert restore_error.value.details == {"reason": "index_rebuild_failed"}
+    assert restore_error.value.details == {"reason": "artifact_invalid"}
     assert retrieval_error.value.code == "INDEX_NOT_READY"
 
 

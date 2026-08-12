@@ -22,7 +22,8 @@
 
 - 授权课程导入、SHA-256 校验、确定性文本切片；
 - 轻量词法证据索引、可定位课程证据；
-- M2 RAG/pgvector 目标契约与空索引/检索审计；
+- M2 RAG：SQLite 离线/测试 lexical 基线，以及生产 PostgreSQL+pgvector 的 embedding、
+  lexical/vector/hybrid 检索与脱敏审计；
 - 知识点/先修/误区/题卡/量规/蓝图/Q 矩阵引用校验；
 - 幂等任务规划、固定蓝图组卷、客观规则评分和主观评分编排；
 - 版本化评分审计、教师复核 v2、个体/班级状态和 S0—S5 辅导；
@@ -34,8 +35,12 @@
 - M7/M9 统一的 DeepSeek API 契约与空适配器；
 - M0 配置优先级、真实 Django 学生/教师 Web、两层权限、roles 完整状态同步、
   runtime snapshot 与独立 leased outbox Worker；
-- SQLite/PostgreSQL 可切换的 M0、M4—M9 持久化与显式
-  SQLite→PostgreSQL 导入器；
+- SQLite 适配器用于 M1—M3 离线、测试和迁移演练，生产环境必须使用
+  PostgreSQL+pgvector；生产 M1—M3 通过 `0014_m1_m2_m3_capabilities.sql`、
+  `0015_vector_index_metadata.sql` 和共享的 `PostgresM1M2M3Repository` 持久化完整
+  制品、向量索引、检索审计与教师复核记录；
+- SQLite→PostgreSQL 导入器，以及离线/测试模式下 `runtime/artifacts/` 的完整、不可变、
+  带 checksum 制品仍然保留；SQLite 不是生产权威后端；
 - M4 私有意图 adapter 的规则、shadow、active 三阶段运行方式；公开 `TaskPlan`
   契约与八字段业务身份保持不变，运维边界见
   [M4 意图运维说明](docs/m4_intent_operations.md)；
@@ -329,27 +334,31 @@ python -m course_insight.cli export-schemas
 `M2EvidenceRetrievalService(index_dir: Path, tokenizer_or_embedding_adapter: Any,
 repository: M2Repository)`。
 
-- `build_index(course_package: CoursePackage) -> EvidenceIndexRef`：输入来自 M1；
-  索引引用供后续 `retrieve`；错误 `INDEX_NOT_READY`。
-- `initialize_vector_store(course_package_id: str, requested_at: datetime)
-  -> EvidenceIndexRef`：声明 `backend=pgvector` 的逻辑索引；当前不连接
-  PostgreSQL/pgvector，返回 `empty`。
-- `empty_retrieval_audit(index_ref: EvidenceIndexRef, requested_at: datetime)
-  -> RetrievalAudit`：为未执行的 RAG 检索产生无证据 ID 的空审计。
-- `retrieve(evidence_query: EvidenceQuery, evidence_index_ref: EvidenceIndexRef)
-  -> EvidenceBundle`：查询来自 M6/M8，索引来自本服务；证据给 M7；错误
-  `INDEX_NOT_READY` 及契约引用不匹配错误。
+- `build_index(course_package: CoursePackage) -> EvidenceIndexRef`：构建 lexical 兼容基线；
+  向量生产路径使用 `build_vector_index(...)`，重启后用
+  `restore_vector_index(...)` 校验并恢复 ready 引用。
+- `initialize_vector_store(...)` 与 `empty_retrieval_audit(...)`：仅保留兼容/未执行场景；
+  SQLite/离线模式可返回逻辑 `empty`，生产 PostgreSQL+pgvector 缺少依赖时必须 fail
+  closed，不能伪造成功的空索引或空审计。
+- `retrieve_with_policy(evidence_query, evidence_index_ref, policy, ...) -> EvidenceBundle`：
+  M6/M8 业务检索的正式入口，支持 lexical、vector、hybrid，并写入脱敏
+  `RetrievalAudit`。
+- `retrieve(evidence_query, evidence_index_ref) -> EvidenceBundle`：仅为已有 lexical
+  调用保留的兼容入口；新业务不得用它替代 `retrieve_with_policy`。
 
 ### M3KnowledgeBundleService
 
 源码：[service.py](src/course_insight/modules/m3_knowledge_bundle/service.py)。构造：
 `M3KnowledgeBundleService(repository: M3Repository, schema_validator: Any)`。
 
-- `build_knowledge_bundle(course_package: CoursePackage, concept_seed_path: Path,
-  item_seed_path: Path, rubric_seed_path: Path, blueprint_seed_path: Path,
-  prerequisite_seed_path: Path|None=None, misconception_seed_path: Path|None=None)
-  -> KnowledgeBundle`：课程包来自 M1、种子来自教师确认 JSON；输出给
-  M4/M5/M8/M9；错误 `Q_MATRIX_CONFLICT`。
+- `build_knowledge_bundle(...) -> KnowledgeBundle`：离线/测试或生产审批前的校验入口；
+  生产组合根启用审批门时调用它会返回 `M3_REVIEW_REQUIRED`，不能作为生产发布入口。
+- `build_knowledge_bundle_after_approval(...) -> KnowledgeBundle`：生产正式发布入口；
+  只有教师复核 CAS 状态为 `approved` 且版本/checksum 匹配时，才重新捕获种子、校验
+  并持久化知识包，输出给 M4/M5/M8/M9。
+- M3 同时提供 `create_teacher_review_draft`、`submit_teacher_review`、
+  `approve_teacher_review`、`reject_teacher_review` 和 `recall_teacher_review` CAS
+  wrappers；现有 M0 教师 Web 的评分复核接口不等同于这条 M3 S4 工作流。
 
 ### M4TaskOrchestrationService
 
@@ -489,6 +498,9 @@ suggestion_rule_engine: Any)`。
   `AssessmentPaper` 与 M0 的无 payload 流程索引。
 - `submit_assessment(...)`：按稳定标识恢复试卷，执行既有评分、状态、辅导、
   反馈与教师分析链；客观题全量流程允许主观任务列表为空。
+- `retrieve_for_application(...)`：应用层 M2 检索适配器；正式委托链为
+  `retrieve_for_application -> retrieve_with_policy`，统一策略校验和脱敏审计；旧
+  `retrieve` 仅保留兼容。
 - `get_student_assessment(...)`：在 M0 校验 actor/course/class/learner 归属后，
   从 M8/M7 的公开入口取得权威评分与反馈。
 - `get_teacher_review_context(...)`：校验教师课程/班级作用域，并从 M8/M5/M9
@@ -498,7 +510,9 @@ suggestion_rule_engine: Any)`。
 - `initialize_course(*, raw_course_files, course_metadata_path,
   source_authorization_path, output_dir, concept_seed_path, item_seed_path,
   rubric_seed_path, blueprint_seed_path, prerequisite_seed_path,
-  misconception_seed_path) -> dict[str,ContractModel]`，返回课程包、索引与知识包。
+  misconception_seed_path, teacher_review_id=None, teacher_review_version=None)
+  -> dict[str,ContractModel]`，返回课程包、索引与知识包；生产必须同时提供已批准的
+  `teacher_review_id/version`，否则 M3 审批门会拒绝发布。
 - `run_assessment_cycle(*, index_ref, knowledge_bundle, student_text,
   task_type_hint, course_id, class_id, learner_id, session_id,
   raw_answer_path: Path|AssessmentSubmission,
@@ -510,8 +524,9 @@ suggestion_rule_engine: Any)`。
 - `run_intelligence_architecture(*, actor_context: ActorContext,
   course_package_id: str, learner_id: str, requested_at: datetime)
   -> ArchitectureScaffoldResult`，保留为 legacy 智能能力脚手架；M0 的作业字段
-  为兼容契约保持 `skipped`，M2 pgvector/RAG、M5 DINA/BKT、M7/M9 DeepSeek、
-  M8 IRT/自适应在线标定仍保持空结果或证据不足。真实 Django 不由该入口启动。
+  为兼容契约保持 `skipped`；该 legacy 脚手架不执行 M2 正式
+  `retrieve_with_policy`。M5 DINA/BKT、M7/M9 DeepSeek、M8 IRT/自适应在线标定仍保持
+  空结果或证据不足。真实 Django 不由该入口启动。
 - `export_run_manifest(*, objects: list[ContractModel], output_path: Path) -> Path`，
   仅导出 ID、checksum、时间，不导出学生答案。
 
@@ -592,10 +607,15 @@ actor+IP、actor 与 IP 三个 HMAC 桶，成功登录保留共享 IP 历史。
 
 ## PostgreSQL 目标、SQLite 基线、JSON 与 runtime 边界
 
-目标部署使用 PostgreSQL；M2 未来的向量扩展仍归 M2/pgvector。仓库已经包含
-Psycopg 3 连接池、checksum-locked core migrations、M0/M4—M9 PostgreSQL
-Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整可运行基线；
-两个后端必须保持模块前缀、幂等身份、追加式版本与现有 Pydantic 契约一致。
+SQLite 适配器用于离线、测试和迁移演练；生产环境必须使用 PostgreSQL+pgvector。
+离线/测试模式下，`FileM1Repository`、`FileM2Repository`、`FileM3Repository` 将完整的
+不可变、内容寻址运行时制品写入 `runtime/artifacts/`。生产模式下，M1—M3 使用共享的
+`PostgresM1M2M3Repository`，并由 0014/0015 migrations 持久化完整制品、pgvector 索引/文档、
+检索审计和教师复核 CAS 记录。
+
+仓库已经包含 Psycopg 3 连接池、checksum-locked core migrations、M0/M1—M3/M4—M9
+PostgreSQL Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整可运行
+基线；两个后端必须保持模块前缀、幂等身份、追加式版本与现有 Pydantic 契约一致。
 
 本文档不声称真实 PostgreSQL 联调已在当前机器跑通。live tests 必须同时提供
 `COURSE_INSIGHT_TEST_DATABASE_URL` 和与 DSN 库名完全一致的
@@ -608,9 +628,13 @@ Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整�
 | `m0_learning_events` | M0 | event_id、idempotency_key |
 | `m0_event_outbox` | M0 | event_id、lease/version；事件同事务提交，Worker 在事务外投递 |
 | `m0_assessment_runs` | M0 | operation_id、checkpoint、CAS version；只存流程关联元数据 |
-| `m1_course_packages` | M1 | course_package_id + package_version |
-| `m2_evidence_indexes` | M2 | index_id + index_version |
-| `m3_knowledge_bundles` | M3 | knowledge_bundle_id + bundle_version |
+| `m1_course_packages` | SQLite 离线/测试 schema | course_package_id + package_version |
+| `m2_evidence_indexes` | SQLite 离线/测试 schema | index_id + index_version |
+| `m3_knowledge_bundles` | SQLite 离线/测试 schema | knowledge_bundle_id + bundle_version |
+| `m1_m2_m3_artifacts` | PostgreSQL 生产 S1-S6 | module + object_id + object_version + checksum |
+| `m2_vector_indexes` / `m2_vector_documents` | PostgreSQL 生产 pgvector | index_id + index_version + dimension |
+| `m2_retrieval_audits` | PostgreSQL 生产 M2 | audit_id + query_id + index/version |
+| `m3_teacher_reviews` | PostgreSQL 生产 M3 S4 | review_id + subject_id + CAS version |
 | `m4_task_plans` | M4 | task_id、idempotency_key |
 | `m4_intent_decisions` | M4 私有审计 | request_key、输入 checksum、决策/影子元数据；无原始学生文本 |
 | `m5_learner_states` | M5 | course_id + class_id + learner_id + state_version |
@@ -630,10 +654,35 @@ Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整�
 | `m9_teacher_reviews` | M9 | decision_id、audit_id + expected version |
 | `m9_teacher_analytics` | M9 | course_id + class_id + report_id |
 
+上述三个 SQLite 表只服务离线/测试与迁移演练；生产 source of truth 是 PostgreSQL
+S1-S6 表和共享仓储。两种模式都必须遵守相同的契约、checksum、版本和幂等约束，
+但不应与生产 PostgreSQL 双写。
+
+### 离线/测试模式的 M1—M3 runtime artifact 备份、恢复与回滚
+
+SQLite/离线模式下，M1—M3 的备份、恢复、checksum 校验、清理和回滚都必须以完整制品
+为单位覆盖 `runtime/artifacts/` 下的全部版本，并保留 artifact manifest 及其 payload
+checksum；生产 PostgreSQL 模式应使用数据库备份或 `export_manifest/import_manifest`
+覆盖 0014/0015 中的权威制品、向量索引/文档、审计和 review：
+
+- M1 必须保留完整课程导入制品，包括课程包、解析结果、metadata、授权输入和来源
+  payload；只备份 `CoursePackage` JSON 不足以恢复一次导入。
+- M2 必须保留索引引用和完整 lexical snapshot（`documents` 与 `postings`），不能
+  只备份 `EvidenceIndexRef` 或统计信息。
+- M3 已发布制品必须同时保留 bundle、seed snapshot 和 validation report；被拒绝的
+  validation artifact 也必须连同 seed snapshot/report 一起保留。
+
+当前 `schema_version=1` 课程 runtime manifest 使用 `runtime/snapshots/` 中的契约
+快照；必须把这些快照与上述完整 artifacts 一起纳入同一备份点，并在恢复后逐项验证
+身份、版本和 checksum。快照是必需的 manifest 指针与交叉校验输入，但不是业务对象
+的权威内容；删除快照后由 active artifact manifest 独立选择版本属于后续里程碑。
+清理和回滚不得删除或覆盖单个 payload；必须操作完整的 immutable artifact 目录，且
+在确认备份可读、应用停止写入后再执行。
+
 M7 的持久表保存现有学生反馈契约，不保存 DeepSeek 密钥、完整提示词或本地模型
 权重。每个仓储只访问本模块前缀。教师确认的 JSON 是只读输入；`runtime/`
-保存数据库、JSON 快照、索引、日志和运行清单。运行产物不得回写 `data/` 或
-`contracts/`。
+保存数据库、JSON 快照、索引、M1—M3 immutable artifacts、日志和运行清单。运行产物
+不得回写 `data/` 或 `contracts/`。
 
 ## 智能算法空边界
 
@@ -643,12 +692,14 @@ M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、Deep
 
 1. M0 为保持 legacy `ArchitectureScaffoldResult.is_empty()` 语义返回 Django
    作业 `skipped`；真实 Web 由独立部署入口启动并通过 health 检查。
-2. M2 返回 `backend=pgvector`、`status=empty` 的逻辑索引和空 RAG 审计。
+2. `run_intelligence_architecture()` 是 legacy 脚手架，不代表 M2 正式检索路径；
+   M2 生产检索使用 PostgreSQL+pgvector 和 `retrieve_with_policy`，缺少依赖时
+   fail closed。SQLite/离线兼容入口才可能返回逻辑 `empty`。
 3. M7 返回 DeepSeek 评分空结果，M9 返回 DeepSeek 教师叙述空结果。
 4. M5 返回 DINA 认知诊断和 BKT 知识追踪空运行。
 5. M8 返回 IRT 空标定与空自适应选题。
 6. M9 为空标定返回 `insufficient_data` 质量报告。
-7. 编排器将上述值组合为 `ArchitectureScaffoldResult(status="empty")`。
+7. 编排器将上述 legacy/算法空结果组合为 `ArchitectureScaffoldResult(status="empty")`。
 
 该入口不伪造真实模型运行。M0 已实现的 Web/Worker/PostgreSQL 能力不应被写成
 算法空实现。
@@ -679,8 +730,8 @@ M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、Deep
 |---|---|---|
 | M0 | 配置、日志、SQLite/PostgreSQL、真实 Django/权限/表单、流程恢复、leased Worker | 在目标环境完成生产容量、备份与真实 PostgreSQL 验收 |
 | M1 | 仅固定本地文本解析与段落切分 | 在 parser registry 后增加可替换解析器 |
-| M2 | 词法匹配基线；pgvector 逻辑索引/审计为 `empty` | 实现 embedding 适配器、pgvector 迁移/重建与检索评估 |
-| M3 | 只接受教师确认 JSON，不自动抽取知识 | schema validator 后的教师审核工作流 |
+| M2 | SQLite/离线 lexical 基线；生产 PostgreSQL+pgvector 支持 embedding、vector/hybrid、审计 | 完成真实 PostgreSQL+pgvector live 联调与生产运行验收 |
+| M3 | 教师种子校验与 CAS 复核门；`initialize_course` 可携带审批 ID/version，生产发布必须走 `build_knowledge_bundle_after_approval` | 将 M3 S4 审批接入现有 M0 教师 UI 操作流 |
 | M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 84 个公开契约、`TaskPlan` 和八字段业务身份 |
 | M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
 | M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline |
@@ -701,11 +752,31 @@ M6 私有 OPE/approval 尚未正式接入 M9；当前 M9 公共质量入口只�
 - 禁止核心内部 HTTP、路由装饰器、网络客户端和绕过 `AppCoordinator` 的编排。
 - 禁止真实姓名、学号、邮箱、电话、身份映射、密钥和真实 `.env`。
 - 禁止 DeepSeek 以外的 LLM、本地模型权重、硬编码 `DEEPSEEK_API_KEY`，以及未经教师审核的高风险自动评分。
-- 智能空实现禁止访问模型网络、连接 pgvector、读取 DeepSeek 密钥或伪造
-  DINA/BKT/IRT/模型质量指标；M0 仅按显式配置连接 SQLite/PostgreSQL。
+- 尚未启用的算法空实现（M5/M7/M8/M9）禁止访问模型网络、读取 DeepSeek 密钥或
+  伪造 DINA/BKT/IRT/模型质量指标；M2 生产路径可按显式配置连接 PostgreSQL+pgvector，
+  缺少依赖时必须 fail closed。
 - 禁止把数据库、日志、索引、快照、模型文件或真实课程资料写入受管数据目录。
 - 所有路径、JSON/CSV、时间、引用、分数和版本都必须在系统边界校验；错误只
   返回稳定代码和相对/安全信息。
 
 复用现有 Pydantic 契约，补齐鉴权、限流、错误映射和审计，且不能让
 M1—M9 依赖 HTTP/ORM/SDK 类型。
+
+## S1-S6 生产能力（当前权威说明）
+
+S1-S6 已完成可替换端口与可恢复链路：M1 使用版本化 ParserRegistry；M2 提供
+OpenAI-compatible embedding、pgvector 两阶段建索引、lexical/vector/hybrid 排序；
+每次正式策略检索都可写入脱敏审计；M3 的生产发布必须经过教师复核的
+`draft -> submitted -> approved` CAS 流程。生产环境不使用 deterministic provider，
+缺失 embedding/vector/audit/review 依赖时 fail closed，不返回伪造的 `empty` 成功。
+
+SQLite 适配器用于离线、测试和迁移演练，PostgreSQL + pgvector 是生产权威适配器。
+PostgreSQL 的 S1-S6 核心 migration 为 `0014_m1_m2_m3_capabilities.sql`，向量索引
+元数据绑定由 `0015_vector_index_metadata.sql` 补充；当前 PostgreSQL core schema 为
+v15。M1/M2/M3 共用一个仓储与事务边界；完整制品使用
+`export_manifest/import_manifest` 做校验后迁移。
+
+关键配置为 `COURSE_INSIGHT_EMBEDDING__*` 和 `OPENAI_API_KEY`。生产 embedding endpoint
+必须使用 HTTPS，模型版本与维度写入索引身份；更换模型应创建新 index version，验证后再
+切换 ready 指针。live PostgreSQL/pgvector 测试仍需使用单独、可销毁且带 `test`、`ci`
+或 `tmp` 标记的数据库；没有测试 DSN 时只能报告 skip，不能声称已完成真实联调。

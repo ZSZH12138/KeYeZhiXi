@@ -17,6 +17,7 @@ from course_insight.contracts.course import (
 )
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef, EvidenceQuery
+from course_insight.contracts.intelligence import RetrievalPolicy
 from course_insight.modules.m2_evidence_retrieval.lexical import (
     LexicalIndexSnapshot,
     compile_snapshot,
@@ -24,6 +25,16 @@ from course_insight.modules.m2_evidence_retrieval.lexical import (
     snapshot_to_payloads,
 )
 from course_insight.modules.m2_evidence_retrieval.service import M2EvidenceRetrievalService
+from course_insight.modules.m2_evidence_retrieval.audit import (
+    InMemoryRetrievalAuditStore,
+)
+from course_insight.modules.m2_evidence_retrieval.embedding import (
+    DeterministicEmbeddingProvider,
+    EmbeddingModelIdentity,
+)
+from course_insight.modules.m2_evidence_retrieval.vector_store import (
+    InMemoryVectorStore,
+)
 from course_insight.modules.m2_evidence_retrieval.stubs import (
     M2EvidenceRetrievalServiceStub,
     _MemoryM2Repository,
@@ -272,6 +283,89 @@ def test_stub_keeps_empty_pgvector_surface_unchanged() -> None:
     assert ref.backend == "pgvector"
     assert ref.status == "empty"
     assert service.empty_retrieval_audit(ref, NOW).status == "empty"
+
+
+def test_production_vector_surface_fails_closed_instead_of_returning_empty() -> None:
+    service = M2EvidenceRetrievalService(
+        Path("runtime/production-index"),
+        "lexical",
+        _MemoryArtifactRepository(),
+        production=True,
+    )
+
+    with pytest.raises(DomainError) as index_error:
+        service.build_vector_index(_package())
+    assert index_error.value.code == "VECTOR_STORE_UNAVAILABLE"
+
+    ref = EvidenceIndexRef(
+        index_id="index-production",
+        course_package_id="package_1",
+        course_package_checksum=None,
+        index_version="v1",
+        storage_ref="pgvector:index-production",
+        backend="pgvector",
+        embedding_model_id=None,
+        source_count=0,
+        chunk_count=0,
+        built_at=NOW,
+        checksum="a" * 64,
+        status="ready",
+    )
+    with pytest.raises(DomainError) as audit_error:
+        service.empty_retrieval_audit(ref, NOW)
+    assert audit_error.value.code == "RETRIEVAL_AUDIT_UNAVAILABLE"
+
+
+def test_vector_provider_failure_is_mapped_and_audited() -> None:
+    package = _package()
+    provider = DeterministicEmbeddingProvider.for_tests(
+        model_ref=EmbeddingModelIdentity(
+            provider="test",
+            model_name="failure-test",
+            model_version="v1",
+            dimension=4,
+        )
+    )
+    audits = InMemoryRetrievalAuditStore()
+    service = M2EvidenceRetrievalService(
+        Path("runtime/vector-failure"),
+        "lexical",
+        _MemoryArtifactRepository(),
+        embedding_provider=provider,
+        vector_store=InMemoryVectorStore(),
+        audit_store=audits,
+        production=True,
+    )
+    index = service.build_vector_index(package)
+
+    class _FailingProvider:
+        model_ref = provider.model_ref
+
+        def embed_query(self, text: str) -> tuple[float, ...]:
+            del text
+            raise RuntimeError("provider secret must not escape")
+
+        def embed_documents(self, texts: object) -> tuple[tuple[float, ...], ...]:
+            del texts
+            raise RuntimeError("provider secret must not escape")
+
+    service._embedding_provider = _FailingProvider()  # noqa: SLF001
+    with pytest.raises(DomainError) as captured:
+        service.retrieve_with_policy(
+            _query(package),
+            index,
+            RetrievalPolicy(
+                policy_id="provider-failure",
+                strategy="vector",
+                top_k=1,
+                lexical_weight=0.0,
+                vector_weight=1.0,
+                rerank=False,
+            ),
+        )
+    assert captured.value.code == "EMBEDDING_PROVIDER_UNAVAILABLE"
+    assert len(audits._audits) == 1  # noqa: SLF001
+    assert "provider secret" not in str(captured.value)
 
 
 def test_memory_repository_package_only_save_fails_closed_and_is_not_readable() -> None:

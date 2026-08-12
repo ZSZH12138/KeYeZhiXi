@@ -23,6 +23,9 @@ from course_insight.infrastructure.m3_file_repository import FileM3Repository
 from course_insight.infrastructure.postgresql.m0_repository import (
     PostgresM0Repository,
 )
+from course_insight.infrastructure.postgresql.m1_m2_m3_repository import (
+    PostgresM1M2M3Repository,
+)
 from course_insight.infrastructure.postgresql.m4_repository import (
     PostgresM4Repository,
 )
@@ -68,9 +71,23 @@ from course_insight.modules.m2_evidence_retrieval.lexical import (
 from course_insight.modules.m2_evidence_retrieval.service import (
     M2EvidenceRetrievalService,
 )
+from course_insight.modules.m2_evidence_retrieval.audit import (
+    RepositoryRetrievalAuditStore,
+)
+from course_insight.modules.m2_evidence_retrieval.embedding import (
+    EmbeddingModelIdentity,
+    OpenAICompatibleEmbeddingProvider,
+)
+from course_insight.infrastructure.postgresql.m1_m2_m3_repository import (
+    PostgresPgVectorStore,
+)
 from course_insight.modules.m3_knowledge_bundle.repository import M3Repository
 from course_insight.modules.m3_knowledge_bundle.service import (
     M3KnowledgeBundleService,
+)
+from course_insight.modules.m3_knowledge_bundle.teacher_review import (
+    RepositoryTeacherReviewRepository,
+    TeacherReviewWorkflow,
 )
 from course_insight.modules.m4_task_orchestration import sklearn_adapter
 from course_insight.modules.m4_task_orchestration.identity import (
@@ -199,6 +216,7 @@ class ApplicationContainer:
     coordinator: AppCoordinator
     runtime_registry: CourseRuntimeRegistry
     outbox_worker: OutboxWorkerLike | None
+    persistence_backend: object
     database_pool: PostgresPool | None = None
     _owns_database_pool: bool = field(
         default=False,
@@ -360,6 +378,28 @@ def _assemble_application(
 
     durable = durable_graph.repositories
 
+    m1_repository = _runtime_repository(
+        repository_override=repository_overrides.m1,
+        service_override=service_overrides.m1,
+        default_factory=lambda: durable["m1"]
+        if "m1" in durable
+        else FileM1Repository(settings.runtime_dir),
+    )
+    m2_repository = _runtime_repository(
+        repository_override=repository_overrides.m2,
+        service_override=service_overrides.m2,
+        default_factory=lambda: durable["m2"]
+        if "m2" in durable
+        else FileM2Repository(settings.runtime_dir),
+    )
+    m3_repository = _runtime_repository(
+        repository_override=repository_overrides.m3,
+        service_override=service_overrides.m3,
+        default_factory=lambda: durable["m3"]
+        if "m3" in durable
+        else FileM3Repository(settings.runtime_dir),
+    )
+
     m0 = (
         M0PlatformService(
             settings.database.sqlite_path,
@@ -380,36 +420,44 @@ def _assemble_application(
                 ".pptx": parse_source,
             },
             _sha256,
-            (
-                repository_overrides.m1
-                if repository_overrides.m1 is not None
-                else FileM1Repository(settings.runtime_dir)
-            ),
+            cast(M1Repository, m1_repository),
         )
         if service_overrides.m1 is None
         else service_overrides.m1
+    )
+    embedding_provider = _build_embedding_provider(settings)
+    vector_store = (
+        PostgresPgVectorStore(durable_graph.database_pool)
+        if settings.database.backend == "postgresql"
+        and durable_graph.database_pool is not None
+        else None
+    )
+    audit_store = (
+        RepositoryRetrievalAuditStore(m2_repository)
+        if callable(getattr(m2_repository, "save_retrieval_audit", None))
+        and callable(getattr(m2_repository, "load_retrieval_audit", None))
+        else None
     )
     m2 = (
         M2EvidenceRetrievalService(
             settings.runtime_dir / "indexes",
             _DeterministicDependency("lexical"),
-            (
-                repository_overrides.m2
-                if repository_overrides.m2 is not None
-                else FileM2Repository(settings.runtime_dir)
-            ),
+            cast(M2Repository, m2_repository),
+            embedding_provider=embedding_provider,
+            vector_store=vector_store,
+            audit_store=audit_store,
+            production=settings.environment == "production",
         )
         if service_overrides.m2 is None
         else service_overrides.m2
     )
+    teacher_review_workflow = _build_teacher_review_workflow(m3_repository)
     m3 = (
         M3KnowledgeBundleService(
-            (
-                repository_overrides.m3
-                if repository_overrides.m3 is not None
-                else FileM3Repository(settings.runtime_dir)
-            ),
+            cast(M3Repository, m3_repository),
             _accept_knowledge_bundle,
+            review_workflow=teacher_review_workflow,
+            require_teacher_approval=settings.environment == "production",
         )
         if service_overrides.m3 is None
         else service_overrides.m3
@@ -468,7 +516,14 @@ def _assemble_application(
         else service_overrides.m9
     )
     coordinator = AppCoordinator(m0, m1, m2, m3, m4, m5, m6, m7, m8, m9)
-    runtime_registry = CourseRuntimeRegistry(m0, m2, settings.runtime_dir)
+    runtime_registry = CourseRuntimeRegistry(
+        m0,
+        m2,
+        settings.runtime_dir,
+        m1_repository=cast(M1Repository | None, m1_repository),
+        m2_repository=cast(M2Repository | None, m2_repository),
+        m3_repository=cast(M3Repository | None, m3_repository),
+    )
     resolved_outbox_worker = outbox_worker
     if (
         resolved_outbox_worker is None
@@ -489,7 +544,12 @@ def _assemble_application(
                 / f"{worker_id}.status.json"
             ),
             worker_id=worker_id,
-        )
+            )
+    persistence_backend = durable.get("m1")
+    if persistence_backend is None:
+        persistence_backend = durable.get("m0")
+    if persistence_backend is None:
+        persistence_backend = getattr(m0, "_repository", m0)
     return ApplicationContainer(
         settings=settings,
         m0_service=m0,
@@ -505,6 +565,7 @@ def _assemble_application(
         coordinator=coordinator,
         runtime_registry=runtime_registry,
         outbox_worker=resolved_outbox_worker,
+        persistence_backend=persistence_backend,
         database_pool=durable_graph.database_pool,
         _owns_database_pool=durable_graph.owns_database_pool,
     )
@@ -567,6 +628,23 @@ def _build_m4_service(
     )
 
 
+def _runtime_repository(
+    *,
+    repository_override: object | None,
+    service_override: object | None,
+    default_factory: Callable[[], object],
+) -> object | None:
+    """Resolve the repository used by both a module service and runtime restore."""
+
+    if service_override is not None:
+        # A service override owns its private persistence boundary.  Do not
+        # construct an unused default repository merely for the registry.
+        return getattr(service_override, "_repository", None)
+    if repository_override is not None:
+        return repository_override
+    return default_factory()
+
+
 def _durable_repositories(
     settings: PlatformSettings,
     overrides: RepositoryOverrides,
@@ -574,14 +652,29 @@ def _durable_repositories(
     *,
     postgres_pool: PostgresPool | None,
 ) -> _DurableGraph:
-    names = ("m0", "m4", "m5", "m6", "m7", "m8", "m9")
+    names = ("m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9")
     if settings.database.backend == "postgresql":
-        defaults_required = [
+        names = ("m0", "m1", "m2", "m3", "m4", "m5", "m6", "m7", "m8", "m9")
+        legacy_defaults_required = [
             name
-            for name in names
+            for name in ("m0", "m4", "m5", "m6", "m7", "m8", "m9")
             if getattr(overrides, name) is None
             and getattr(services, name) is None
         ]
+        s1_s6_defaults_required = [
+            name
+            for name in ("m1", "m2", "m3")
+            if getattr(overrides, name) is None
+            and getattr(services, name) is None
+        ]
+        # Existing test-only complete legacy overrides intentionally do not
+        # open an unused PostgreSQL connection.  Production and all normal
+        # partial graphs still require the one S1-S6 authority.
+        defaults_required = legacy_defaults_required + (
+            s1_s6_defaults_required
+            if settings.environment == "production" or legacy_defaults_required
+            else []
+        )
         pool = postgres_pool
         owns_pool = False
         if defaults_required and pool is None:
@@ -605,8 +698,12 @@ def _durable_repositories(
         defaults: dict[str, object] = {}
         try:
             if pool is not None:
+                shared_s1_s6 = PostgresM1M2M3Repository(pool)
                 defaults = {
                     "m0": PostgresM0Repository(pool),
+                    "m1": shared_s1_s6,
+                    "m2": shared_s1_s6,
+                    "m3": shared_s1_s6,
                     "m4": PostgresM4Repository(pool),
                     "m5": PostgresM5Repository(pool),
                     "m6": PostgresM6Repository(pool),
@@ -618,14 +715,13 @@ def _durable_repositories(
             if owns_pool and pool is not None:
                 _close_pool_safely(pool)
             raise
-        selected = {
-            name: (
-                getattr(overrides, name)
-                if getattr(overrides, name) is not None
-                else defaults.get(name)
-            )
-            for name in names
-        }
+        selected = {}
+        for name in names:
+            override = getattr(overrides, name)
+            if override is not None:
+                selected[name] = override
+            elif name in defaults:
+                selected[name] = defaults[name]
         return _DurableGraph(
             repositories=MappingProxyType(selected),
             database_pool=pool,
@@ -645,13 +741,35 @@ def _durable_repositories(
         "m8": SQLiteM8Repository(database_path),
         "m9": SQLiteM9Repository(database_path),
     }
-    return _DurableGraph(
-        repositories=MappingProxyType(
+    s1_s6_defaults_required = [
+        name
+        for name in ("m1", "m2", "m3")
+        if getattr(overrides, name) is None
+        and getattr(services, name) is None
+    ]
+    if s1_s6_defaults_required:
+        from course_insight.infrastructure.sqlite.m1_m2_m3_repository import (
+            SQLiteM1M2M3Repository,
+        )
+
+        shared_s1_s6 = SQLiteM1M2M3Repository(database_path)
+        shared_s1_s6.initialize()
+        defaults.update(
             {
-                name: _selected(getattr(overrides, name), defaults[name])
-                for name in names
+                "m1": shared_s1_s6,
+                "m2": shared_s1_s6,
+                "m3": shared_s1_s6,
             }
-        ),
+        )
+    selected = {}
+    for name in names:
+        override = getattr(overrides, name)
+        if override is not None:
+            selected[name] = override
+        elif name in defaults:
+            selected[name] = defaults[name]
+    return _DurableGraph(
+        repositories=MappingProxyType(selected),
         database_pool=None,
         owns_database_pool=False,
     )
@@ -857,6 +975,70 @@ def _fixed_artifact_loader(
 
 def _sha256(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _build_embedding_provider(
+    settings: PlatformSettings,
+) -> object | None:
+    """Construct the configured provider without making test doubles implicit."""
+
+    configured = settings.embedding
+    if configured.backend == "disabled":
+        return None
+    if (
+        configured.endpoint is None
+        or configured.model_name is None
+        or configured.model_version is None
+        or configured.dimension is None
+    ):
+        raise DomainError(
+            code="EMBEDDING_CONFIGURATION_INVALID",
+            module="application",
+            message="embedding provider configuration is incomplete",
+            recoverable=False,
+        )
+    try:
+        model_ref = EmbeddingModelIdentity(
+            provider="openai_compatible",
+            model_name=configured.model_name,
+            model_version=configured.model_version,
+            dimension=configured.dimension,
+        )
+        return OpenAICompatibleEmbeddingProvider.from_environment(
+            endpoint=configured.endpoint,
+            api_key_env=configured.api_key_env,
+            model_ref=model_ref,
+            environment=settings.environment,
+            timeout_seconds=configured.timeout_seconds,
+            max_retries=configured.max_retries,
+            verify_tls=configured.verify_tls,
+        )
+    except DomainError:
+        raise
+    except Exception:
+        raise DomainError(
+            code="EMBEDDING_CONFIGURATION_INVALID",
+            module="application",
+            message="embedding provider configuration is invalid",
+            recoverable=False,
+        ) from None
+
+
+def _build_teacher_review_workflow(
+    repository: object | None,
+) -> TeacherReviewWorkflow | None:
+    """Bind S4 only when the selected durable backend exposes CAS storage."""
+
+    if repository is None or not all(
+        callable(getattr(repository, name, None))
+        for name in (
+            "get_teacher_review",
+            "save_teacher_review",
+            "compare_and_swap_teacher_review",
+        )
+    ):
+        return None
+    return TeacherReviewWorkflow(RepositoryTeacherReviewRepository(repository))
 
 
 def _accept_knowledge_bundle(bundle: KnowledgeBundle) -> bool:

@@ -31,6 +31,9 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     migrate_workflow_v8_to_v9,
     migrate_workflow_v10_to_v11,
 )
+from course_insight.infrastructure.sqlite.migrations_s1_s6 import (
+    ensure_schema as _ensure_s1_s6_schema,
+)
 
 SCHEMA_VERSION = 13
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
@@ -1102,6 +1105,10 @@ def migrate(connection: sqlite3.Connection) -> None:
                 connection,
                 schema_version=13,
             )
+        # S1-S6 owns an independent version ledger.  Keep the historical
+        # platform schema version at 13 while applying the new artifact table
+        # inside this same transaction.
+        _ensure_s1_s6_schema(connection)
         validate_outbox_schema(connection, schema_version=SCHEMA_VERSION)
         connection.execute("COMMIT")
     except Exception:

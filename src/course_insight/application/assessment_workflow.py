@@ -28,6 +28,7 @@ from course_insight.application.assessment_results import (
     require_results,
     validate_decision,
 )
+from course_insight.application.retrieval import retrieve_for_application
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef
@@ -240,9 +241,11 @@ class AssessmentWorkflow:
                     )
                     evidence = self._execute(
                         run,
-                        lambda query=query: self._m2.retrieve(
-                            evidence_query=query,
-                            evidence_index_ref=index_ref,
+                        lambda query=query: retrieve_for_application(
+                            self._m2,
+                            query,
+                            index_ref,
+                            request_id=f"{run.operation_id}:grading:{query.query_id}",
                         ),
                     )
                     rubric_results.append(
@@ -370,9 +373,11 @@ class AssessmentWorkflow:
             if feedback is None:
                 evidence = self._execute(
                     run,
-                    lambda: self._m2.retrieve(
-                        evidence_query=tutoring.evidence_query,
-                        evidence_index_ref=index_ref,
+                    lambda: retrieve_for_application(
+                        self._m2,
+                        tutoring.evidence_query,
+                        index_ref,
+                        request_id=f"{run.operation_id}:feedback:{tutoring.evidence_query.query_id}",
                     ),
                 )
                 feedback = self._execute(

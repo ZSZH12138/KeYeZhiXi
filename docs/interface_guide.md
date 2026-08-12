@@ -6,10 +6,18 @@
 路径 `$` 表示完整契约，`$[]` 表示列表元素，点路径表示组成字段。
 服务之间必须传递契约对象，不得用无类型字典代替。
 
-当前 v2 智能算法边界仍返回空结果：DeepSeek 不发起 API 请求，pgvector
-不建立连接，DINA/BKT/IRT 不运行估计。这些边界仍是 MVP 架构的正式组成部分，
-不是新模块。M0 的 Web、配置、日志、Worker 与数据库适配器不是算法占位，
-已经有真实实现。
+当前 v2 中仍返回空结果的只是尚未启用的算法/外部调用：DeepSeek 不发起 API 请求，
+DINA/BKT/IRT 不运行估计。M2 的 PostgreSQL+pgvector、embedding、策略检索和审计
+端口已经实现；SQLite 仅用于离线、测试和迁移演练，生产必须使用 PostgreSQL+pgvector。
+真实 PostgreSQL+pgvector live 联调尚未完成，缺少生产依赖时必须 fail closed，不能把
+逻辑 `empty` 当成生产成功。
+
+M2 正式业务检索入口是 `retrieve_with_policy`；旧 `retrieve` 仅为已有 lexical 调用
+保留的兼容入口。M3 生产发布必须使用 `build_knowledge_bundle_after_approval`，
+无审批的 `build_knowledge_bundle` 只适用于离线/测试或审批前校验。
+`AppCoordinator.initialize_course` 可选接收 `teacher_review_id` 与
+`teacher_review_version`；两者同时提供时才走审批后发布入口。M3 service 的
+`create/submit/approve/reject/recall_teacher_review` wrappers 负责 CAS 复核状态迁移。
 
 M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默认关闭在
 `rules`/零 rollout/零探索状态。它们不增加公共契约；本阶段也没有真实教学训练、
@@ -31,14 +39,14 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 
 | 根契约 | 唯一生产者 | 消费者/字段路径 |
 |---|---|---|
-| `CoursePackage` | `M1.import_course` | `M2.build_index(course_package=$)`；`M3.build_knowledge_bundle(course_package=$)` |
-| `EvidenceIndexRef` | `M2.build_index`、`M2.initialize_vector_store` | `M2.retrieve(evidence_index_ref=$)`；v2 空检索审计 |
-| `EvidenceQuery` | `M8.prepare_scoring`、`M6.decide_next_action` | `M2.retrieve(evidence_query=$)` |
-| `EvidenceBundle` | `M2.retrieve` | `M7.score_subjective_answer`；`M7.generate_student_feedback` |
-| `KnowledgeBundle` | `M3.build_knowledge_bundle` | M4、M5、M8、M9 |
+| `CoursePackage` | `M1.import_course` | `M2.build_index/build_vector_index(course_package=$)`；M3 审批前校验或 `build_knowledge_bundle_after_approval(course_package=$)` |
+| `EvidenceIndexRef` | `M2.build_index`、`M2.build_vector_index`、`M2.restore_vector_index` | `M2.retrieve_with_policy(evidence_index_ref=$)`；旧 `retrieve` 仅兼容 lexical |
+| `EvidenceQuery` | `M8.prepare_scoring`、`M6.decide_next_action` | `M2.retrieve_with_policy(evidence_query=$)` |
+| `EvidenceBundle` | `M2.retrieve_with_policy` | `M7.score_subjective_answer`；`M7.generate_student_feedback` |
+| `KnowledgeBundle` | `M3.build_knowledge_bundle_after_approval`（生产）；`build_knowledge_bundle`（离线/测试） | M4、M5、M8、M9 |
 | `TaskPlan` | `M4.create_task_plan` | `M8.generate_paper`；`M6.decide_next_action` |
 | `AssessmentPaper` | `M8.generate_paper` | M0 学生作答外层；`M8.prepare_scoring` |
-| `ScoringPreparationResult` | `M8.prepare_scoring` | `M2.retrieve($.evidence_queries[])`；`M7.score_subjective_answer($.rubric_scoring_tasks[])`；`M8.finalize_scoring($)` |
+| `ScoringPreparationResult` | `M8.prepare_scoring` | `M2.retrieve_with_policy($.evidence_queries[])`；`M7.score_subjective_answer($.rubric_scoring_tasks[])`；`M8.finalize_scoring($)` |
 | `RubricScoringTask` | `M8.prepare_scoring` | `M7.score_subjective_answer` |
 | `RubricScoringResult` | `M7.score_subjective_answer` | `M8.finalize_scoring` |
 | `ScoringResultBundle` | `M8.finalize_scoring`、`M8.apply_teacher_review` | M0、M5、M6、M9 |
@@ -46,7 +54,7 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 | `LearnerStateSnapshot` | `M5.update_state` | M4、M6、M8、M9 |
 | `ClassStateSnapshot` | `M5.update_state` | M9 |
 | `StateUpdateResult` | `M5.update_state` | M6、M9 |
-| `TutoringControlResult` | `M6.decide_next_action` | `M2.retrieve($.evidence_query)`；`M7.generate_student_feedback($.feedback_generation_task)`；应用层后续调度 |
+| `TutoringControlResult` | `M6.decide_next_action` | `M2.retrieve_with_policy($.evidence_query)`；`M7.generate_student_feedback($.feedback_generation_task)`；应用层后续调度 |
 | `FeedbackGenerationTask` | `M6.decide_next_action` | `M7.generate_student_feedback` |
 | `StudentFeedbackPackage` | `M7.generate_student_feedback` | M0 Django 学生外层 |
 | `TeacherAnalyticsBundle` | `M9.build_teacher_analytics` | M0 Django 教师外层 |
@@ -62,9 +70,9 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 | `AssessmentSubmission` | M0 Django 学生表单 | `M8.prepare_scoring` | `answers` 是题目实例 ID 到字符串/布尔/整数/有限浮点答案的映射 |
 | `TeacherReviewSubmission` | M0 Django 教师表单 | `M9.record_teacher_review` | 使用 `confirm/override/reject`，并完整携带总分、分项覆盖和教师意见 |
 | `AsyncJobStatus` | M0 作业边界 | legacy intelligence scaffold | Django 作业固定 `skipped`；不代表真实 Web 未实现 |
-| `EmbeddingModelRef` | M2 检索配置 | M2 索引器 | `empty` |
+| `EmbeddingModelRef` | M2 检索配置 | M2 索引器 | 生产为 `configured`；`empty` 仅用于离线/兼容场景 |
 | `RetrievalPolicy` | M2 检索配置 | M2 检索器 | 允许词法/向量/混合策略 |
-| `RetrievalAudit` | M2 | M7/M9 审计与运维 | `empty`，无证据 ID |
+| `RetrievalAudit` | M2 | M7/M9 审计与运维 | 正式检索记录 `succeeded`/`failed`；兼容未执行场景才为 `empty` |
 | `LLMModelRef` | M7/M9 配置 | DeepSeek 适配器 | provider 固定 `deepseek`，密钥名固定 `DEEPSEEK_API_KEY` |
 | `LLMGenerationRequest` | M7 评分/反馈或 M9 叙述 | DeepSeek 适配器 | 只保存输入校验和证据 ID |
 | `LLMGenerationResult` | M7/M9 DeepSeek 适配器 | M7/M9 业务服务 | `empty`，内容/引用为空，`not_run` |
@@ -82,15 +90,26 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 | `ModelQualityReport` | `M9.build_model_quality_report` | M9 教师审核与 M8 发布门槛 | `insufficient_data`，无指标 |
 | `CalibrationReviewDecision` | M9 教师审核 | M8 参数版本发布 | 仅契约，当前不自动发布 |
 
+M0 的 `TeacherReviewSubmission` 是 M8/M9 评分复核接口，不等同于 M3 S4 知识包复核。
+M3 生产发布必须先通过 `TeacherReviewWorkflow` 的 CAS 状态
+`draft -> submitted -> approved`，再调用 `build_knowledge_bundle_after_approval`；
+两条复核链不能互相替代。
+
 ## 编排入口
 
 `M4TaskOrchestrationService.create_task_plan(...) -> TaskPlan` 是唯一任务规划入口。
 它支持 `qa`、`diagnostic`、`practice`、`correction` 和
 `stage_assessment`，并直接把带类型的 `TaskPlan` 交给 M8/M6：问答工作流固定为
-`M2 → M7 → M6`，测评工作流固定为
-`M8 → M2 → M7 → M5 → M6 → M9`。多个教师批准蓝图并存时，M4 构造时必须
+`App.retrieve_for_application → M2.retrieve_with_policy → M7 → M6`，测评工作流固定为
+`M8 → App.retrieve_for_application → M2.retrieve_with_policy → M7 → M5 → M6 → M9`。
+多个教师批准蓝图并存时，M4 构造时必须
 通过 `blueprint_by_task_type` 显式配置任务类型到 bundle 内蓝图 ID 的映射；
 不存在合法确定性选择时返回 `BLUEPRINT_NOT_FOUND`。
+
+应用层现在通过 `retrieve_for_application(...)` 委托到
+`M2.retrieve_with_policy(...)`，并由该入口统一策略校验和审计；旧 `retrieve` 仅为已有
+lexical 调用保留兼容。完整 vector/hybrid 生产链仍需真实 PostgreSQL+pgvector live
+联调验收，不能把模块级代码可用写成 live 通过。
 
 M4 幂等身份只由课程、班级、学习者、会话、任务类型、知识包、课程包和蓝图
 八项冻结引用组成。SQLite 唯一约束保证重复、并发和进程重启后的调用复用首次
@@ -135,8 +154,9 @@ M6 的 OPE/approval 尚未正式接入 M9。当前公共
 `AppCoordinator.run_intelligence_architecture(...) -> ArchitectureScaffoldResult`
 保留为 legacy 智能能力脚手架入口。为保持既有
 `ArchitectureScaffoldResult.is_empty()` 公共语义，M0 的
-`prepare_django_frontend()` 继续返回 `skipped`；M2 pgvector、M7/M9 DeepSeek、
-M5 DINA/BKT、M8 IRT/自适应选择和 M9 模型质量也保持空或证据不足状态。
+`prepare_django_frontend()` 继续返回 `skipped`；该 legacy 脚手架不执行 M2 正式
+`retrieve_with_policy`。M7/M9 DeepSeek、M5 DINA/BKT、M8 IRT/自适应选择和 M9
+模型质量也保持空或证据不足状态。
 真实 Django Web/health 由独立进程入口提供，不依赖该脚手架，也不把完整领域契约
 存入 Session。
 

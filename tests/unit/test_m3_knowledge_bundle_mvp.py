@@ -18,12 +18,18 @@ from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.modules.m3_knowledge_bundle.repository import M3Repository
 from course_insight.modules.m3_knowledge_bundle.seed_snapshot import (
+    M3ValidationIssue,
     capture_seed_snapshot,
     create_validation_report,
 )
 from course_insight.modules.m3_knowledge_bundle.service import M3KnowledgeBundleService
 from course_insight.modules.m3_knowledge_bundle import stubs as m3_stubs
 from course_insight.modules.m3_knowledge_bundle.stubs import _MemoryM3Repository
+from course_insight.modules.m3_knowledge_bundle.teacher_review import (
+    InMemoryTeacherReviewRepository,
+    TeacherReviewWorkflow,
+)
+from course_insight.modules.m3_knowledge_bundle.validation import M3ValidationOutcome
 
 
 NOW = datetime(2026, 8, 4, tzinfo=timezone.utc)
@@ -73,6 +79,63 @@ def _build(service: M3KnowledgeBundleService, package: CoursePackage, paths: dic
     return service.build_knowledge_bundle(package, paths["concept"], paths["item"], paths["rubric"], paths["blueprint"], paths["prerequisite"], paths["misconception"])
 
 
+def test_teacher_review_api_binds_seed_checksum_before_production_publication(
+    tmp_path: Path,
+) -> None:
+    package = _package()
+    paths = _paths(tmp_path, _roles(package))
+    workflow = TeacherReviewWorkflow(InMemoryTeacherReviewRepository())
+    service = M3KnowledgeBundleService(
+        _MemoryM3Repository(),
+        None,
+        review_workflow=workflow,
+        require_teacher_approval=True,
+    )
+
+    draft = service.create_teacher_review_draft(
+        review_id="review-bundle-1",
+        subject_id=package.course_package_id,
+        validation_report_ref="report-bundle-1",
+        now=NOW,
+        concept_seed_path=paths["concept"],
+        item_seed_path=paths["item"],
+        rubric_seed_path=paths["rubric"],
+        blueprint_seed_path=paths["blueprint"],
+        prerequisite_seed_path=paths["prerequisite"],
+        misconception_seed_path=paths["misconception"],
+    )
+    submitted = service.submit_teacher_review(
+        "review-bundle-1", "teacher-1", "checked", draft.version, NOW
+    )
+    approved = service.approve_teacher_review(
+        "review-bundle-1", "teacher-1", "approved", submitted.version, NOW
+    )
+
+    bundle = service.build_knowledge_bundle_after_approval(
+        review_id="review-bundle-1",
+        review_version=approved.version,
+        course_package=package,
+        concept_seed_path=paths["concept"],
+        item_seed_path=paths["item"],
+        rubric_seed_path=paths["rubric"],
+        blueprint_seed_path=paths["blueprint"],
+        prerequisite_seed_path=paths["prerequisite"],
+        misconception_seed_path=paths["misconception"],
+    )
+
+    assert bundle.course_package_checksum == package.checksum
+    assert workflow.require_approved("review-bundle-1", approved.version).input_checksum == (
+        capture_seed_snapshot(
+            concept_seed_path=paths["concept"],
+            item_seed_path=paths["item"],
+            rubric_seed_path=paths["rubric"],
+            blueprint_seed_path=paths["blueprint"],
+            prerequisite_seed_path=paths["prerequisite"],
+            misconception_seed_path=paths["misconception"],
+        ).checksum
+    )
+
+
 class _RecordingRepository(_MemoryM3Repository):
     def __init__(self) -> None:
         super().__init__()
@@ -116,6 +179,175 @@ def test_blocking_validation_persists_only_rejected_report_then_raises_safe_id(t
     assert set(raised.value.details) == {"report_id"}
     assert repository.calls == ["rejected"]
     assert repository.load_rejected_validation(package.course_package_id, raised.value.details["report_id"]) is not None
+
+
+@pytest.mark.parametrize(
+    ("mutation", "expected_code"),
+    [
+        (
+            lambda roles: roles["concept"]["concepts"][0].pop("name"),
+            "KNOWLEDGE_ENTITY_INVALID",
+        ),
+        (
+            lambda roles: roles["prerequisite"]["prerequisite_relations"].append(
+                {
+                    "from_concept_id": "concept_1",
+                    "to_concept_id": "missing",
+                    "relation_type": "prerequisite",
+                    "strength": 1.0,
+                }
+            ),
+            "KNOWLEDGE_REFERENCE_MISSING",
+        ),
+        (
+            lambda roles: roles["concept"].__setitem__(
+                "course_package_id", "other_package"
+            ),
+            "KNOWLEDGE_COURSE_BINDING_INVALID",
+        ),
+    ],
+)
+def test_validation_rejection_exposes_first_safe_report_code(
+    tmp_path: Path,
+    mutation: Any,
+    expected_code: str,
+) -> None:
+    package = _package()
+    roles = _roles(package)
+    mutation(roles)
+    repository = _RecordingRepository()
+
+    with pytest.raises(DomainError) as raised:
+        _build(
+            M3KnowledgeBundleService(repository, None),
+            package,
+            _paths(tmp_path, roles),
+        )
+
+    assert raised.value.code == expected_code
+    assert set(raised.value.details) == {"report_id"}
+    assert raised.value.__cause__ is None
+    assert str(tmp_path) not in str(raised.value)
+    assert repository.calls == ["rejected"]
+
+
+def test_seed_read_failure_exposes_safe_report_code(tmp_path: Path) -> None:
+    package = _package()
+    paths = _paths(tmp_path, _roles(package))
+    paths["concept"].unlink()
+
+    with pytest.raises(DomainError) as raised:
+        _build(M3KnowledgeBundleService(_MemoryM3Repository(), None), package, paths)
+
+    assert raised.value.code == "KNOWLEDGE_SEED_READ_FAILED"
+    assert set(raised.value.details) == {"report_id"}
+    assert raised.value.__cause__ is None
+    assert str(tmp_path) not in str(raised.value)
+
+
+def test_seed_json_and_schema_failures_expose_distinct_safe_report_codes(
+    tmp_path: Path,
+) -> None:
+    package = _package()
+    json_paths = _paths(tmp_path / "json", _roles(package))
+    json_paths["concept"].write_text("{", encoding="utf-8")
+
+    with pytest.raises(DomainError) as json_raised:
+        _build(
+            M3KnowledgeBundleService(_MemoryM3Repository(), None),
+            package,
+            json_paths,
+        )
+
+    schema_roles = _roles(package)
+    schema_roles["concept"].pop("concepts")
+    schema_paths = _paths(tmp_path / "schema", schema_roles)
+
+    with pytest.raises(DomainError) as schema_raised:
+        _build(
+            M3KnowledgeBundleService(_MemoryM3Repository(), None),
+            package,
+            schema_paths,
+        )
+
+    assert json_raised.value.code == "KNOWLEDGE_SEED_INVALID"
+    assert schema_raised.value.code == "KNOWLEDGE_SEED_INVALID"
+    for raised in (json_raised, schema_raised):
+        assert set(raised.value.details) == {"report_id"}
+        assert raised.value.__cause__ is None
+        assert str(tmp_path) not in str(raised.value)
+
+
+def test_oversized_seed_exposes_seed_invalid_code(tmp_path: Path) -> None:
+    package = _package()
+    paths = _paths(tmp_path, _roles(package))
+    paths["concept"].write_bytes(b"x" * (1024 * 1024 + 1))
+
+    with pytest.raises(DomainError) as raised:
+        _build(M3KnowledgeBundleService(_MemoryM3Repository(), None), package, paths)
+
+    assert raised.value.code == "KNOWLEDGE_SEED_INVALID"
+    assert set(raised.value.details) == {"report_id"}
+    assert raised.value.__cause__ is None
+    assert str(tmp_path) not in str(raised.value)
+
+
+def test_q_matrix_conflict_has_priority_over_other_report_issues(
+    tmp_path: Path,
+) -> None:
+    package = _package()
+    roles = _roles(package)
+    roles["concept"]["course_package_id"] = "other_package"
+    roles["item"]["q_matrix"] = []
+
+    with pytest.raises(DomainError) as raised:
+        _build(
+            M3KnowledgeBundleService(_MemoryM3Repository(), None),
+            package,
+            _paths(tmp_path, roles),
+        )
+
+    assert raised.value.code == "Q_MATRIX_CONFLICT"
+    assert set(raised.value.details) == {"report_id"}
+    assert raised.value.__cause__ is None
+
+
+def test_unknown_report_issue_uses_fixed_safe_fallback(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = _package()
+    paths = _paths(tmp_path, _roles(package))
+    snapshot = capture_seed_snapshot(
+        concept_seed_path=paths["concept"],
+        item_seed_path=paths["item"],
+        rubric_seed_path=paths["rubric"],
+        blueprint_seed_path=paths["blueprint"],
+        prerequisite_seed_path=paths["prerequisite"],
+        misconception_seed_path=paths["misconception"],
+    )
+    report = create_validation_report(
+        course_package_id=package.course_package_id,
+        course_package_checksum=package.checksum,
+        seed_snapshot=snapshot,
+        issues=(
+            M3ValidationIssue(
+                "UNRECOGNIZED_INTERNAL_ISSUE", "concept", "", "concepts"
+            ),
+        ),
+    )
+    monkeypatch.setattr(
+        "course_insight.modules.m3_knowledge_bundle.service.validate_seed_snapshot",
+        lambda **_: M3ValidationOutcome(bundle=None, report=report),
+    )
+
+    with pytest.raises(DomainError) as raised:
+        _build(M3KnowledgeBundleService(_MemoryM3Repository(), None), package, paths)
+
+    assert raised.value.code == "KNOWLEDGE_SEED_INVALID"
+    assert "UNRECOGNIZED" not in str(raised.value)
+    assert set(raised.value.details) == {"report_id"}
+    assert raised.value.__cause__ is None
 
 
 @pytest.mark.parametrize("error", [RuntimeError("C:\\teacher\\seed.json"), DomainError(code="KNOWLEDGE_VERSION_CONFLICT", module="m3", message="C:\\teacher\\seed.json", details={"path": "C:\\teacher"}), DomainError(code="FOREIGN", module="m2", message="C:\\teacher\\seed.json", details={})])
