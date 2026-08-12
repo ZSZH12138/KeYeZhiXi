@@ -407,6 +407,86 @@ def test_postgres_m5_allocates_first_class_version_under_advisory_lock() -> None
     PostgresM5Repository is None,
     reason="adapter is the RED-phase missing feature",
 )
+def test_postgres_m5_checks_locked_class_baseline_atomically() -> None:
+    result = _state_result(
+        attempt_id="attempt_1",
+        course_id="course_1",
+        class_id="class_1",
+        state_version=1,
+    )
+    class_reads = 0
+
+    def first_insert(statement: str, parameters: tuple[Any, ...]):
+        nonlocal class_reads
+        normalized = " ".join(statement.lower().split())
+        if "pg_advisory_xact_lock" in normalized:
+            return {"locked": None}
+        if "select snapshot_id from m5_class_states" in normalized:
+            return None
+        if "from m5_learner_states" in normalized:
+            return _learner_row(result)
+        if "from m5_class_states" in normalized:
+            class_reads += 1
+            return _class_row(result, state_version=1)
+        if "from m5_state_updates" in normalized:
+            return _update_row(result)
+        return None
+
+    repository = PostgresM5Repository(
+        FakePool(FakeConnection(first_insert))
+    )
+    assert repository.insert_or_get_state_update(
+        result,
+        expected_previous_class_snapshot_id=None,
+    ) == result
+
+    conflict_repository = PostgresM5Repository(
+        FakePool(FakeConnection(_responder_for(result)))
+    )
+    with pytest.raises(PostgresOperationError, match="conflict"):
+        conflict_repository.insert_or_get_state_update(
+            result,
+            expected_previous_class_snapshot_id="stale_snapshot",
+        )
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_rejects_invalid_latest_class_version() -> None:
+    def invalid_version(statement: str, _: tuple[Any, ...]):
+        if "SELECT MAX(state_version)" in statement:
+            return {"state_version": 0}
+        return None
+
+    repository = PostgresM5Repository(
+        FakePool(FakeConnection(invalid_version))
+    )
+    with pytest.raises(PostgresOperationError, match="integrity"):
+        repository.get_latest_class_state_version("course_1", "class_1")
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m5_preserves_connection_errors_for_new_scope_reads() -> None:
+    connection_error = PostgresConnectionError("database unavailable")
+    repository = PostgresM5Repository(FailingPool(connection_error))
+
+    with pytest.raises(PostgresConnectionError) as learner_error:
+        repository.list_latest_learner_states("course_1", "class_1")
+    assert learner_error.value is connection_error
+    with pytest.raises(PostgresConnectionError) as version_error:
+        repository.get_latest_class_state_version("course_1", "class_1")
+    assert version_error.value is connection_error
+
+
+@pytest.mark.skipif(
+    PostgresM5Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
 def test_postgres_m5_empty_recovery_and_safe_database_errors() -> None:
     repository = PostgresM5Repository(
         FakePool(FakeConnection(lambda _statement, _parameters: None))

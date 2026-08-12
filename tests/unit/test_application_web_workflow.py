@@ -1245,6 +1245,63 @@ def test_split_assessment_use_cases_reload_and_review(tmp_path: Path) -> None:
     )
 
 
+def test_legacy_review_cycle_passes_frozen_observations_to_m5(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    coordinator = _coordinator(tmp_path, store)
+    current = _scoring_result(audit_id="audit_attempt_1").model_copy(
+        update={"learner_id": "learner_1"},
+        deep=True,
+    )
+    previous_state = _state_update(
+        audit_id="audit_attempt_1",
+        audit_version=1,
+        state_version=1,
+    )
+    review = TeacherReviewSubmission(
+        submission_id="legacy_review_1",
+        audit_id="audit_attempt_1",
+        expected_audit_version=1,
+        reviewer_id="teacher_1",
+        decision="confirm",
+        final_total_score=0.0,
+        criterion_overrides=[],
+        teacher_comment="Confirmed.",
+        submitted_at=NOW + timedelta(minutes=1),
+    )
+
+    result = coordinator.run_teacher_review_cycle(
+        knowledge_bundle=_knowledge_bundle(),
+        scoring_result_bundle=current,
+        state_update_result=previous_state,
+        raw_review_path=review,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+    )
+
+    assert result["reviewed_scoring_result"].attempt_id == current.attempt_id
+    assert [
+        batch.batch_id for batch in store.observation_batches_received
+    ] == ["observations_attempt_1_v2"]
+
+
+def test_observation_builder_compatibility_fallback_returns_none(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    coordinator = _coordinator(tmp_path, store)
+    scoring = _scoring_result(audit_id="audit_attempt_1")
+    coordinator._m8 = SimpleNamespace()
+    coordinator._assessment_workflow._m8 = SimpleNamespace()
+
+    assert coordinator._build_observation_batch(scoring) is None
+    assert (
+        coordinator._assessment_workflow._build_observation_batch(scoring)
+        is None
+    )
+
+
 def _start_and_submission(
     coordinator: AppCoordinator,
     tmp_path: Path,
