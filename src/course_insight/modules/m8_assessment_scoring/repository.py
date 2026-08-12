@@ -9,6 +9,12 @@ from course_insight.contracts.assessment import (
     ScoreAuditRecord,
     ScoringResultBundle,
 )
+from course_insight.contracts.learning_models import (
+    AbilityEstimate,
+    CalibrationReviewDecision,
+    CalibrationRunResult,
+    IRTParameterSet,
+)
 from course_insight.modules.m8_assessment_scoring.paper_record import (
     FrozenAssessmentRecord,
 )
@@ -89,3 +95,69 @@ class M8Repository(Protocol):
         audit_version: int,
     ) -> ScoringResultBundle | None:
         """Load the earliest result at one exact target-audit version."""
+
+    def insert_or_get_calibration_run(
+        self,
+        result: CalibrationRunResult,
+        *,
+        course_id: str,
+    ) -> CalibrationRunResult:
+        """Persist one run and its immutable parameter snapshot atomically."""
+
+    def get_calibration_run(
+        self,
+        run_id: str,
+    ) -> CalibrationRunResult | None:
+        """Load one exact calibration run."""
+
+    def get_calibration_run_course_id(self, run_id: str) -> str | None:
+        """Load the persisted course scope for one calibration run."""
+
+    def insert_or_get_parameter_set(
+        self,
+        parameter_set: IRTParameterSet,
+        *,
+        course_id: str,
+    ) -> IRTParameterSet:
+        """Persist one immutable course-scoped IRT parameter version."""
+
+    def get_parameter_set(
+        self,
+        parameter_set_id: str,
+    ) -> IRTParameterSet | None:
+        """Load one exact IRT parameter snapshot."""
+
+    def get_parameter_set_course_id(self, parameter_set_id: str) -> str | None:
+        """Load the persisted course scope for one parameter snapshot."""
+
+    def list_parameter_sets(self, *, course_id: str) -> list[IRTParameterSet]:
+        """List all immutable parameter versions for one course."""
+
+    def insert_or_get_calibration_review(
+        self,
+        decision: CalibrationReviewDecision,
+        reviewed_parameter_set: IRTParameterSet,
+        *,
+        course_id: str,
+    ) -> tuple[CalibrationReviewDecision, IRTParameterSet]:
+        """Persist one review and its resulting parameter version atomically."""
+
+    def get_calibration_review(
+        self,
+        calibration_run_id: str,
+    ) -> CalibrationReviewDecision | None:
+        """Load the review recorded for one calibration run."""
+
+    def insert_or_get_ability_estimate(
+        self,
+        estimate: AbilityEstimate,
+        *,
+        course_id: str,
+    ) -> AbilityEstimate:
+        """Persist one immutable course-scoped learner ability estimate."""
+
+    def get_ability_estimate(
+        self,
+        estimate_id: str,
+    ) -> AbilityEstimate | None:
+        """Load one exact ability estimate."""

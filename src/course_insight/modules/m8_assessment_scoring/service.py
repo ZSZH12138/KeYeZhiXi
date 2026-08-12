@@ -39,6 +39,9 @@ from course_insight.contracts.state import DiagnosisResult, LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m8_assessment_scoring.clock import Clock, SystemUTCClock
 from course_insight.modules.m8_assessment_scoring.irt_2pl import TwoPLCalibrator
+from course_insight.modules.m8_assessment_scoring.model_runtime import (
+    M8ModelRuntimeMixin,
+)
 from course_insight.modules.m8_assessment_scoring.observation_builder import (
     build_observation_batch as build_authoritative_observation_batch,
 )
@@ -54,7 +57,7 @@ from course_insight.modules.m8_assessment_scoring.retry_equivalence import (
 )
 
 
-class M8AssessmentService(M8HistoricalRecoveryMixin):
+class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
     """Generate papers, score attempts, and retain audit history."""
 
     def __init__(
@@ -696,9 +699,10 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
 
         if isinstance(observation_batch, LearningObservationBatch):
             if observation_batch.observations:
-                return self._irt_calibrator.fit(
-                    list(observation_batch.observations),
-                    requested_at,
+                observations = list(observation_batch.observations)
+                return self._persist_calibration_if_supported(
+                    self._irt_calibrator.fit(observations, requested_at),
+                    observations,
                 )
             batch_id = observation_batch.batch_id
         else:
@@ -715,7 +719,10 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
                 for batch in batches
                 for observation in batch.observations
             ]
-            return self._irt_calibrator.fit(observations, requested_at)
+            return self._persist_calibration_if_supported(
+                self._irt_calibrator.fit(observations, requested_at),
+                observations,
+            )
 
         parameter_set = IRTParameterSet(
             parameter_set_id=f"irt_empty_{batch_id}",

@@ -15,7 +15,14 @@ from course_insight.contracts.assessment import (
     ScoringResultBundle,
 )
 from course_insight.contracts.base import ContractModel
+from course_insight.contracts.learning_models import (
+    AbilityEstimate,
+    CalibrationReviewDecision,
+    CalibrationRunResult,
+    IRTParameterSet,
+)
 from course_insight.infrastructure.json_io import dumps_json
+from course_insight.infrastructure.postgresql import m8_model_runtime
 from course_insight.infrastructure.postgresql.base import (
     PostgresError,
     PostgresOperationError,
@@ -405,6 +412,101 @@ class PostgresM8Repository:
             ):
                 return bundle
         return None
+
+    def insert_or_get_calibration_run(
+        self,
+        result: CalibrationRunResult,
+        *,
+        course_id: str,
+    ) -> CalibrationRunResult:
+        return m8_model_runtime.insert_or_get_calibration_run(
+            self._pool,
+            result,
+            course_id=course_id,
+        )
+
+    def get_calibration_run(
+        self,
+        run_id: str,
+    ) -> CalibrationRunResult | None:
+        return m8_model_runtime.get_calibration_run(self._pool, run_id)
+
+    def get_calibration_run_course_id(self, run_id: str) -> str | None:
+        return m8_model_runtime.get_calibration_run_course_id(
+            self._pool,
+            run_id,
+        )
+
+    def insert_or_get_parameter_set(
+        self,
+        parameter_set: IRTParameterSet,
+        *,
+        course_id: str,
+    ) -> IRTParameterSet:
+        return m8_model_runtime.insert_or_get_parameter_set(
+            self._pool,
+            parameter_set,
+            course_id=course_id,
+        )
+
+    def get_parameter_set(
+        self,
+        parameter_set_id: str,
+    ) -> IRTParameterSet | None:
+        return m8_model_runtime.get_parameter_set(self._pool, parameter_set_id)
+
+    def get_parameter_set_course_id(self, parameter_set_id: str) -> str | None:
+        return m8_model_runtime.get_parameter_set_course_id(
+            self._pool,
+            parameter_set_id,
+        )
+
+    def list_parameter_sets(self, *, course_id: str) -> list[IRTParameterSet]:
+        return m8_model_runtime.list_parameter_sets(
+            self._pool,
+            course_id=course_id,
+        )
+
+    def insert_or_get_calibration_review(
+        self,
+        decision: CalibrationReviewDecision,
+        reviewed_parameter_set: IRTParameterSet,
+        *,
+        course_id: str,
+    ) -> tuple[CalibrationReviewDecision, IRTParameterSet]:
+        return m8_model_runtime.insert_or_get_calibration_review(
+            self._pool,
+            decision,
+            reviewed_parameter_set,
+            course_id=course_id,
+        )
+
+    def get_calibration_review(
+        self,
+        calibration_run_id: str,
+    ) -> CalibrationReviewDecision | None:
+        return m8_model_runtime.get_calibration_review(
+            self._pool,
+            calibration_run_id,
+        )
+
+    def insert_or_get_ability_estimate(
+        self,
+        estimate: AbilityEstimate,
+        *,
+        course_id: str,
+    ) -> AbilityEstimate:
+        return m8_model_runtime.insert_or_get_ability_estimate(
+            self._pool,
+            estimate,
+            course_id=course_id,
+        )
+
+    def get_ability_estimate(
+        self,
+        estimate_id: str,
+    ) -> AbilityEstimate | None:
+        return m8_model_runtime.get_ability_estimate(self._pool, estimate_id)
 
     def _scoring_history(
         self,
