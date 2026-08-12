@@ -127,6 +127,19 @@
       "title": "Converged",
       "type": "boolean"
     },
+    "failure_code": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Code"
+    },
     "generated_at": {
       "format": "date-time",
       "title": "Generated At",

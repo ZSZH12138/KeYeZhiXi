@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+from collections.abc import Sequence
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -37,6 +38,7 @@ from course_insight.contracts.platform import AssessmentSubmission
 from course_insight.contracts.state import DiagnosisResult, LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m8_assessment_scoring.clock import Clock, SystemUTCClock
+from course_insight.modules.m8_assessment_scoring.irt_2pl import TwoPLCalibrator
 from course_insight.modules.m8_assessment_scoring.observation_builder import (
     build_observation_batch as build_authoritative_observation_batch,
 )
@@ -61,11 +63,15 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
         rule_scorer: Any,
         parameter_item_generator: Any,
         clock: Clock | None = None,
+        irt_calibrator: TwoPLCalibrator | None = None,
     ) -> None:
         self._repository = repository
         self._rule_scorer = rule_scorer
         self._parameter_item_generator = parameter_item_generator
         self._clock = SystemUTCClock() if clock is None else clock
+        self._irt_calibrator = (
+            TwoPLCalibrator() if irt_calibrator is None else irt_calibrator
+        )
         self._paper_event_context: dict[str, tuple[str, str]] = {}
 
     def generate_paper(
@@ -676,20 +682,43 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
 
     def calibrate_irt(
         self,
-        observation_batch: LearningObservationBatch,
+        observation_batch: (
+            LearningObservationBatch | Sequence[LearningObservationBatch]
+        ),
         requested_at: datetime,
     ) -> CalibrationRunResult:
-        """Return an empty 2PL shadow-calibration declaration.
+        """Run cohort 2PL calibration without weakening learner batch scope.
 
-        原始输入：M5/M8 共用的 LearningObservationBatch 和请求时间。
-        契约来源：learning_models 中的观测批次、IRT 参数集和标定结果。
-        返回消费者：M9 模型质量门和 AppCoordinator。
-        业务校验：不估计参数、不声明收敛且不伪造样本或指标。
-        错误码：无；当前空实现固定返回 empty。
+        非空批次交给真实 2PL 校准器；多个单学习者批次会先复制并合并观测。
+        数据不足时返回 ``INSUFFICIENT_CALIBRATION_DATA``，足量且收敛时只产生
+        ``shadow`` 参数，供 M9 后续质量审核。单个空批次仍用于架构占位流程。
         """
 
+        if isinstance(observation_batch, LearningObservationBatch):
+            if observation_batch.observations:
+                return self._irt_calibrator.fit(
+                    list(observation_batch.observations),
+                    requested_at,
+                )
+            batch_id = observation_batch.batch_id
+        else:
+            batches = list(observation_batch)
+            if any(
+                not isinstance(batch, LearningObservationBatch)
+                for batch in batches
+            ):
+                raise TypeError(
+                    "IRT calibration requires LearningObservationBatch values"
+                )
+            observations = [
+                observation
+                for batch in batches
+                for observation in batch.observations
+            ]
+            return self._irt_calibrator.fit(observations, requested_at)
+
         parameter_set = IRTParameterSet(
-            parameter_set_id=f"irt_empty_{observation_batch.batch_id}",
+            parameter_set_id=f"irt_empty_{batch_id}",
             model_type="2PL",
             version="unconfigured",
             item_parameters=[],
@@ -698,7 +727,7 @@ class M8AssessmentService(M8HistoricalRecoveryMixin):
             created_at=requested_at,
         )
         return CalibrationRunResult(
-            run_id=f"calibration_empty_{observation_batch.batch_id}",
+            run_id=f"calibration_empty_{batch_id}",
             parameter_set=parameter_set,
             converged=False,
             metrics={},

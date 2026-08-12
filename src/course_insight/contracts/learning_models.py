@@ -405,18 +405,33 @@ class CalibrationRunResult(ContractModel):
     converged: bool
     metrics: dict[str, float]
     status: Literal["empty", "shadow", "failed"]
+    failure_code: str | None = Field(default=None, min_length=1)
     generated_at: datetime
 
     def validate_business_rules(self) -> None:
         """Prevent an empty run from claiming convergence or metrics."""
 
-        if self.status == "empty" and (
-            self.converged or self.metrics or self.parameter_set.status != "empty"
-        ):
+        invalid_empty = self.status == "empty" and (
+            self.converged
+            or self.metrics
+            or self.failure_code is not None
+            or self.parameter_set.status != "empty"
+        )
+        invalid_failed = self.status == "failed" and (
+            self.converged
+            or self.parameter_set.status != "empty"
+            or self.failure_code is None
+        )
+        invalid_shadow = self.status == "shadow" and (
+            not self.converged
+            or self.parameter_set.status != "shadow"
+            or self.failure_code is not None
+        )
+        if invalid_empty or invalid_failed or invalid_shadow:
             raise DomainError(
                 code="CALIBRATION_RUN_INVALID",
                 module="m8",
-                message="empty calibration runs cannot contain estimates",
+                message="calibration status, parameters, and failure evidence conflict",
             )
 
 
