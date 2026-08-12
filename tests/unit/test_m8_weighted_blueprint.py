@@ -119,6 +119,49 @@ def _weighted_bundle() -> KnowledgeBundle:
     )
 
 
+def _unweighted_score_bundle(
+    scores: list[float],
+    *,
+    item_count: int,
+    section_score: float,
+    anchor_indexes: list[int] | None = None,
+) -> KnowledgeBundle:
+    base = make_knowledge_bundle(subjective=False)
+    source_item = base.items[0]
+    source_q = base.q_matrix[0]
+    items = [
+        source_item.model_copy(
+            update={
+                "item_id": f"item_score_{index}",
+                "answer_key": {"answer": "yes", "max_score": score},
+            }
+        )
+        for index, score in enumerate(scores)
+    ]
+    anchors = anchor_indexes or []
+    section = base.blueprints[0].sections[0].model_copy(
+        update={
+            "item_count": item_count,
+            "score": section_score,
+            "concept_weights": {},
+            "anchor_item_ids": [items[index].item_id for index in anchors],
+        }
+    )
+    blueprint = base.blueprints[0].model_copy(
+        update={"sections": [section], "total_score": section_score}
+    )
+    return base.model_copy(
+        update={
+            "items": items,
+            "blueprints": [blueprint],
+            "q_matrix": [
+                source_q.model_copy(update={"item_id": item.item_id})
+                for item in items
+            ],
+        }
+    )
+
+
 def test_largest_remainder_allocates_ten_ninety_quota() -> None:
     assert allocate_concept_targets({"c1": 0.1, "c2": 0.9}, 10) == {
         "c1": 1,
@@ -138,6 +181,53 @@ def test_ten_items_follow_ten_ninety_concept_weights() -> None:
         counts[item.concept_ids[0]] += 1
 
     assert counts == {"c1": 1, "c2": 9}
+
+
+def test_unweighted_generation_backtracks_to_a_valid_score_combination() -> None:
+    bundle = _unweighted_score_bundle(
+        [2.0, 1.0],
+        item_count=1,
+        section_score=1.0,
+    )
+
+    paper = PaperGenerator(FixedClock(UTC_TIME)).generate(
+        make_task_plan(), bundle, None, None
+    )
+
+    assert [item.item_id for item in paper.all_items()] == ["item_score_1"]
+
+
+def test_unweighted_generation_keeps_anchor_while_backtracking() -> None:
+    bundle = _unweighted_score_bundle(
+        [2.0, 2.0, 1.0],
+        item_count=2,
+        section_score=3.0,
+        anchor_indexes=[0],
+    )
+
+    paper = PaperGenerator(FixedClock(UTC_TIME)).generate(
+        make_task_plan(), bundle, None, None
+    )
+
+    assert [item.item_id for item in paper.all_items()] == [
+        "item_score_0",
+        "item_score_2",
+    ]
+
+
+def test_unweighted_generation_chooses_the_first_stable_valid_combination() -> None:
+    bundle = _unweighted_score_bundle(
+        [1.0, 1.0],
+        item_count=1,
+        section_score=1.0,
+    )
+    generator = PaperGenerator(FixedClock(UTC_TIME))
+
+    first = generator.generate(make_task_plan(), bundle, None, None)
+    second = generator.generate(make_task_plan(), bundle, None, None)
+
+    assert first == second
+    assert first.all_items()[0].item_id == "item_score_0"
 
 
 @pytest.mark.parametrize(

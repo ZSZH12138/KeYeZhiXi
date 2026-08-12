@@ -187,6 +187,14 @@ class PaperGenerator:
             *[item for item in remaining if item.is_objective()],
             *[item for item in remaining if not item.is_objective()],
         ]
+        if (
+            not section.concept_weights
+            and len(anchors) + len(ordered_candidates) < section.item_count
+        ):
+            self._raise_section_unsatisfiable(
+                section,
+                "not enough approved items",
+            )
         selected = (
             self._select_weighted_items(
                 section,
@@ -195,7 +203,12 @@ class PaperGenerator:
                 ordered_candidates,
             )
             if section.concept_weights
-            else [*anchors, *ordered_candidates][0 : section.item_count]
+            else self._select_unweighted_items(
+                section,
+                knowledge_bundle,
+                anchors,
+                ordered_candidates,
+            )
         )
         if len(selected) != section.item_count:
             self._raise_section_unsatisfiable(section, "not enough approved items")
@@ -224,6 +237,66 @@ class PaperGenerator:
             items=instances,
             score=section.score,
         )
+
+    def _select_unweighted_items(
+        self,
+        section: BlueprintSection,
+        knowledge_bundle: KnowledgeBundle,
+        anchors: list[ItemCard],
+        candidates: list[ItemCard],
+    ) -> list[ItemCard]:
+        ordered = [*anchors, *candidates]
+        scores = [item.max_score(knowledge_bundle) for item in ordered]
+        failed: set[tuple[int, int, float]] = set()
+
+        def search(
+            index: int,
+            slots: int,
+            score: float,
+        ) -> list[ItemCard] | None:
+            key = (index, slots, round(score, 9))
+            if key in failed:
+                return None
+            if slots == 0:
+                if math.isclose(
+                    score,
+                    section.score,
+                    rel_tol=0.0,
+                    abs_tol=_SCORE_TOLERANCE,
+                ):
+                    return []
+                failed.add(key)
+                return None
+            if (
+                index >= len(ordered)
+                or len(ordered) - index < slots
+                or score > section.score + _SCORE_TOLERANCE
+            ):
+                failed.add(key)
+                return None
+
+            item = ordered[index]
+            tail = search(
+                index + 1,
+                slots - 1,
+                score + scores[index],
+            )
+            if tail is not None:
+                return [item, *tail]
+            if index >= len(anchors):
+                tail = search(index + 1, slots, score)
+                if tail is not None:
+                    return tail
+            failed.add(key)
+            return None
+
+        selected = search(0, section.item_count, 0.0)
+        if selected is None:
+            self._raise_section_unsatisfiable(
+                section,
+                "no item combination has maxima matching the section score",
+            )
+        return selected
 
     def _select_weighted_items(
         self,

@@ -392,6 +392,11 @@ git add src/course_insight/modules/m8_assessment_scoring src/course_insight/infr
 git commit -m "fix: make M8 papers scoring and history durable"
 ```
 
+**补充验收（2026-08-12）：** 无概念权重的分区现已按题数、总分和锚题执行
+确定性组合搜索，不再因为题库首题分值不合适而错报无解。专项测试 84 项、真实
+PostgreSQL 测试 4 项、全量测试 1306 项均通过，整体覆盖率为 87.57%。详细过程见
+`docs/superpowers/plans/2026-08-12-m8-unweighted-blueprint-selection-repair.md`。
+
 ---
 
 ### Task 5: 实现真实 DINA 认知诊断
