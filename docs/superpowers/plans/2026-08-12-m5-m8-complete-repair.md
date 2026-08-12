@@ -1027,4 +1027,3 @@ git commit -m "test: verify complete M5 M8 learning workflow"
 - 已明确解决旧分支落后主线和 9 个合并冲突的方式。
 - 已为 SQLite、PostgreSQL、服务重启、并发写入、历史不可变和模型质量设置验收测试。
 - 没有保留以固定值、普通答对率或空列表冒充完成结果的路径。
-

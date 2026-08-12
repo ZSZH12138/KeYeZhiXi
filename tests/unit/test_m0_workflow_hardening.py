@@ -561,8 +561,8 @@ def test_sqlite_v13_migration_preserves_v12_rows_with_null_policy_identity(
             WHERE operation_id = 'legacy-v12'
             """
         ).fetchone()
-        assert SCHEMA_VERSION == 13
-        assert current_schema_version(connection) == 13
+        assert SCHEMA_VERSION == 14
+        assert current_schema_version(connection) == 14
         assert {
             "policy_id",
             "adapter_id",

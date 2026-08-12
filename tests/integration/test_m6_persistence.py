@@ -326,7 +326,7 @@ def test_migration_v3_creates_m6_decision_table_with_required_keys(
         migrate(connection)
         migrate(connection)
 
-        assert SCHEMA_VERSION == 13
+        assert SCHEMA_VERSION == 14
         assert current_schema_version(connection) == SCHEMA_VERSION
         versions = [
             int(row[0])
