@@ -150,6 +150,60 @@ def _high_dimensional_case() -> tuple[
     return cohort, q_matrix
 
 
+def _disconnected_component_case() -> tuple[
+    list[LearningObservationBatch],
+    list[QMatrixEntry],
+]:
+    q_matrix = [
+        QMatrixEntry(
+            item_id=f"disconnected_item_{item_index}",
+            item_version="1.0.0",
+            concept_id=f"disconnected_concept_{item_index}",
+            weight=1.0,
+        )
+        for item_index in range(13)
+    ]
+    cohort: list[LearningObservationBatch] = []
+    for learner_index in range(4):
+        learner_id = f"disconnected_learner_{learner_index}"
+        observations = [
+            LearningObservation(
+                observation_id=f"disconnected_obs_{learner_index}_{item_index}",
+                learner_id=learner_id,
+                course_id="course_1",
+                class_id="class_1",
+                attempt_id=f"disconnected_attempt_{learner_index}",
+                item_id=f"disconnected_item_{item_index}",
+                item_version="1.0.0",
+                concept_ids=[f"disconnected_concept_{item_index}"],
+                score=float((learner_index + item_index) % 2 == 0),
+                max_score=1.0,
+                response_outcome=(
+                    "correct"
+                    if (learner_index + item_index) % 2 == 0
+                    else "incorrect"
+                ),
+                outcome_policy_version="binary-policy-1",
+                source_audit_id=(
+                    f"disconnected_audit_{learner_index}_{item_index}"
+                ),
+                source_audit_version=1,
+                occurred_at=NOW + timedelta(minutes=item_index),
+            )
+            for item_index in range(13)
+        ]
+        cohort.append(
+            LearningObservationBatch(
+                batch_id=f"disconnected_batch_{learner_index}",
+                learner_id=learner_id,
+                observations=observations,
+                watermark=f"disconnected_watermark_{learner_index}",
+                created_at=NOW + timedelta(hours=learner_index),
+            )
+        )
+    return cohort, q_matrix
+
+
 def test_mastered_profile_uses_one_minus_slip() -> None:
     """Catch treating a capable learner's success probability as slip."""
 
@@ -305,6 +359,28 @@ def test_high_dimensional_connected_q_matrix_uses_variational_inference() -> Non
     assert diagnosis.status == "estimated"
     assert len(diagnosis.concept_mastery) == 20
     assert all(0.0 <= value <= 1.0 for value in diagnosis.concept_mastery.values())
+
+
+def test_disconnected_q_matrix_uses_exact_inference_per_component() -> None:
+    """Catch selecting variational DINA from total rather than component size."""
+
+    from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+
+    cohort, q_matrix = _disconnected_component_case()
+    engine = DinaEngine(
+        min_students=4,
+        min_responses_per_item=4,
+        max_iterations=20,
+        max_exact_concepts=12,
+    )
+
+    model = engine.fit(cohort, q_matrix)
+    diagnosis = engine.infer(model, cohort[0])
+
+    assert model.inference_mode == "exact"
+    assert len(model.concept_ids) == 13
+    assert len(model.item_parameters) == 13
+    assert len(diagnosis.concept_mastery) == 13
 
 
 def test_sqlite_repository_persists_observations_and_append_only_dina_models(

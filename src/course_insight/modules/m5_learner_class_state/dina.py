@@ -8,7 +8,6 @@ import json
 import math
 from collections import defaultdict
 from collections.abc import Mapping, Set
-from datetime import datetime
 from typing import TypeAlias
 
 from course_insight.contracts.errors import DomainError
@@ -19,6 +18,15 @@ from course_insight.contracts.learning_models import (
     DinaModelArtifact,
     LearningObservation,
     LearningObservationBatch,
+)
+from course_insight.modules.m5_learner_class_state.dina_components import (
+    InferenceMode,
+    PreparedData,
+    component_data,
+    component_model,
+    connected_components,
+    merge_component_models,
+    validate_inference_scope,
 )
 
 
@@ -86,9 +94,25 @@ class DinaEngine:
         cohort: list[LearningObservationBatch],
         q_matrix: list[QMatrixEntry],
     ) -> DinaModelArtifact:
-        """Fit an exact-posterior DINA model from governed observations."""
+        """Fit DINA independently for each connected Q-matrix component."""
 
         prepared = self._prepare_training_data(cohort, q_matrix)
+        requirements = prepared[4]
+        components = connected_components(requirements)
+        component_models = [
+            self._fit_prepared(component_data(prepared, component))
+            for component in components
+        ]
+        if len(component_models) == 1:
+            return component_models[0]
+        return merge_component_models(prepared, component_models)
+
+    def _fit_prepared(self, prepared: PreparedData) -> DinaModelArtifact:
+        if len(prepared[3]) > self._max_exact_concepts:
+            return self._fit_variational(prepared)
+        return self._fit_exact(prepared)
+
+    def _fit_exact(self, prepared: PreparedData) -> DinaModelArtifact:
         (
             course_id,
             class_id,
@@ -98,8 +122,6 @@ class DinaEngine:
             responses_by_learner,
             item_counts,
         ) = prepared
-        if len(concept_ids) > self._max_exact_concepts:
-            return self._fit_variational(prepared)
         profiles = list(itertools.product((False, True), repeat=len(concept_ids)))
         priors = {concept_id: 0.5 for concept_id in concept_ids}
         item_estimates = {
@@ -181,7 +203,7 @@ class DinaEngine:
     ) -> dict[Profile, float]:
         """Return normalized exact mastery-profile probabilities."""
 
-        self._validate_inference_scope(model, batch)
+        validate_inference_scope(model, batch)
         if model.inference_mode != "exact":
             raise DomainError(
                 code="DINA_INFERENCE_MODE_MISMATCH",
@@ -229,21 +251,59 @@ class DinaEngine:
         model: DinaModelArtifact,
         batch: LearningObservationBatch,
     ) -> CognitiveDiagnosisResult:
-        """Infer marginal concept mastery for one learner batch."""
+        """Infer marginals independently for each connected model component."""
 
-        if model.inference_mode == "exact":
-            posterior = self.profile_posterior(model, batch)
-            mastery = {
-                concept_id: math.fsum(
-                    probability
-                    for profile, probability in posterior.items()
-                    if profile[index]
-                )
-                for index, concept_id in enumerate(model.concept_ids)
+        validate_inference_scope(model, batch)
+        requirements = {
+            (item.item_id, item.item_version): frozenset(item.concept_ids)
+            for item in model.item_parameters
+        }
+        components = connected_components(requirements)
+        observed_items = {
+            (observation.item_id, observation.item_version)
+            for observation in batch.observations
+        }
+        mastery: dict[str, float] = {}
+        for component in components:
+            component_items = {
+                item_key
+                for item_key, required in requirements.items()
+                if required <= component
             }
-        else:
-            self._validate_inference_scope(model, batch)
-            mastery = self._variational_inference(model, batch)
+            if not component_items & observed_items:
+                mastery.update(
+                    {
+                        concept_id: model.attribute_priors[concept_id]
+                        for concept_id in sorted(component)
+                    }
+                )
+                continue
+            inference_mode: InferenceMode = (
+                "exact"
+                if len(component) <= self._max_exact_concepts
+                else "variational"
+            )
+            projected_model = component_model(
+                model,
+                component,
+                inference_mode=inference_mode,
+            )
+            if inference_mode == "exact":
+                posterior = self.profile_posterior(projected_model, batch)
+                mastery.update(
+                    {
+                        concept_id: math.fsum(
+                            probability
+                            for profile, probability in posterior.items()
+                            if profile[index]
+                        )
+                        for index, concept_id in enumerate(
+                            projected_model.concept_ids
+                        )
+                    }
+                )
+            else:
+                mastery.update(self._variational_inference(projected_model, batch))
         digest = hashlib.sha256(
             f"{model.model_version}:{batch.content_checksum()}".encode("utf-8")
         ).hexdigest()
@@ -262,15 +322,7 @@ class DinaEngine:
         self,
         cohort: list[LearningObservationBatch],
         q_matrix: list[QMatrixEntry],
-    ) -> tuple[
-        str,
-        str,
-        datetime,
-        list[str],
-        dict[ItemKey, frozenset[str]],
-        dict[str, list[tuple[ItemKey, bool]]],
-        dict[ItemKey, int],
-    ]:
+    ) -> PreparedData:
         active_entries = [entry for entry in q_matrix if entry.is_active()]
         requirements: dict[ItemKey, set[str]] = defaultdict(set)
         for entry in active_entries:
@@ -336,15 +388,7 @@ class DinaEngine:
 
     def _fit_variational(
         self,
-        prepared: tuple[
-            str,
-            str,
-            datetime,
-            list[str],
-            dict[ItemKey, frozenset[str]],
-            dict[str, list[tuple[ItemKey, bool]]],
-            dict[ItemKey, int],
-        ],
+        prepared: PreparedData,
     ) -> DinaModelArtifact:
         (
             course_id,
@@ -741,24 +785,6 @@ class DinaEngine:
                 _clip(guess, 0.01, 0.40),
             ]
         return priors, estimates
-
-    @staticmethod
-    def _validate_inference_scope(
-        model: DinaModelArtifact,
-        batch: LearningObservationBatch,
-    ) -> None:
-        if any(
-            observation.course_id != model.course_id
-            or observation.class_id != model.class_id
-            or observation.learner_id != batch.learner_id
-            for observation in batch.observations
-        ):
-            raise DomainError(
-                code="MODEL_SCOPE_MISMATCH",
-                module="m5",
-                message="DINA inference batch does not match the model scope",
-                recoverable=True,
-            )
 
     @staticmethod
     def _raise_insufficient(reason: str) -> None:
