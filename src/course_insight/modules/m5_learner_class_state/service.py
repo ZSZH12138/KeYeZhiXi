@@ -28,6 +28,9 @@ from course_insight.contracts.state import (
 from course_insight.modules.m5_learner_class_state.repository import M5Repository
 from course_insight.modules.m5_learner_class_state.dina import DinaEngine
 from course_insight.modules.m5_learner_class_state.bkt import BktEngine
+from course_insight.modules.m5_learner_class_state.learning_history import (
+    build_complete_history_batch,
+)
 from course_insight.modules.m5_learner_class_state.aggregation import (
     DeterministicClassAggregationPolicy,
 )
@@ -663,6 +666,13 @@ class M5StateService:
             authoritative = observation_writer(observation_batch.model_copy(deep=True))
             if authoritative != observation_batch:
                 raise RuntimeError("M5 learning observation replay conflict")
+        history_batch = build_complete_history_batch(
+            self._repository,
+            observation_batch,
+            course_id=knowledge_bundle.course_id,
+            class_id=class_id,
+        )
+        observations = history_batch.observations
 
         dina_model = self._latest_dina_model
         if (
@@ -706,7 +716,7 @@ class M5StateService:
                 recoverable=True,
             )
 
-        diagnosis = self._dina_engine.infer(dina_model, observation_batch)
+        diagnosis = self._dina_engine.infer(dina_model, history_batch)
         probabilities: dict[str, float] = {}
         audit_keys: set[str] = set()
         for concept_id in sorted(governed_concepts):
@@ -728,15 +738,15 @@ class M5StateService:
             ]
             sequence = ConceptResponseSequence(
                 sequence_id=(
-                    f"sequence_{observation_batch.batch_id}_{concept_id}"
+                    f"sequence_{history_batch.batch_id}_{concept_id}"
                 ),
                 learner_id=observation_batch.learner_id,
                 course_id=knowledge_bundle.course_id,
                 class_id=class_id,
                 concept_id=concept_id,
                 responses=concept_observations,
-                watermark=observation_batch.watermark,
-                created_at=observation_batch.created_at,
+                watermark=history_batch.watermark,
+                created_at=history_batch.created_at,
             )
             trace = self._bkt_engine.update(bkt_model, sequence)
             probabilities[concept_id] = trace.concept_probabilities[concept_id]
@@ -744,7 +754,7 @@ class M5StateService:
         digest = hashlib.sha256(
             (
                 f"{dina_model.model_version}:{bkt_model.model_version}:"
-                f"{observation_batch.content_checksum()}"
+                f"{history_batch.content_checksum()}"
             ).encode("utf-8")
         ).hexdigest()
         combined_trace = KnowledgeTraceSnapshot(
@@ -755,11 +765,11 @@ class M5StateService:
             model_type="BKT",
             model_version=bkt_model.model_version,
             concept_probabilities=probabilities,
-            observation_watermark=observation_batch.watermark,
+            observation_watermark=history_batch.watermark,
             observation_count=len(observations),
             processed_audit_keys=sorted(audit_keys),
             status="estimated",
-            updated_at=observation_batch.created_at,
+            updated_at=history_batch.created_at,
         )
         trace_writer = getattr(
             self._repository,
@@ -777,5 +787,5 @@ class M5StateService:
             knowledge_trace=combined_trace,
             observation_count=len(observations),
             status="completed",
-            created_at=observation_batch.created_at,
+            created_at=history_batch.created_at,
         )

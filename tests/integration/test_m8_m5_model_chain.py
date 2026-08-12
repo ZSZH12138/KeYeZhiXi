@@ -3,11 +3,16 @@
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
-from course_insight.contracts.learning_models import ConceptResponseSequence
+from course_insight.contracts.learning_models import (
+    ConceptResponseSequence,
+    LearningObservation,
+    LearningObservationBatch,
+)
 from course_insight.application.coordinator import AppCoordinator
 from course_insight.infrastructure.sqlite.m5_repository import SQLiteM5Repository
 from course_insight.modules.m5_learner_class_state.aggregation import (
@@ -166,3 +171,106 @@ def test_coordinator_forwards_real_observations_and_knowledge_to_m5() -> None:
 
     assert result == "model-run"
     assert m5.received == (observations, knowledge)
+
+
+def test_learning_models_replay_complete_history_after_restart(
+    tmp_path: Path,
+) -> None:
+    """Catch BKT restarting from its prior for every assessment batch."""
+
+    repository = SQLiteM5Repository(tmp_path / "model-history.sqlite3")
+    repository.initialize()
+    dina_engine = DinaEngine(
+        min_students=4,
+        min_responses_per_item=4,
+        max_iterations=30,
+    )
+    bkt_engine = BktEngine(
+        min_students=4,
+        min_observations_per_student=5,
+        max_iterations=50,
+    )
+    service = M5StateService(
+        repository,
+        DeterministicStateUpdatePolicy(),
+        DeterministicClassAggregationPolicy(),
+        dina_engine=dina_engine,
+        bkt_engine=bkt_engine,
+    )
+    service.fit_dina_model(_training_cohort(), _q_matrix())
+    bkt_model = service.fit_bkt_model(
+        [
+            _sequence(
+                f"training_learner_{index}",
+                outcomes,
+                concept_id="concept_2",
+            )
+            for index, outcomes in enumerate(
+                (
+                    [True, True, False, True, True],
+                    [False, True, True, True, False],
+                    [False, False, True, True, True],
+                    [True, False, False, True, False],
+                ),
+                start=1,
+            )
+        ]
+    )
+    occurred_at = datetime(2026, 8, 12, 16, 0, tzinfo=UTC)
+
+    def batch(index: int, *, correct: bool) -> LearningObservationBatch:
+        observation = LearningObservation(
+            observation_id=f"history_observation_{index}",
+            learner_id="history_learner",
+            course_id="course_1",
+            class_id="class_1",
+            attempt_id=f"history_attempt_{index}",
+            item_id="item_2",
+            item_version="1.0.0",
+            concept_ids=["concept_2"],
+            score=1.0 if correct else 0.0,
+            max_score=1.0,
+            response_outcome="correct" if correct else "incorrect",
+            outcome_policy_version="binary-policy-1",
+            source_audit_id=f"history_audit_{index}",
+            source_audit_version=1,
+            occurred_at=occurred_at + timedelta(minutes=index),
+        )
+        return LearningObservationBatch(
+            batch_id=f"history_batch_{index}",
+            learner_id=observation.learner_id,
+            observations=[observation],
+            watermark=f"history_watermark_{index}",
+            created_at=observation.occurred_at,
+        )
+
+    knowledge = make_knowledge_bundle(subjective=False)
+    first_batch = batch(1, correct=True)
+    second_batch = batch(2, correct=False)
+    service.run_learning_models(first_batch, knowledge)
+    second = service.run_learning_models(second_batch, knowledge)
+    expected = bkt_engine.update(
+        bkt_model,
+        _sequence(
+            "history_learner",
+            [True, False],
+            concept_id="concept_2",
+        ),
+    )
+
+    assert second.observation_count == 2
+    assert second.knowledge_trace.observation_count == 2
+    assert second.knowledge_trace.concept_probabilities["concept_2"] == pytest.approx(
+        expected.concept_probabilities["concept_2"]
+    )
+
+    restarted = M5StateService(
+        repository,
+        DeterministicStateUpdatePolicy(),
+        DeterministicClassAggregationPolicy(),
+        dina_engine=DinaEngine(),
+        bkt_engine=BktEngine(),
+    )
+    replay = restarted.run_learning_models(second_batch, knowledge)
+
+    assert replay == second
