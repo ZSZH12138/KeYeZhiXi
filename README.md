@@ -379,9 +379,10 @@ class_aggregation_policy: Any)`。
   state_policy_path: Path) -> StateUpdateResult`：scoring 来自 M8、bundle 来自 M3、
   前版状态来自本模块；输出给 M6/M9；错误 `INSUFFICIENT_EVIDENCE`、
   `STALE_STATE_VERSION`、`STATE_POLICY_INVALID`、`STATE_REFERENCE_MISMATCH`。
-- `run_learning_models(observation_batch: LearningObservationBatch)
-  -> LearningModelRun`：为同一学习者返回对齐的空 DINA 认知诊断与空 BKT
-  知识追踪；不做概率估计。
+- `run_learning_models(observation_batch: LearningObservationBatch,
+  knowledge_bundle: KnowledgeBundle|None=None) -> LearningModelRun`：空观测保留
+  `empty` 架构语义；正式观测使用已训练且已收敛的 DINA/BKT 模型和完整治理历史，
+  返回认知诊断、知识追踪、模型版本与审计水位。数据或模型不足时明确失败。
 
 ### M6TutoringControlService
 

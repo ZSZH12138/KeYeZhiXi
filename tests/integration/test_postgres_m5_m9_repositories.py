@@ -222,9 +222,10 @@ def test_postgres_m5_model_runtime_round_trip(
     bkt_engine = BktEngine(
         min_students=4,
         min_observations_per_student=5,
-        max_iterations=50,
+        max_iterations=200,
     )
     bkt_model = bkt_engine.fit(sequences)
+    assert bkt_model.converged
     trace = bkt_engine.update(bkt_model, sequences[0])
 
     assert repository.insert_or_get_bkt_model(bkt_model) == bkt_model

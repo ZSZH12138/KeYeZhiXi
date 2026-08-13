@@ -284,9 +284,10 @@ def test_postgres_m5_persists_bkt_models_and_knowledge_traces() -> None:
     engine = BktEngine(
         min_students=4,
         min_observations_per_student=5,
-        max_iterations=50,
+        max_iterations=200,
     )
     model = engine.fit(sequences)
+    assert model.converged
     trace = engine.update(model, sequences[0])
 
     def respond(statement: str, _: tuple[Any, ...]):

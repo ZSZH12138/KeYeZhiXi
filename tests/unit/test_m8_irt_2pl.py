@@ -140,6 +140,44 @@ def test_eap_ability_uses_only_approved_parameter_sets() -> None:
         )
 
 
+def test_ability_uses_only_latest_version_of_reviewed_audit() -> None:
+    """Catch an obsolete response cancelling the authoritative reviewed score."""
+
+    parameters = IRTParameterSet(
+        parameter_set_id="irt_approved_reviewed",
+        model_type="2PL",
+        version="irt-reviewed-v1",
+        item_parameters=[
+            IRTItemParameters(
+                item_id="item_0",
+                item_version="1.0.0",
+                discrimination=1.5,
+                difficulty=0.0,
+                guessing=0.0,
+                sample_size=200,
+            )
+        ],
+        sample_size=200,
+        status="approved",
+        created_at=NOW,
+    )
+    obsolete = _observation(0, 0, True)
+    reviewed = obsolete.model_copy(
+        update={
+            "observation_id": "obs_0_0_reviewed",
+            "source_audit_version": 2,
+            "score": 0.0,
+            "response_outcome": "incorrect",
+        }
+    )
+    calibrator = _calibrator()
+
+    result = calibrator.estimate_ability(parameters, [obsolete, reviewed])
+    latest_only = calibrator.estimate_ability(parameters, [reviewed])
+
+    assert result == latest_only
+
+
 def test_service_flattens_multiple_single_learner_batches_for_calibration() -> None:
     """Keep the learner-scoped batch contract while enabling cohort calibration."""
 
@@ -201,6 +239,37 @@ def test_identical_irt_request_replays_an_equal_result() -> None:
 
     assert first.status == "shadow"
     assert replay == first
+
+
+def test_calibration_uses_only_latest_version_of_reviewed_audit() -> None:
+    """Catch an obsolete score audit blocking an otherwise valid calibration."""
+
+    observations = [
+        _observation(learner, item, (learner + item) % 2 == 0)
+        for learner in range(8)
+        for item in range(3)
+    ]
+    obsolete = observations[0]
+    reviewed = obsolete.model_copy(
+        update={
+            "observation_id": "obs_0_0_reviewed",
+            "source_audit_version": 2,
+            "score": 0.0,
+            "response_outcome": "incorrect",
+        }
+    )
+    calibrator = _calibrator(
+        min_students=8,
+        min_responses_per_item=8,
+        min_items=3,
+        max_iterations=100,
+    )
+
+    result = calibrator.fit([*observations, reviewed], NOW)
+    latest_only = calibrator.fit([reviewed, *observations[1:]], NOW)
+
+    assert latest_only.status == "shadow"
+    assert result == latest_only
 
 
 def test_later_irt_run_reuses_parameters_without_reusing_run_identity() -> None:

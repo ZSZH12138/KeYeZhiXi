@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
+from typing import TYPE_CHECKING, cast
 
 from course_insight.contracts.assessment import (
     AssessmentPaper,
@@ -28,8 +29,45 @@ from course_insight.contracts.knowledge import (
 from course_insight.contracts.platform import AssessmentSubmission
 from course_insight.contracts.tasking import TaskPlan
 
+if TYPE_CHECKING:
+    from course_insight.modules.m8_assessment_scoring.service import (
+        M8AssessmentService,
+    )
+
 
 UTC_TIME = datetime(2026, 8, 12, 4, 0, tzinfo=timezone.utc)
+FIXED_TIME = datetime(2026, 7, 15, 9, 0, tzinfo=timezone(timedelta(hours=8)))
+
+
+class FixedClock:
+    """Deterministic clock available only to tests."""
+
+    def __init__(self, value: datetime = FIXED_TIME) -> None:
+        if value.tzinfo is None or value.utcoffset() is None:
+            raise ValueError("fixed clock requires a timezone-aware value")
+        self._value = value
+
+    def now(self) -> datetime:
+        return self._value
+
+
+def make_m8_test_service() -> M8AssessmentService:
+    """Build the real M8 service with lightweight test-only dependencies."""
+
+    from course_insight.modules.m8_assessment_scoring.paper_generator import (
+        PaperGenerator,
+    )
+    from course_insight.modules.m8_assessment_scoring.repository import M8Repository
+    from course_insight.modules.m8_assessment_scoring.rule_scorer import RuleScorer
+    from course_insight.modules.m8_assessment_scoring.service import M8AssessmentService
+
+    clock = FixedClock()
+    return M8AssessmentService(
+        cast(M8Repository, object()),
+        RuleScorer(clock),
+        PaperGenerator(clock),
+        clock,
+    )
 
 
 def make_rubric(*, version: str = "1.0.0", rubric_id: str = "rubric_1") -> Rubric:

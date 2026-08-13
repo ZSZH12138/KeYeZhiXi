@@ -14,10 +14,17 @@ from course_insight.contracts.analytics import (
     TeacherReviewDecision,
 )
 from course_insight.contracts.errors import DomainError
+from course_insight.contracts.learning_models import (
+    BktConceptParameters,
+    BktModelArtifact,
+    ConceptResponse,
+    ConceptResponseSequence,
+)
 from course_insight.contracts.platform import TeacherReviewSubmission
 from course_insight.infrastructure.sqlite.m5_repository import SQLiteM5Repository
 from course_insight.infrastructure.sqlite.m8_repository import SQLiteM8Repository
 from course_insight.infrastructure.sqlite.m9_repository import SQLiteM9Repository
+from course_insight.modules.m5_learner_class_state.bkt import BktEngine
 from course_insight.modules.m5_learner_class_state.learning_history import (
     build_complete_history_batch,
 )
@@ -276,6 +283,85 @@ def test_confirmed_review_produces_only_the_new_audit_version(
     assert len(history.observations) == 1
     assert history.observations[0].source_audit_id == decision.audit_id
     assert history.observations[0].source_audit_version == 2
+
+
+def test_teacher_override_replaces_v1_in_m5_bkt_tracing(tmp_path: Path) -> None:
+    """M5 must learn from the teacher's v2 outcome, never v1 plus v2."""
+
+    _, service, original = _runtime(tmp_path / "override-to-bkt.sqlite3")
+    decision = _decision(
+        original,
+        decision_id="review_override_to_bkt",
+        decision="override",
+    )
+    reviewed = service.apply_teacher_review(original, decision)
+    original_observation = service.build_observation_batch(
+        original.paper_id,
+        original,
+    ).observations[0]
+    reviewed_observation = service.build_observation_batch(
+        reviewed.paper_id,
+        reviewed,
+    ).observations[0]
+    concept_id = reviewed_observation.concept_ids[0]
+
+    def response(observation) -> ConceptResponse:
+        return ConceptResponse(
+            observation_id=observation.observation_id,
+            learner_id=observation.learner_id,
+            course_id=observation.course_id,
+            class_id=observation.class_id,
+            attempt_id=observation.attempt_id,
+            concept_id=concept_id,
+            is_correct=observation.response_outcome == "correct",
+            source_audit_id=observation.source_audit_id,
+            source_audit_version=observation.source_audit_version,
+            occurred_at=observation.occurred_at,
+        )
+
+    model = BktModelArtifact(
+        model_id="bkt_review_model",
+        course_id="course_1",
+        class_id="class_1",
+        model_version="bkt-review-v1",
+        concept_parameters=[
+            BktConceptParameters(
+                concept_id=concept_id,
+                prior=0.4,
+                learn=0.2,
+                guess=0.2,
+                slip=0.1,
+                learner_count=100,
+                observation_count=500,
+            )
+        ],
+        learner_count=100,
+        observation_count=500,
+        log_likelihood=-200.0,
+        iteration_count=20,
+        converged=True,
+        created_at=UTC_TIME,
+    )
+    history = ConceptResponseSequence(
+        sequence_id="teacher_review_history",
+        learner_id=reviewed_observation.learner_id,
+        course_id="course_1",
+        class_id="class_1",
+        concept_id=concept_id,
+        responses=[response(original_observation), response(reviewed_observation)],
+        watermark="teacher_review_history",
+        created_at=reviewed_observation.occurred_at,
+    )
+    latest_only = history.model_copy(
+        update={"responses": [response(reviewed_observation)]}
+    )
+
+    actual = BktEngine().update(model, history)
+    expected = BktEngine().update(model, latest_only)
+
+    assert actual.observation_count == 1
+    assert actual.processed_audit_keys == [f"{decision.audit_id}:v2"]
+    assert actual.concept_probabilities == expected.concept_probabilities
 
 
 def test_legacy_rejected_review_does_not_call_m5_state_update(

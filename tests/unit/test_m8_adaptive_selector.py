@@ -217,6 +217,36 @@ def test_meets_concept_quotas_before_free_selection() -> None:
     assert result.item_ids == ["quota_lower", "free_high"]
 
 
+def test_finds_a_feasible_multi_concept_combination_before_failing() -> None:
+    """Catch greedy ranking exhausting slots while a valid set still exists."""
+
+    parameters = _parameter_set(
+        ("concept_a_high", 2.5, 0.0),
+        ("concept_b_high", 2.0, 0.0),
+        ("concept_b_c_lower", 0.8, 0.0),
+    )
+    multi_concept_item = _item(
+        "concept_b_c_lower",
+        concept_id="concept_b",
+    ).model_copy(update={"concept_ids": ["concept_b", "concept_c"]})
+
+    result = _select(
+        policy=_policy(
+            max_items=2,
+            quotas={"concept_a": 1, "concept_b": 1, "concept_c": 1},
+        ),
+        parameter_set=parameters,
+        items=[
+            _item("concept_a_high", concept_id="concept_a"),
+            _item("concept_b_high", concept_id="concept_b"),
+            multi_concept_item,
+        ],
+    )
+
+    assert result.status == "selected"
+    assert result.item_ids == ["concept_a_high", "concept_b_c_lower"]
+
+
 def test_same_input_has_deterministic_tie_breaking() -> None:
     """Catch input order changing equal-information selection."""
 

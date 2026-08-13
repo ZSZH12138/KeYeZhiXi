@@ -55,11 +55,10 @@ from course_insight.modules.m8_assessment_scoring.rule_scorer import RuleScorer
 from course_insight.modules.m8_assessment_scoring.service import (
     M8AssessmentService,
 )
-from course_insight.modules.m8_assessment_scoring.stubs import FixedClock
 from course_insight.modules.m9_teacher_analytics.service import (
     M9TeacherAnalyticsService,
 )
-from tests.factories.m5_m8 import make_rubric
+from tests.factories.m5_m8 import FixedClock, make_rubric
 
 
 NOW = datetime(2026, 8, 13, 10, 0, tzinfo=UTC)

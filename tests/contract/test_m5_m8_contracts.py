@@ -70,3 +70,15 @@ def test_learning_observation_roundtrip_keeps_binary_policy() -> None:
     )
 
     assert restored == observation
+
+
+def test_m5_m8_public_modules_export_only_real_service_boundaries() -> None:
+    """Catch test-only placeholder services leaking into production imports."""
+
+    from course_insight.modules import m5_learner_class_state as m5
+    from course_insight.modules import m8_assessment_scoring as m8
+
+    assert m5.__all__ == ["M5Repository", "M5StateService"]
+    assert m8.__all__ == ["M8AssessmentService", "M8Repository"]
+    assert not hasattr(m5, "M5StateServiceStub")
+    assert not hasattr(m8, "M8AssessmentServiceStub")

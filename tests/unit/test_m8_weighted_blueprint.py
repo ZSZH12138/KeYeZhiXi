@@ -15,13 +15,18 @@ from course_insight.contracts.knowledge import (
     ParameterRule,
     QMatrixEntry,
 )
-from course_insight.contracts.state import LearnerStateSnapshot
-from course_insight.modules.m8_assessment_scoring.stubs import FixedClock
+from course_insight.contracts.state import (
+    ConceptState,
+    DiagnosisResult,
+    ItemDiagnosis,
+    LearnerStateSnapshot,
+)
 from course_insight.modules.m8_assessment_scoring.paper_generator import (
     PaperGenerator,
     allocate_concept_targets,
 )
 from tests.factories.m5_m8 import (
+    FixedClock,
     UTC_TIME,
     make_knowledge_bundle,
     make_task_plan,
@@ -162,6 +167,98 @@ def _unweighted_score_bundle(
     )
 
 
+def _personalization_bundle() -> KnowledgeBundle:
+    base = make_knowledge_bundle(subjective=False)
+    source_item = base.items[0]
+    source_concept = base.concepts[0]
+    source_q = base.q_matrix[0]
+    concept_ids = ("concept_1", "concept_2")
+    items = [
+        source_item.model_copy(
+            update={
+                "item_id": f"item_{concept_id}",
+                "concept_ids": [concept_id],
+            }
+        )
+        for concept_id in concept_ids
+    ]
+    section = base.blueprints[0].sections[0].model_copy(
+        update={"concept_weights": {}, "anchor_item_ids": []}
+    )
+    return base.model_copy(
+        update={
+            "concepts": [
+                source_concept.model_copy(
+                    update={"concept_id": concept_id, "name": concept_id}
+                )
+                for concept_id in concept_ids
+            ],
+            "items": items,
+            "blueprints": [
+                base.blueprints[0].model_copy(update={"sections": [section]})
+            ],
+            "q_matrix": [
+                source_q.model_copy(
+                    update={
+                        "item_id": item.item_id,
+                        "concept_id": item.concept_ids[0],
+                    }
+                )
+                for item in items
+            ],
+        }
+    )
+
+
+def _learner_state(mastery_by_concept: dict[str, float]) -> LearnerStateSnapshot:
+    return LearnerStateSnapshot(
+        snapshot_id="state_personalized",
+        course_id="course_1",
+        class_id="class_1",
+        learner_id="learner_1",
+        state_version=1,
+        concept_states=[
+            ConceptState(
+                concept_id=concept_id,
+                mastery_probability=mastery,
+                mastery_confidence=1.0,
+                misconceptions=[],
+                hint_dependency=0.0,
+                recent_correction_rate=mastery,
+                evidence_count=10,
+                updated_at=UTC_TIME,
+            )
+            for concept_id, mastery in mastery_by_concept.items()
+        ],
+        overall_mastery=math.fsum(mastery_by_concept.values())
+        / len(mastery_by_concept),
+        evidence_count=20,
+        updated_at=UTC_TIME,
+    )
+
+
+def _diagnosis(priority_concept_id: str) -> DiagnosisResult:
+    return DiagnosisResult(
+        diagnosis_id="diagnosis_personalized",
+        attempt_id="attempt_previous",
+        learner_id="learner_1",
+        item_diagnoses=[
+            ItemDiagnosis(
+                item_instance_id="previous_item_instance",
+                concept_ids=[priority_concept_id],
+                misconception_ids=[],
+                error_type="knowledge_gap",
+                confidence=1.0,
+                evidence_audit_ids=["audit_previous"],
+                prerequisite_gap_ids=[],
+            )
+        ],
+        priority_concept_ids=[priority_concept_id],
+        priority_misconception_ids=[],
+        generated_at=UTC_TIME,
+    )
+
+
 def test_largest_remainder_allocates_ten_ninety_quota() -> None:
     assert allocate_concept_targets({"c1": 0.1, "c2": 0.9}, 10) == {
         "c1": 1,
@@ -228,6 +325,86 @@ def test_unweighted_generation_chooses_the_first_stable_valid_combination() -> N
 
     assert first == second
     assert first.all_items()[0].item_id == "item_score_0"
+
+
+def test_generation_prefers_the_learners_weaker_concept_within_blueprint() -> None:
+    """Catch validating M5 state without using it to choose equivalent items."""
+
+    bundle = _personalization_bundle()
+    generator = PaperGenerator(FixedClock(UTC_TIME))
+
+    weak_concept_1 = generator.generate(
+        make_task_plan(),
+        bundle,
+        _learner_state({"concept_1": 0.1, "concept_2": 0.9}),
+        None,
+    )
+    weak_concept_2 = generator.generate(
+        make_task_plan(),
+        bundle,
+        _learner_state({"concept_1": 0.9, "concept_2": 0.1}),
+        None,
+    )
+
+    assert weak_concept_1.all_items()[0].item_id == "item_concept_1"
+    assert weak_concept_2.all_items()[0].item_id == "item_concept_2"
+    assert weak_concept_1.total_score() == weak_concept_2.total_score() == 1.0
+
+
+def test_generation_prefers_the_current_diagnosis_priority_within_blueprint() -> None:
+    """Catch validating M5 diagnosis without applying its teaching priority."""
+
+    paper = PaperGenerator(FixedClock(UTC_TIME)).generate(
+        make_task_plan(),
+        _personalization_bundle(),
+        None,
+        _diagnosis("concept_2"),
+    )
+
+    assert paper.all_items()[0].item_id == "item_concept_2"
+
+
+def test_empty_m5_evidence_keeps_the_existing_stable_item_order() -> None:
+    """Catch an empty state snapshot changing an otherwise stable paper."""
+
+    bundle = _personalization_bundle()
+    reversed_bundle = bundle.model_copy(update={"items": list(reversed(bundle.items))})
+    empty_state = LearnerStateSnapshot(
+        snapshot_id="state_empty",
+        course_id="course_1",
+        class_id="class_1",
+        learner_id="learner_1",
+        state_version=1,
+        concept_states=[],
+        overall_mastery=0.0,
+        evidence_count=0,
+        updated_at=UTC_TIME,
+    )
+
+    paper = PaperGenerator(FixedClock(UTC_TIME)).generate(
+        make_task_plan(),
+        reversed_bundle,
+        empty_state,
+        None,
+    )
+
+    assert paper.all_items()[0].item_id == "item_concept_2"
+
+
+def test_equal_m5_mastery_keeps_the_existing_stable_item_order() -> None:
+    """Catch equal personalization evidence arbitrarily reordering the pool."""
+
+    bundle = _personalization_bundle()
+    reversed_bundle = bundle.model_copy(update={"items": list(reversed(bundle.items))})
+
+    paper = PaperGenerator(FixedClock(UTC_TIME)).generate(
+        make_task_plan(),
+        reversed_bundle,
+        _learner_state({"concept_1": 0.5, "concept_2": 0.5}),
+        None,
+    )
+
+    assert paper.all_items()[0].item_id == "item_concept_2"
 
 
 @pytest.mark.parametrize(

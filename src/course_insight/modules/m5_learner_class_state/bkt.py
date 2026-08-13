@@ -16,6 +16,9 @@ from course_insight.contracts.learning_models import (
     ConceptResponseSequence,
     KnowledgeTraceSnapshot,
 )
+from course_insight.modules.m5_learner_class_state.learning_observation_evidence import (
+    select_current_concept_responses,
+)
 
 
 def _clip(value: float, lower: float, upper: float) -> float:
@@ -43,6 +46,22 @@ class BktEngine:
         self._min_observations_per_student = min_observations_per_student
         self._max_iterations = max_iterations
         self._tolerance = tolerance
+
+    @staticmethod
+    def require_converged(model: BktModelArtifact) -> None:
+        """Reject model artifacts that are not safe to publish or apply."""
+
+        if not model.converged:
+            raise DomainError(
+                code="MODEL_NOT_CONVERGED",
+                module="m5",
+                message="BKT tracing requires a converged model",
+                details={
+                    "model_type": "BKT",
+                    "model_version": model.model_version,
+                },
+                recoverable=True,
+            )
 
     @staticmethod
     def observation_update(
@@ -73,6 +92,7 @@ class BktEngine:
     ) -> KnowledgeTraceSnapshot:
         """Replay one governed concept sequence into its latest mastery state."""
 
+        self.require_converged(model)
         if model.course_id != sequence.course_id or model.class_id != sequence.class_id:
             raise DomainError(
                 code="MODEL_SCOPE_MISMATCH",
@@ -398,22 +418,16 @@ class BktEngine:
     def _deduplicate_responses(
         responses: list[ConceptResponse],
     ) -> list[ConceptResponse]:
-        governed: list[ConceptResponse] = []
-        seen: set[tuple[str, int]] = set()
-        for response in sorted(
-            responses,
-            key=lambda item: (
-                item.occurred_at,
-                item.attempt_id,
-                item.observation_id,
-            ),
-        ):
-            audit_key = (response.source_audit_id, response.source_audit_version)
-            if audit_key in seen:
-                continue
-            seen.add(audit_key)
-            governed.append(response)
-        return governed
+        return select_current_concept_responses(
+            sorted(
+                responses,
+                key=lambda item: (
+                    item.occurred_at,
+                    item.attempt_id,
+                    item.observation_id,
+                ),
+            )
+        )
 
     @staticmethod
     def _raise_insufficient(reason: str) -> None:

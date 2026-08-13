@@ -345,6 +345,52 @@ def test_dina_rejects_conflicting_content_for_one_source_audit_version() -> None
     assert captured.value.code == "LEARNING_OBSERVATION_AUDIT_CONFLICT"
 
 
+def test_dina_training_uses_only_the_latest_reviewed_audit_version() -> None:
+    """A teacher override must replace the old outcome during fitting."""
+
+    from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+
+    original_cohort = _training_cohort()
+    original = original_cohort[0].observations[0]
+    reviewed = original.model_copy(
+        update={
+            "observation_id": "reviewed_training_dina_observation",
+            "score": 0.0,
+            "response_outcome": "incorrect",
+            "source_audit_version": 2,
+        }
+    )
+    with_history = [
+        *original_cohort,
+        LearningObservationBatch(
+            batch_id="reviewed_training_dina_batch",
+            learner_id=reviewed.learner_id,
+            observations=[reviewed],
+            watermark="reviewed_training_dina_batch",
+            created_at=reviewed.occurred_at,
+        ),
+    ]
+    latest_only = [
+        original_cohort[0].model_copy(
+            update={
+                "observations": [reviewed, *original_cohort[0].observations[1:]]
+            }
+        ),
+        *original_cohort[1:],
+    ]
+    engine = DinaEngine(
+        min_students=4,
+        min_responses_per_item=4,
+        max_iterations=30,
+    )
+
+    actual = engine.fit(with_history, _q_matrix())
+    expected = engine.fit(latest_only, _q_matrix())
+
+    assert actual == expected
+    assert actual.observation_count == 8
+
+
 def test_profile_posterior_is_normalized_and_drives_mastery_direction() -> None:
     """Catch invalid posterior mass or diagnosis unrelated to responses."""
 
@@ -399,6 +445,103 @@ def test_profile_posterior_is_normalized_and_drives_mastery_direction() -> None:
     assert diagnosis.concept_mastery["concept_2"] < 0.5
 
 
+def test_dina_inference_uses_only_latest_reviewed_audit_version() -> None:
+    """Teacher overrides must replace old evidence during public inference."""
+
+    from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+
+    engine = DinaEngine(
+        min_students=4,
+        min_responses_per_item=4,
+        max_iterations=30,
+    )
+    model = engine.fit(_training_cohort(), _q_matrix())
+    original = _batch("learner_x", (True, False)).observations[0]
+    reviewed = original.model_copy(
+        update={
+            "observation_id": "reviewed_dina_observation",
+            "attempt_id": "reviewed_dina_attempt",
+            "score": 0.0,
+            "response_outcome": "incorrect",
+            "source_audit_version": 2,
+            "occurred_at": original.occurred_at + timedelta(minutes=1),
+        }
+    )
+    history = LearningObservationBatch(
+        batch_id="reviewed_dina_history",
+        learner_id=original.learner_id,
+        observations=[original, reviewed],
+        watermark="reviewed_dina_history",
+        created_at=reviewed.occurred_at,
+    )
+    latest_only = history.model_copy(
+        update={
+            "batch_id": "reviewed_dina_latest_only",
+            "observations": [reviewed],
+            "watermark": "reviewed_dina_latest_only",
+        }
+    )
+
+    actual = engine.infer(model, history)
+    expected = engine.infer(model, latest_only)
+
+    assert actual.observation_count == 1
+    assert actual.concept_mastery == expected.concept_mastery
+
+
+def test_dina_inference_rejects_conflicting_audit_version() -> None:
+    """The public inference path must reject contradictory immutable evidence."""
+
+    from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+
+    engine = DinaEngine(
+        min_students=4,
+        min_responses_per_item=4,
+        max_iterations=30,
+    )
+    model = engine.fit(_training_cohort(), _q_matrix())
+    original = _batch("learner_x", (True, False)).observations[0]
+    conflicting = original.model_copy(
+        update={
+            "observation_id": "conflicting_dina_observation",
+            "score": 0.0,
+            "response_outcome": "incorrect",
+        }
+    )
+    batch = LearningObservationBatch(
+        batch_id="conflicting_dina_history",
+        learner_id=original.learner_id,
+        observations=[original, conflicting],
+        watermark="conflicting_dina_history",
+        created_at=original.occurred_at,
+    )
+
+    with pytest.raises(DomainError) as captured:
+        engine.infer(model, batch)
+
+    assert captured.value.code == "LEARNING_OBSERVATION_AUDIT_CONFLICT"
+
+
+def test_inference_rejects_a_non_converged_dina_model() -> None:
+    """Catch publishing a diagnosis from a model that never converged."""
+
+    from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+
+    engine = DinaEngine(
+        min_students=4,
+        min_responses_per_item=4,
+        max_iterations=30,
+    )
+    model = engine.fit(_training_cohort(), _q_matrix()).model_copy(
+        update={"converged": False}
+    )
+
+    with pytest.raises(DomainError) as captured:
+        engine.infer(model, _batch("learner_x", (True, False)))
+
+    assert captured.value.code == "MODEL_NOT_CONVERGED"
+
+
 def test_high_dimensional_connected_q_matrix_uses_variational_inference() -> None:
     """Catch exponential profile enumeration for a connected 20-concept model."""
 
@@ -408,11 +551,12 @@ def test_high_dimensional_connected_q_matrix_uses_variational_inference() -> Non
     engine = DinaEngine(
         min_students=4,
         min_responses_per_item=4,
-        max_iterations=20,
+        max_iterations=1000,
         max_exact_concepts=12,
     )
 
     model = engine.fit(cohort, q_matrix)
+    assert model.converged
     diagnosis = engine.infer(model, cohort[0])
 
     assert model.inference_mode == "variational"
@@ -597,3 +741,43 @@ def test_m5_service_trains_persists_and_applies_dina(tmp_path: Path) -> None:
     ) == model
     assert diagnosis.model_version == model.model_version
     assert diagnosis.status == "estimated"
+
+
+def test_m5_service_does_not_publish_a_non_converged_dina_model(
+    tmp_path: Path,
+) -> None:
+    """Catch storing an unfinished DINA fit as the latest usable model."""
+
+    from course_insight.infrastructure.sqlite.m5_repository import SQLiteM5Repository
+    from course_insight.modules.m5_learner_class_state.aggregation import (
+        DeterministicClassAggregationPolicy,
+    )
+    from course_insight.modules.m5_learner_class_state.dina import DinaEngine
+    from course_insight.modules.m5_learner_class_state.service import M5StateService
+    from course_insight.modules.m5_learner_class_state.update_policy import (
+        DeterministicStateUpdatePolicy,
+    )
+
+    repository = SQLiteM5Repository(tmp_path / "m5-dina-non-converged.sqlite3")
+    repository.initialize()
+    engine = DinaEngine(
+        min_students=4,
+        min_responses_per_item=4,
+        max_iterations=1,
+    )
+    assert not engine.fit(_training_cohort(), _q_matrix()).converged
+    service = M5StateService(
+        repository,
+        DeterministicStateUpdatePolicy(),
+        DeterministicClassAggregationPolicy(),
+        dina_engine=engine,
+    )
+
+    with pytest.raises(DomainError) as captured:
+        service.fit_dina_model(_training_cohort(), _q_matrix())
+
+    assert captured.value.code == "MODEL_NOT_CONVERGED"
+    assert repository.get_latest_dina_model(
+        course_id="course_1",
+        class_id="class_1",
+    ) is None

@@ -115,6 +115,7 @@ class M5StateService:
                         "M5 persisted learning observations conflict with input"
                     )
         model = self._dina_engine.fit(cohort, q_matrix)
+        self._dina_engine.require_converged(model)
         model_writer = getattr(self._repository, "insert_or_get_dina_model", None)
         if callable(model_writer):
             authoritative_model = model_writer(model.model_copy(deep=True))
@@ -145,6 +146,7 @@ class M5StateService:
         model = self._bkt_engine.fit(
             [sequence.model_copy(deep=True) for sequence in sequences]
         )
+        self._bkt_engine.require_converged(model)
         writer = getattr(self._repository, "insert_or_get_bkt_model", None)
         if callable(writer):
             authoritative = writer(model.model_copy(deep=True))
@@ -705,6 +707,8 @@ class M5StateService:
                 message="DINA and BKT model versions must be trained before inference",
                 recoverable=True,
             )
+        self._dina_engine.require_converged(dina_model)
+        self._bkt_engine.require_converged(bkt_model)
         governed_concepts = {concept.concept_id for concept in knowledge_bundle.concepts}
         if not governed_concepts <= set(dina_model.concept_ids) or not governed_concepts <= {
             item.concept_id for item in bkt_model.concept_parameters

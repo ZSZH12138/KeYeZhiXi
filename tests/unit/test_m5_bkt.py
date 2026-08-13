@@ -132,6 +132,17 @@ def test_order_of_answers_changes_the_knowledge_trace() -> None:
     assert first.concept_probabilities != second.concept_probabilities
 
 
+def test_trace_rejects_a_non_converged_bkt_model() -> None:
+    """Catch publishing a knowledge trace from an unfinished BKT fit."""
+
+    model = _model().model_copy(update={"converged": False})
+
+    with pytest.raises(DomainError) as captured:
+        _engine().update(model, _sequence("learner_1", [True, False]))
+
+    assert captured.value.code == "MODEL_NOT_CONVERGED"
+
+
 def test_equal_timestamp_responses_are_ordered_by_attempt_then_observation() -> None:
     """Catch nondeterministic ordering when two audits have the same timestamp."""
 
@@ -192,6 +203,120 @@ def test_duplicate_audit_version_is_consumed_only_once() -> None:
     assert _engine().update(_model(), replay).concept_probabilities == (
         _engine().update(_model(), unique).concept_probabilities
     )
+
+
+def test_bkt_uses_only_the_latest_version_of_one_reviewed_audit() -> None:
+    """Teacher overrides must replace, rather than supplement, old evidence."""
+
+    from course_insight.contracts.learning_models import ConceptResponseSequence
+
+    original = _response("learner_1", 0, True)
+    reviewed = original.model_copy(
+        update={
+            "observation_id": "reviewed_observation",
+            "attempt_id": "reviewed_attempt",
+            "is_correct": False,
+            "source_audit_version": 2,
+            "occurred_at": NOW + timedelta(minutes=1),
+        }
+    )
+    history = ConceptResponseSequence(
+        sequence_id="reviewed_history",
+        learner_id=original.learner_id,
+        course_id=original.course_id,
+        class_id=original.class_id,
+        concept_id=original.concept_id,
+        responses=[original, reviewed],
+        watermark="reviewed_history",
+        created_at=reviewed.occurred_at,
+    )
+    latest_only = history.model_copy(
+        update={
+            "sequence_id": "reviewed_latest_only",
+            "responses": [reviewed],
+            "watermark": "reviewed_latest_only",
+        }
+    )
+
+    actual = _engine().update(_model(), history)
+    expected = _engine().update(_model(), latest_only)
+
+    assert actual.observation_count == 1
+    assert actual.processed_audit_keys == [
+        f"{reviewed.source_audit_id}:v2"
+    ]
+    assert actual.concept_probabilities == expected.concept_probabilities
+
+
+def test_bkt_rejects_conflicting_content_for_one_audit_version() -> None:
+    """One immutable audit version cannot carry two different outcomes."""
+
+    from course_insight.contracts.learning_models import ConceptResponseSequence
+
+    original = _response("learner_1", 0, True)
+    conflicting = original.model_copy(
+        update={
+            "observation_id": "conflicting_observation",
+            "is_correct": False,
+        }
+    )
+    sequence = ConceptResponseSequence(
+        sequence_id="conflicting_history",
+        learner_id=original.learner_id,
+        course_id=original.course_id,
+        class_id=original.class_id,
+        concept_id=original.concept_id,
+        responses=[original, conflicting],
+        watermark="conflicting_history",
+        created_at=NOW,
+    )
+
+    with pytest.raises(DomainError) as captured:
+        _engine().update(_model(), sequence)
+
+    assert captured.value.code == "LEARNING_OBSERVATION_AUDIT_CONFLICT"
+
+
+def test_bkt_training_uses_the_same_latest_audit_rule_as_tracing() -> None:
+    """Course fitting and learner tracing must not disagree after a review."""
+
+    sequences = [
+        _sequence("learner_1", [True, True, False, True, True]),
+        _sequence("learner_2", [False, True, True, True, False]),
+        _sequence("learner_3", [False, False, True, True, True]),
+        _sequence("learner_4", [True, False, False, True, False]),
+    ]
+    original = sequences[0].responses[0]
+    reviewed = original.model_copy(
+        update={
+            "observation_id": "reviewed_training_observation",
+            "is_correct": False,
+            "source_audit_version": 2,
+        }
+    )
+    with_history = [
+        sequences[0].model_copy(
+            update={"responses": [*sequences[0].responses, reviewed]}
+        ),
+        *sequences[1:],
+    ]
+    latest_only = [
+        sequences[0].model_copy(
+            update={"responses": [reviewed, *sequences[0].responses[1:]]}
+        ),
+        *sequences[1:],
+    ]
+    engine = _engine(
+        min_students=4,
+        min_observations_per_student=5,
+        max_iterations=200,
+    )
+
+    actual = engine.fit(with_history)
+    expected = engine.fit(latest_only)
+
+    assert actual == expected
+    assert actual.observation_count == 20
 
 
 def test_fit_rejects_sequences_below_the_governed_data_threshold() -> None:
@@ -260,7 +385,7 @@ def test_m5_service_persists_bkt_model_and_recovers_trace_after_restart(
     engine = BktEngine(
         min_students=4,
         min_observations_per_student=5,
-        max_iterations=50,
+        max_iterations=200,
     )
 
     def build_service() -> M5StateService:
@@ -306,6 +431,52 @@ def test_m5_service_persists_bkt_model_and_recovers_trace_after_restart(
     assert repository.get_knowledge_trace(
         trace_id=continued_after_restart.trace_id
     ) == continued_after_restart
+
+
+def test_m5_service_does_not_publish_a_non_converged_bkt_model(
+    tmp_path: Path,
+) -> None:
+    """Catch storing an unfinished BKT fit as the latest usable model."""
+
+    from course_insight.infrastructure.sqlite.m5_repository import SQLiteM5Repository
+    from course_insight.modules.m5_learner_class_state.aggregation import (
+        DeterministicClassAggregationPolicy,
+    )
+    from course_insight.modules.m5_learner_class_state.bkt import BktEngine
+    from course_insight.modules.m5_learner_class_state.service import M5StateService
+    from course_insight.modules.m5_learner_class_state.update_policy import (
+        DeterministicStateUpdatePolicy,
+    )
+
+    sequences = [
+        _sequence("learner_1", [True, True, False, True, True]),
+        _sequence("learner_2", [False, True, True, True, False]),
+        _sequence("learner_3", [False, False, True, True, True]),
+        _sequence("learner_4", [True, False, False, True, False]),
+    ]
+    repository = SQLiteM5Repository(tmp_path / "m5-bkt-non-converged.sqlite3")
+    repository.initialize()
+    engine = BktEngine(
+        min_students=4,
+        min_observations_per_student=5,
+        max_iterations=1,
+    )
+    assert not engine.fit(sequences).converged
+    service = M5StateService(
+        repository,
+        DeterministicStateUpdatePolicy(),
+        DeterministicClassAggregationPolicy(),
+        bkt_engine=engine,
+    )
+
+    with pytest.raises(DomainError) as captured:
+        service.fit_bkt_model(sequences)
+
+    assert captured.value.code == "MODEL_NOT_CONVERGED"
+    assert repository.get_latest_bkt_model(
+        course_id="course_1",
+        class_id="class_1",
+    ) is None
 
 
 def test_sqlite_bkt_history_rejects_identity_conflicts_and_missing_scope(

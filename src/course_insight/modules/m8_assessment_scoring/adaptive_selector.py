@@ -65,53 +65,12 @@ class AdaptiveItemSelector:
             candidate_items,
             administered_item_ids,
         )
-        selected: list[_Candidate] = []
-        available = list(candidates)
-        while len(selected) < policy.max_items and available:
-            unmet = {
-                concept_id
-                for concept_id, count in remaining_quotas.items()
-                if count > 0
-            }
-            constrained = [
-                candidate
-                for candidate in available
-                if unmet.intersection(candidate.item.concept_ids)
-            ]
-            if unmet and not constrained:
-                return self._failed_result(
-                    policy,
-                    ability_estimate,
-                    parameter_set,
-                    candidate_items,
-                    administered_item_ids,
-                    exposure_snapshot,
-                    selected_at,
-                )
-            pool = constrained if unmet else available
-            winner = min(
-                pool,
-                key=lambda candidate: (
-                    -candidate.information,
-                    candidate.item.item_id,
-                    candidate.item.version,
-                ),
-            )
-            selected = [*selected, winner]
-            available = [
-                candidate
-                for candidate in available
-                if candidate.item.item_id != winner.item.item_id
-            ]
-            remaining_quotas = {
-                concept_id: max(
-                    0,
-                    count - int(concept_id in winner.item.concept_ids),
-                )
-                for concept_id, count in remaining_quotas.items()
-            }
-
-        if not selected or any(count > 0 for count in remaining_quotas.values()):
+        feasible = self._choose_feasible_candidates(
+            candidates,
+            remaining_quotas,
+            policy.max_items,
+        )
+        if not feasible:
             return self._failed_result(
                 policy,
                 ability_estimate,
@@ -121,6 +80,7 @@ class AdaptiveItemSelector:
                 exposure_snapshot,
                 selected_at,
             )
+        selected = self._order_for_delivery(feasible, remaining_quotas)
         item_ids = [candidate.item.item_id for candidate in selected]
         selection_id = self._selection_id(
             status="selected",
@@ -160,6 +120,117 @@ class AdaptiveItemSelector:
             exponential = math.exp(argument)
             probability = exponential / (1.0 + exponential)
         return discrimination * discrimination * probability * (1.0 - probability)
+
+    @staticmethod
+    def _choose_feasible_candidates(
+        candidates: list[_Candidate],
+        remaining_quotas: dict[str, int],
+        max_items: int,
+    ) -> list[_Candidate] | None:
+        """Find the highest-information set that satisfies every quota."""
+
+        if not candidates:
+            return None
+        ordered = sorted(
+            candidates,
+            key=lambda candidate: (candidate.item.item_id, candidate.item.version),
+        )
+        concepts = tuple(
+            sorted(
+                concept_id
+                for concept_id, count in remaining_quotas.items()
+                if count > 0
+            )
+        )
+        targets = tuple(remaining_quotas[concept_id] for concept_id in concepts)
+        target_count = min(max_items, len(ordered))
+        highest_information = sorted(
+            ordered,
+            key=lambda candidate: (
+                -candidate.information,
+                candidate.item.item_id,
+                candidate.item.version,
+            ),
+        )[:target_count]
+        if all(
+            sum(
+                concept_id in candidate.item.concept_ids
+                for candidate in highest_information
+            )
+            >= target
+            for concept_id, target in zip(concepts, targets, strict=True)
+        ):
+            return highest_information
+        empty_coverage = (0,) * len(concepts)
+        states: dict[
+            tuple[int, tuple[int, ...]],
+            tuple[float, tuple[int, ...]],
+        ] = {(0, empty_coverage): (0.0, ())}
+        for index, candidate in enumerate(ordered):
+            next_states = dict(states)
+            for (count, coverage), (score, indexes) in states.items():
+                if count >= target_count:
+                    continue
+                updated_coverage = tuple(
+                    min(
+                        targets[position],
+                        covered + int(concept_id in candidate.item.concept_ids),
+                    )
+                    for position, (concept_id, covered) in enumerate(
+                        zip(concepts, coverage, strict=True)
+                    )
+                )
+                state = (count + 1, updated_coverage)
+                choice = (score + candidate.information, (*indexes, index))
+                incumbent = next_states.get(state)
+                if incumbent is None or choice[0] > incumbent[0] or (
+                    choice[0] == incumbent[0] and choice[1] < incumbent[1]
+                ):
+                    next_states[state] = choice
+            states = next_states
+        choice = states.get((target_count, targets))
+        if choice is None:
+            return None
+        return [ordered[index] for index in choice[1]]
+
+    @staticmethod
+    def _order_for_delivery(
+        candidates: list[_Candidate],
+        remaining_quotas: dict[str, int],
+    ) -> list[_Candidate]:
+        """Present quota-serving items first, then remaining items by information."""
+
+        selected: list[_Candidate] = []
+        available = list(candidates)
+        remaining = dict(remaining_quotas)
+        while available:
+            unmet = {
+                concept_id for concept_id, count in remaining.items() if count > 0
+            }
+            constrained = [
+                candidate
+                for candidate in available
+                if unmet.intersection(candidate.item.concept_ids)
+            ]
+            pool = constrained if constrained else available
+            winner = min(
+                pool,
+                key=lambda candidate: (
+                    -candidate.information,
+                    candidate.item.item_id,
+                    candidate.item.version,
+                ),
+            )
+            selected = [*selected, winner]
+            available = [candidate for candidate in available if candidate != winner]
+            remaining = {
+                concept_id: max(
+                    0,
+                    count - int(concept_id in winner.item.concept_ids),
+                )
+                for concept_id, count in remaining.items()
+            }
+        return selected
 
     def _eligible_candidates(
         self,

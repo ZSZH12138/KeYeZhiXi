@@ -22,8 +22,8 @@ from course_insight.contracts.assessment import (
 from course_insight.contracts.knowledge import AssessmentBlueprint, ItemCard, KnowledgeBundle
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.platform import AssessmentSubmission, TeacherReviewSubmission
-from course_insight.modules.m8_assessment_scoring.stubs import M8AssessmentServiceStub
 from course_insight.modules.m9_teacher_analytics.stubs import M9TeacherAnalyticsServiceStub
+from tests.factories.m5_m8 import make_m8_test_service
 
 
 NOW = datetime(2026, 7, 17, tzinfo=timezone.utc)
@@ -184,7 +184,7 @@ def test_m8_prepare_scoring_consumes_path_free_assessment_submission() -> None:
         submitted_at=NOW,
     )
 
-    result = M8AssessmentServiceStub().prepare_scoring(
+    result = make_m8_test_service().prepare_scoring(
         assessment_paper=_objective_paper(),
         raw_answer_path=submission,
         knowledge_bundle=_objective_knowledge_bundle(),
@@ -210,7 +210,7 @@ def test_m8_prepare_scoring_preserves_json_path_boundary(tmp_path: Path) -> None
         encoding="utf-8",
     )
 
-    result = M8AssessmentServiceStub().prepare_scoring(
+    result = make_m8_test_service().prepare_scoring(
         assessment_paper=_objective_paper(),
         raw_answer_path=answer_path,
         knowledge_bundle=_objective_knowledge_bundle(),

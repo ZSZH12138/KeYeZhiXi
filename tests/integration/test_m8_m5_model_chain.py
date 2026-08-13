@@ -74,11 +74,11 @@ def test_m8_observation_runs_models_and_bkt_drives_m5_mastery(
             min_responses_per_item=4,
             max_iterations=30,
         ),
-        bkt_engine=BktEngine(
-            min_students=4,
-            min_observations_per_student=5,
-            max_iterations=50,
-        ),
+            bkt_engine=BktEngine(
+                min_students=4,
+                min_observations_per_student=5,
+                max_iterations=200,
+            ),
     )
     service.fit_dina_model(_training_cohort(), _q_matrix())
     bkt_sequences: list[ConceptResponseSequence] = [
@@ -188,7 +188,7 @@ def test_learning_models_replay_complete_history_after_restart(
     bkt_engine = BktEngine(
         min_students=4,
         min_observations_per_student=5,
-        max_iterations=50,
+        max_iterations=200,
     )
     service = M5StateService(
         repository,

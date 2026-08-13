@@ -9,8 +9,8 @@ from course_insight.modules.m8_assessment_scoring.paper_generator import (
     PaperGenerator,
 )
 from course_insight.modules.m8_assessment_scoring.rule_scorer import RuleScorer
-from course_insight.modules.m8_assessment_scoring.stubs import FixedClock
 from tests.factories.m5_m8 import (
+    FixedClock,
     UTC_TIME,
     make_knowledge_bundle,
     make_task_plan,

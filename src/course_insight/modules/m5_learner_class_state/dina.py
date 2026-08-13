@@ -71,6 +71,39 @@ class DinaEngine:
         self._max_exact_concepts = max_exact_concepts
 
     @staticmethod
+    def require_converged(model: DinaModelArtifact) -> None:
+        """Reject model artifacts that are not safe to publish or apply."""
+
+        if not model.converged:
+            raise DomainError(
+                code="MODEL_NOT_CONVERGED",
+                module="m5",
+                message="DINA inference requires a converged model",
+                details={
+                    "model_type": "DINA",
+                    "model_version": model.model_version,
+                },
+                recoverable=True,
+            )
+
+    @staticmethod
+    def _current_inference_batch(
+        batch: LearningObservationBatch,
+    ) -> LearningObservationBatch:
+        """Apply the same immutable latest-audit rule used during training."""
+
+        observations = select_current_learning_observations(batch.observations)
+        return batch.model_copy(
+            update={
+                "observations": [
+                    observation.model_copy(deep=True)
+                    for observation in observations
+                ]
+            },
+            deep=True,
+        )
+
+    @staticmethod
     def response_probability(
         *,
         capable: bool,
@@ -205,6 +238,8 @@ class DinaEngine:
     ) -> dict[Profile, float]:
         """Return normalized exact mastery-profile probabilities."""
 
+        self.require_converged(model)
+        batch = self._current_inference_batch(batch)
         validate_inference_scope(model, batch)
         if model.inference_mode != "exact":
             raise DomainError(
@@ -255,6 +290,8 @@ class DinaEngine:
     ) -> CognitiveDiagnosisResult:
         """Infer marginals independently for each connected model component."""
 
+        self.require_converged(model)
+        batch = self._current_inference_batch(batch)
         validate_inference_scope(model, batch)
         requirements = {
             (item.item_id, item.item_version): frozenset(item.concept_ids)

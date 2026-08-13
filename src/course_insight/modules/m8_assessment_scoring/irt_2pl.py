@@ -54,6 +54,47 @@ def _run_digest(
     ).hexdigest()
 
 
+def _select_current_observations(
+    observations: Sequence[LearningObservation],
+) -> list[LearningObservation] | None:
+    """Return one authoritative latest projection for every score audit."""
+
+    normalized: list[LearningObservation] = []
+    seen: dict[tuple[str, int], str] = {}
+    for observation in observations:
+        audit_key = (
+            observation.source_audit_id,
+            observation.source_audit_version,
+        )
+        payload = observation.model_dump(
+            mode="json",
+            exclude={"observation_id"},
+        )
+        evidence_checksum = hashlib.sha256(
+            json.dumps(payload, sort_keys=True, separators=(",", ":")).encode(
+                "utf-8"
+            )
+        ).hexdigest()
+        previous_checksum = seen.get(audit_key)
+        if previous_checksum is None:
+            seen[audit_key] = evidence_checksum
+            normalized.append(observation)
+        elif previous_checksum != evidence_checksum:
+            return None
+    latest_versions: dict[str, int] = {}
+    for observation in normalized:
+        latest_versions[observation.source_audit_id] = max(
+            observation.source_audit_version,
+            latest_versions.get(observation.source_audit_id, 0),
+        )
+    return [
+        observation
+        for observation in normalized
+        if observation.source_audit_version
+        == latest_versions[observation.source_audit_id]
+    ]
+
+
 class TwoPLCalibrator:
     """Fit 2PL item parameters while fixing ability to a standard normal scale."""
 
@@ -292,6 +333,10 @@ class TwoPLCalibrator:
             raise ValueError("ability estimation requires a 2PL parameter set")
         if not responses:
             raise ValueError("ability estimation requires at least one response")
+        current = _select_current_observations(responses)
+        if current is None:
+            raise ValueError("ability responses contain conflicting audit evidence")
+        responses = current
         learner_ids = {item.learner_id for item in responses}
         if len(learner_ids) != 1:
             raise ValueError("ability responses must belong to one learner")
@@ -347,15 +392,11 @@ class TwoPLCalibrator:
     ) -> tuple[list[str], list[tuple[str, str]], np.ndarray, np.ndarray] | None:
         if not observations:
             return None
-        current_by_audit: dict[tuple[str, int], LearningObservation] = {}
-        for observation in observations:
-            key = (observation.source_audit_id, observation.source_audit_version)
-            existing = current_by_audit.get(key)
-            if existing is not None and existing != observation:
-                return None
-            current_by_audit[key] = observation
+        current = _select_current_observations(observations)
+        if current is None:
+            return None
         governed = sorted(
-            current_by_audit.values(),
+            current,
             key=lambda item: (
                 item.learner_id,
                 item.occurred_at,

@@ -96,7 +96,13 @@ class PaperGenerator:
 
         used_item_ids: set[str] = set()
         sections = [
-            self._build_section(section, knowledge_bundle, used_item_ids)
+            self._build_section(
+                section,
+                knowledge_bundle,
+                used_item_ids,
+                learner_state_snapshot,
+                diagnosis_result,
+            )
             for section in blueprint.sections
         ]
         paper_payload: dict[str, Any] = {
@@ -165,6 +171,8 @@ class PaperGenerator:
         section: BlueprintSection,
         knowledge_bundle: KnowledgeBundle,
         used_item_ids: set[str],
+        learner_state_snapshot: LearnerStateSnapshot | None,
+        diagnosis_result: DiagnosisResult | None,
     ) -> PaperSection:
         approved = [
             item
@@ -184,8 +192,16 @@ class PaperGenerator:
         anchored_ids = {item.item_id for item in anchors}
         remaining = [item for item in approved if item.item_id not in anchored_ids]
         ordered_candidates = [
-            *[item for item in remaining if item.is_objective()],
-            *[item for item in remaining if not item.is_objective()],
+            *self._personalize_candidates(
+                [item for item in remaining if item.is_objective()],
+                learner_state_snapshot,
+                diagnosis_result,
+            ),
+            *self._personalize_candidates(
+                [item for item in remaining if not item.is_objective()],
+                learner_state_snapshot,
+                diagnosis_result,
+            ),
         ]
         if (
             not section.concept_weights
@@ -237,6 +253,54 @@ class PaperGenerator:
             items=instances,
             score=section.score,
         )
+
+    @staticmethod
+    def _personalize_candidates(
+        candidates: list[ItemCard],
+        learner_state_snapshot: LearnerStateSnapshot | None,
+        diagnosis_result: DiagnosisResult | None,
+    ) -> list[ItemCard]:
+        """Rank interchangeable items by current diagnosis and weakest mastery."""
+
+        if learner_state_snapshot is None and diagnosis_result is None:
+            return list(candidates)
+        priority_ranks = {
+            concept_id: rank
+            for rank, concept_id in enumerate(
+                diagnosis_result.priority_concept_ids
+                if diagnosis_result is not None
+                else []
+            )
+        }
+        mastery = {
+            state.concept_id: state.mastery_probability
+            for state in (
+                learner_state_snapshot.concept_states
+                if learner_state_snapshot is not None
+                else []
+            )
+        }
+        if not priority_ranks and not mastery:
+            return list(candidates)
+        no_priority_rank = len(priority_ranks)
+
+        def personalization_key(item: ItemCard) -> tuple[int, float]:
+            item_priority_ranks = [
+                priority_ranks[concept_id]
+                for concept_id in item.concept_ids
+                if concept_id in priority_ranks
+            ]
+            item_mastery = [
+                mastery[concept_id]
+                for concept_id in item.concept_ids
+                if concept_id in mastery
+            ]
+            return (
+                min(item_priority_ranks, default=no_priority_rank),
+                min(item_mastery, default=1.0),
+            )
+
+        return sorted(candidates, key=personalization_key)
 
     def _select_unweighted_items(
         self,

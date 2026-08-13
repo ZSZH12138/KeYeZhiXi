@@ -36,7 +36,7 @@ from course_insight.modules.m4_task_orchestration.service import (
 from course_insight.modules.m6_tutoring_fsm.stubs import (
     M6TutoringControlServiceStub,
 )
-from course_insight.modules.m8_assessment_scoring.stubs import M8AssessmentServiceStub
+from tests.factories.m5_m8 import make_m8_test_service
 
 
 NOW = datetime(2026, 7, 21, tzinfo=timezone.utc)
@@ -239,7 +239,7 @@ def test_m3_bundle_flows_through_m4_directly_into_m8(tmp_path: Path) -> None:
         learner_state_snapshot=None,
     )
 
-    paper = M8AssessmentServiceStub().generate_paper(
+    paper = make_m8_test_service().generate_paper(
         task_plan=task_plan,
         knowledge_bundle=bundle,
         learner_state_snapshot=None,
