@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass
 from pathlib import Path
@@ -10,7 +11,6 @@ from typing import Any
 from course_insight.contracts.analytics import TeachingSuggestion
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.state import StateUpdateResult
-from course_insight.infrastructure.json_io import read_json
 
 
 @dataclass(frozen=True)
@@ -26,7 +26,41 @@ class TeacherThresholdPolicy:
     def from_path(cls, path: Path) -> "TeacherThresholdPolicy":
         """Load the strict local policy JSON."""
 
-        payload = read_json(path)
+        try:
+            content = path.read_bytes()
+        except (OSError, TypeError, ValueError) as exc:
+            raise DomainError(
+                code="REPORT_SCOPE_INVALID",
+                module="m9",
+                message="teacher threshold policy could not be loaded",
+                details={
+                    "policy": "teacher_threshold",
+                    "reason": type(exc).__name__,
+                },
+                recoverable=True,
+            ) from exc
+        return cls.from_bytes(content)
+
+    @classmethod
+    def from_bytes(cls, content: bytes) -> "TeacherThresholdPolicy":
+        """Parse one already-read strict policy document."""
+
+        try:
+            payload = json.loads(
+                content.decode("utf-8"),
+                parse_constant=_reject_nonfinite_json_constant,
+            )
+        except (TypeError, UnicodeError, ValueError) as exc:
+            raise DomainError(
+                code="REPORT_SCOPE_INVALID",
+                module="m9",
+                message="teacher threshold policy could not be loaded",
+                details={
+                    "policy": "teacher_threshold",
+                    "reason": type(exc).__name__,
+                },
+                recoverable=True,
+            ) from exc
         if type(payload) is not dict:
             raise DomainError(
                 code="REPORT_SCOPE_INVALID",
@@ -47,7 +81,19 @@ class TeacherThresholdPolicy:
                 module="m9",
                 message="teacher threshold policy fields are invalid",
             )
-        policy = cls(**payload)
+        try:
+            policy = cls(**payload)
+        except (TypeError, ValueError) as exc:
+            raise DomainError(
+                code="REPORT_SCOPE_INVALID",
+                module="m9",
+                message="teacher threshold policy fields are invalid",
+                details={
+                    "policy": "teacher_threshold",
+                    "reason": type(exc).__name__,
+                },
+                recoverable=True,
+            ) from exc
         policy.validate()
         return policy
 
@@ -72,6 +118,10 @@ class TeacherThresholdPolicy:
                 module="m9",
                 message="teacher threshold policy values are invalid",
             )
+
+
+def _reject_nonfinite_json_constant(value: str) -> Any:
+    raise ValueError(f"non-finite JSON constant is not allowed: {value}")
 
 
 def _mean_confidence(state: StateUpdateResult) -> float:

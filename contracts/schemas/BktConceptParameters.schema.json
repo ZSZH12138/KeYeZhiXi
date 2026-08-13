@@ -1,0 +1,61 @@
+{
+  "additionalProperties": false,
+  "description": "Four fitted BKT probabilities for one course concept.",
+  "properties": {
+    "concept_id": {
+      "minLength": 1,
+      "title": "Concept Id",
+      "type": "string"
+    },
+    "guess": {
+      "maximum": 0.4,
+      "minimum": 0.01,
+      "title": "Guess",
+      "type": "number"
+    },
+    "learn": {
+      "maximum": 0.4,
+      "minimum": 0.01,
+      "title": "Learn",
+      "type": "number"
+    },
+    "learner_count": {
+      "minimum": 1,
+      "title": "Learner Count",
+      "type": "integer"
+    },
+    "observation_count": {
+      "minimum": 1,
+      "title": "Observation Count",
+      "type": "integer"
+    },
+    "prior": {
+      "maximum": 0.99,
+      "minimum": 0.01,
+      "title": "Prior",
+      "type": "number"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "slip": {
+      "maximum": 0.4,
+      "minimum": 0.01,
+      "title": "Slip",
+      "type": "number"
+    }
+  },
+  "required": [
+    "concept_id",
+    "prior",
+    "learn",
+    "guess",
+    "slip",
+    "learner_count",
+    "observation_count"
+  ],
+  "title": "BktConceptParameters",
+  "type": "object"
+}

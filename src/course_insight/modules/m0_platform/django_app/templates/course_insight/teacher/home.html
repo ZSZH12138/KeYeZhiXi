@@ -1,0 +1,10 @@
+{% extends "course_insight/base.html" %}
+{% block title %}教师端 · 课业智析{% endblock %}
+{% block content %}
+  <h1>教师端</h1>
+  <p>输入已获授权的课程、班级和试卷标识以查看复核上下文。</p>
+  <form method="get" action="{% url 'teacher-review-lookup' %}">
+    {{ lookup_form.as_p }}
+    <button type="submit">查看</button>
+  </form>
+{% endblock %}

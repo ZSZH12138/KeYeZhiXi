@@ -1,77 +1,73 @@
-# M5/M8 审计报告核实记录
+# M5/M8 修复与回归对应表
 
-> 核实时间：2026-08-04
-> 核实基准：commit 37caf51 + 未提交的补充修复（含 M5-07/M8-10 完全修复）
-> 测试状态：313 passed
+## 验收范围
 
----
+本报告覆盖 M5/M8 修复计划 Task 1—12。原契约中的“空实现”不视为完成：只要输入
+达到数据门槛，就必须运行真实算法并产生可恢复、可审核的结果。
 
-## 一、明确缺陷核实汇总
+## 明确缺陷
 
-| 编号 | 判定 | 状态 | 说明 |
-|------|------|------|------|
-| M5-01 | 明确缺陷 | ✅ 已修复 | 混合批次中旧审计已被过滤（`new_audit_keys = audit_keys - seen`） |
-| M5-02 | 明确缺陷 | ✅ 已修复 | 审计版本与状态版本的数值比较已删除，仅使用 `(audit_id, audit_version)` |
-| M5-03 | 明确缺陷 | ✅ 已修复 | `build_learner_state` 已实现前版状态加权融合（mastery、evidence_count、misconception） |
-| M5-04 | 明确缺陷 | ✅ 已修复 | 班级聚合改为增量合并，新学习者折叠入加权均值，返回学习者替换而非追加 |
-| M5-05 | 明确缺陷 | ✅ 已修复 | 逐题诊断已使用 Q-matrix 查找 `(item_id, item_version)` → `concept_ids` |
-| M5-06 | 明确缺陷 | ✅ 已修复 | `convert_to_observations()` 已实现（commit 987ab49）；生产 coordinator 已接入 |
-| M5-07 | 明确缺陷 | ✅ 已修复 | 服务从 repository 读取前版状态和已处理审计水位；getattr 防御模式已移除；SQLite 适配器已实现 |
-| M8-01 | 明确缺陷 | ✅ 已修复 | `ItemInstance` 增加 `rubric_version` 字段，冻结试卷时从知识包写入量规版本 |
-| M8-02 | 明确缺陷 | ✅ 已修复 | 薄弱概念（mastery < 0.5）优先排序，M5 状态参与组卷 |
-| M8-03 | 明确缺陷 | ✅ 已修复 | `concept_weights` 配额追踪，选题后验证覆盖 |
-| M8-04 | 明确缺陷 | ✅ 已修复 | `_validate_references` 增加 `course_package_id` 一致性校验 |
-| M8-05 | 明确缺陷 | ✅ 已修复 | `ReviewPolicy.needs_review()` 双评分分歧检测已接入 |
-| M8-06 | 明确缺陷 | ✅ 已修复 | checksum 已包含 `submission_id` 和 `submitted_at` |
-| M8-07 | 明确缺陷 | ✅ 已修复 | course/class 身份冻结入 AssessmentPaper，从冻结试卷恢复 |
-| M8-08 | 明确缺陷 | ✅ 已修复 | 事件 ID 已包含 `content_checksum`，不同内容产生不同 ID |
-| M8-09 | 明确缺陷 | ✅ 已修复 | service.py 已使用 `self._clock.now()`；PaperGenerator 已改为可注入时钟 |
-| M8-10 | 明确缺陷 | ✅ 已修复 | getattr 防御模式已全部移除；apply_teacher_review 从 repository 读取权威审计做并发版本检测；SQLite 适配器已实现 |
+| 已复现问题 | 修复后的功能行为 | 主要回归测试 |
+|---|---|---|
+| 学习观测通过题目实例名称猜题目身份 | 从冻结试卷读取真实题目、版本和知识点 | `test_m8_observation_builder.py` |
+| 旧试卷可能使用新版量规 | 试卷生成时冻结量规，重启后仍使用原版本 | `test_m8_restart_recovery.py`、`test_m8_append_only_history.py` |
+| 不同题目被错误映射到同一知识点 | 每道题按自身 Q 矩阵生成诊断 | `test_m5_diagnosis_mapping.py` |
+| 同一学生再次测评会在班级统计中重复计数 | 用该学生最新状态替换旧贡献，再重新聚合 | `test_m5_class_replacement.py` |
+| 班级快照身份可能重复 | 每次班级版本生成唯一快照身份 | `test_m5_class_replacement.py` |
+| M5 保存中途失败可能留下半套状态 | 学生状态、班级状态和水位在同一事务保存 | `test_m5_atomic_update.py` |
+| M8 组卷没有严格执行知识点权重 | 使用最大余数配额和确定性回溯组卷 | `test_m8_weighted_blueprint.py` |
+| M8 重启后丢失试卷/量规/评分上下文 | 所有冻结内容持久化并可恢复 | `test_m8_restart_recovery.py` |
+| 固定时间或重试时间差会改变业务结果 | 生产使用 UTC 时钟；测试显式注入固定时钟 | `test_m8_restart_recovery.py` |
+| 相同身份可能覆盖试卷或评分历史 | 同内容重试复用，不同内容冲突，历史只追加 | `test_m8_append_only_history.py` |
+| IRT 参数未经审核即可被使用 | shadow 必须经过 M9 质量门槛和教师批准 | `test_m8_model_approval.py` |
+| 自适应选题可能重复、超曝光或忽略配额 | 同时执行已作答排除、曝光、难度和概念配额 | `test_m8_adaptive_selector.py` |
+| 教师复核存在过期覆盖和并发竞争 | 在事务内核对审计版本与校验和，只允许一个成功版本 | `test_m8_review_to_m5.py` |
+| 被拒绝或旧版评分仍可能进入 M5 | 只消费最新有效版本；拒绝结果不生成学习观测 | `test_m8_review_to_m5.py` |
 
----
+## 原阶段未实现、现已补齐
 
-## 二、阶段目标缺口实现汇总
+| 功能 | 当前实现 | 主要验收测试 |
+|---|---|---|
+| DINA 认知诊断 | 真实 DINA 参数拟合、掌握后验、连通分量精确/变分推断 | `test_m5_dina.py`、`test_dina_recovery.py` |
+| BKT 知识追踪 | 四参数 BKT 拟合、按时间更新掌握概率、重启恢复 | `test_m5_bkt.py`、`test_bkt_recovery.py` |
+| 模型驱动学生状态 | DINA/BKT 使用完整治理历史，BKT 结果进入状态 | `test_m8_m5_model_chain.py` |
+| 2PL IRT | 真实 2PL 标定、收敛指标和 EAP 能力估计 | `test_m8_irt_2pl.py`、`test_irt_2pl_recovery.py` |
+| IRT 质量报告 | 本地检查收敛、覆盖、参数稳定性和信息量 | `test_m9_model_quality.py` |
+| 参数审核发布 | shadow/approved/rejected 不可变版本与教师审批状态机 | `test_m8_model_approval.py` |
+| 自适应选题 | Fisher 信息量排序与业务约束，结果持久化 | `test_m8_adaptive_selector.py`、`test_adaptive_efficiency.py` |
+| 完整学习闭环 | 评分、复核、M5、IRT 审批、能力和选题贯通 | `test_m5_m8_full_learning_cycle.py` |
 
-| 编号 | 判定 | 状态 | 说明 |
-|------|------|------|------|
-| M5-08 | 阶段目标缺口 | ✅ 已实现 | DINA：按概念聚合观测得分率，输出掌握概率；零观测返回 empty |
-| M5-09 | 阶段目标缺口 | ✅ 已实现 | BKT：标准四参数模型（P(L0)=0.1, P(T)=0.1, P(G)=0.25, P(S)=0.25），按概念时序更新 |
-| M8-11 | 阶段目标缺口 | ✅ 已实现 | IRT 2PL shadow 标定：p-value 难度代理 + 默认区分度，输出 shadow 参数集 |
-| M8-12 | 阶段目标缺口 | ✅ 已实现 | 自适应选题：策略/能力前置校验 + Fisher 信息量目标计算 + 能力透传 |
+## 发布判断规则
 
----
+只有以下检查全部完成，才可判定本轮 M5/M8 修复达到合并门槛：
 
-## 三、M5-07 和 M8-10 完全修复详情
+- 全部自动化测试通过，项目覆盖率不低于 80%。
+- 本次新增或重写的 M5/M8 核心文件覆盖率不低于 90%。
+- Python 编译检查和依赖完整性检查通过。
+- SQLite 迁移通过；真实 PostgreSQL 仅在提供受保护测试库时计为实际通过，环境
+  未提供时必须明确记录为跳过。
+- Git 差异无空白错误，契约 Schema 与代码一致。
 
-### M5-07：Repository 被声明但服务完全没有使用
+## 本轮最终执行结果
 
-**审计原意**：服务应持久化学习者/班级快照和已处理审计水位，重启后可恢复。
+执行时间：2026-08-13。结果如下：
 
-**修复内容**：
-1. **协议扩展**：`M5Repository` Protocol 新增 `get_latest_learner_state`、`get_latest_class_state`、`get_processed_audits`、`save_processed_audits` 方法
-2. **去掉 getattr 防御模式**：`save_learner_state`、`save_class_state`、`save_processed_audits` 改为直接调用
-3. **从 repository 读取恢复**：
-   - `update_state` 开始时从 repository 加载已处理审计水位（`get_processed_audits`），而非仅依赖内存 `_processed_by_learner`
-   - 当调用方未提供 `previous_learner_state_snapshot` 时，从 repository 读取最新版本（`get_latest_learner_state`）
-   - 当调用方未提供 `previous_class_state_snapshot` 时，从 repository 读取最新版本（`get_latest_class_state`）
-4. **SQLite 适配器**：新增 `infrastructure/sqlite/m5_repository.py`（`SQLiteM5Repository`），实现全部协议方法
-5. **迁移 v4**：新增 `m5_processed_audits` 表
+- 全项目测试：`1388 passed, 21 skipped, 0 failed`。其中跳过项是未向该次全量命令
+  注入外部服务环境的受控测试，不影响覆盖率计算。
+- Task 9—12 定向回归：`38 passed, 0 failed`，覆盖参数审批、能力估计、自适应
+  选题、教师复核和完整学习闭环。
+- 项目总覆盖率：`88.28%`，高于 80% 门槛。
+- 本次重点新增运行文件覆盖率：PostgreSQL BKT 92%、PostgreSQL M8 模型历史
+  92%、SQLite BKT 95%、SQLite M8 模型历史 95%、M8 模型生命周期 93%；
+  DINA/BKT/IRT/自适应核心算法文件均为 90% 以上。
+- 完整学习闭环与 M5/M8 重启一致性：通过。
+- Python 编译、`pip check`、契约测试、Schema 重新导出和 Git 空白检查：通过。
+- 本地 SQLite v1—v15 迁移链：通过。
+- 独立临时 PostgreSQL 16 容器中的真实迁移、SQLite 数据导入、事件仓储和并发
+  流程测试：`9 passed, 0 failed, 0 skipped`。事件仓储测试显式使用同一固定 UTC
+  时钟完成入队、领取和租约检查，避免测试依赖执行当天的系统时间；生产代码
+  的时钟和领取规则没有改动。测试后容器已关闭并自动删除，没有使用或修改
+  用户已有数据库。
 
-### M8-10：Repository 是可选调用，且没有实际持久化适配器
-
-**审计原意**：试卷和评分审计应持久化，教师复核应读取权威当前版本。
-
-**修复内容**：
-1. **协议扩展**：`M8Repository` Protocol 新增 `get_paper`、`get_latest_score_audit` 方法
-2. **去掉 getattr 防御模式**：`generate_paper`、`finalize_scoring`、`apply_teacher_review` 中的 `getattr(self._repository, ...)` 全部替换为直接调用
-3. **并发版本检测**：`apply_teacher_review` 在执行复核前，从 repository 读取权威审计（`get_latest_score_audit`），若权威版本号高于调用方提供的版本号，抛出 `REVIEW_VERSION_CONFLICT`
-4. **SQLite 适配器**：新增 `infrastructure/sqlite/m8_repository.py`（`SQLiteM8Repository`），实现全部协议方法
-5. **迁移 v4**：新增 `m8_papers` 表
-
----
-
-## 四、审计误判说明
-
-经逐条核实，**未发现明确误判**。审计报告中的 17 条"明确缺陷"在审计时间点均成立。
-
-需注意：M8-09 的审计证据引用了 `service.py` 多处使用 `FIXED_TIME` 的行号。在 M8-07 修复（commit 987ab49）中，service.py 已改用 `self._clock.now()`，因此审计证据中的部分行号可能已过时。但审计的核心判定（PaperGenerator 硬编码 `FIXED_TIME`）是准确的，已在本次修复中解决。
+结论：M5/M8 Task 1—12 的代码和自动化发布门槛已达到；生产发布仍需使用真实
+生产规模的去标识化数据完成模型效果监控和容量评估，这不属于本轮代码缺陷。

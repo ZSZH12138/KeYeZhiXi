@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from inspect import signature
 from pathlib import Path
 from typing import Any
 
@@ -31,12 +32,6 @@ from course_insight.contracts.evidence import (
     EvidenceQuery,
 )
 from course_insight.contracts.knowledge import KnowledgeBundle
-from course_insight.contracts.learning_models import (
-    CognitiveDiagnosisResult,
-    KnowledgeTraceSnapshot,
-    LearningModelRun,
-    LearningObservationBatch,
-)
 from course_insight.contracts.state import (
     ClassStateSnapshot,
     ConceptState,
@@ -72,6 +67,18 @@ LEARNER_ID = "pseudonym_learner"
 SESSION_ID = "session_1"
 CONCEPT_ID = "concept_1"
 COURSE_PACKAGE_ID = "package_authoritative_not_derived_from_bundle"
+
+
+def test_public_decision_contract_keeps_its_four_inputs() -> None:
+    assert tuple(
+        signature(M6TutoringControlService.decide_next_action).parameters
+    ) == (
+        "self",
+        "task_plan",
+        "scoring_result_bundle",
+        "state_update_result",
+        "previous_session_state_snapshot",
+    )
 
 
 @dataclass(frozen=True)
@@ -641,50 +648,15 @@ class _FixedM5:
     def update_state(self, **_: Any) -> StateUpdateResult:
         return self._state_update.model_copy(deep=True)
 
-    def convert_to_observations(self, **_: Any) -> LearningObservationBatch:
-        return LearningObservationBatch(
-            batch_id="fixed_batch",
-            learner_id=LEARNER_ID,
-            observations=[],
-            watermark="fixed_watermark",
-            created_at=NOW,
-        )
-
-    def run_learning_models(self, **_: Any) -> LearningModelRun:
-        return LearningModelRun(
-            run_id="fixed_run",
-            diagnosis=CognitiveDiagnosisResult(
-                run_id="fixed_dina",
-                learner_id=LEARNER_ID,
-                model_type="DINA",
-                model_version="unconfigured",
-                concept_mastery={},
-                observation_count=0,
-                status="empty",
-                generated_at=NOW,
-            ),
-            knowledge_trace=KnowledgeTraceSnapshot(
-                trace_id="fixed_bkt",
-                learner_id=LEARNER_ID,
-                model_type="BKT",
-                model_version="unconfigured",
-                concept_probabilities={},
-                observation_watermark="fixed_watermark",
-                observation_count=0,
-                status="empty",
-                updated_at=NOW,
-            ),
-            observation_count=0,
-            status="empty",
-            created_at=NOW,
-        )
-
 
 class _RecordingM6:
     def __init__(self, delegate: M6TutoringControlService) -> None:
         self._delegate = delegate
         self.previous_arguments: tuple[Any, ...] = ()
         self.results: tuple[TutoringControlResult, ...] = ()
+
+    def prepare_policy_execution(self, **kwargs: Any):
+        return self._delegate.prepare_policy_execution(**kwargs)
 
     def decide_next_action(self, **kwargs: Any) -> TutoringControlResult:
         self.previous_arguments = (

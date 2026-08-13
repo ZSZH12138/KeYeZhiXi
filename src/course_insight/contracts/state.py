@@ -251,6 +251,10 @@ class LearnerStateSnapshot(ContractModel):
     concept_states: list[ConceptState]
     overall_mastery: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
     evidence_count: int = Field(ge=0)
+    model_run_id: str | None = Field(default=None, min_length=1)
+    dina_model_version: str | None = Field(default=None, min_length=1)
+    bkt_model_version: str | None = Field(default=None, min_length=1)
+    observation_watermark: str | None = Field(default=None, min_length=1)
     updated_at: datetime
 
     def validate_business_rules(self) -> None:
@@ -262,6 +266,27 @@ class LearnerStateSnapshot(ContractModel):
             message="learner concept-state identifiers must be unique",
             details={"snapshot_id": self.snapshot_id},
         )
+        evidence_fields = (
+            self.dina_model_version,
+            self.bkt_model_version,
+            self.observation_watermark,
+        )
+        if self.model_run_id is None and any(
+            value is not None for value in evidence_fields
+        ):
+            raise DomainError(
+                code="LEARNER_MODEL_EVIDENCE_INVALID",
+                module="m5",
+                message="learner model evidence requires a model run identity",
+            )
+        if self.model_run_id is not None and any(
+            value is None for value in evidence_fields
+        ):
+            raise DomainError(
+                code="LEARNER_MODEL_EVIDENCE_INVALID",
+                module="m5",
+                message="model-backed learner state requires complete model evidence",
+            )
 
     def get_concept_state(self, concept_id: str) -> ConceptState:
         """Return an isolated state for the requested concept."""
@@ -411,6 +436,7 @@ class ClassStateSnapshot(ContractModel):
     concept_status: list[ClassConceptStatus]
     misconception_summary: list[ClassMisconceptionSummary]
     evidence_status: Literal["sufficient", "insufficient"]
+    model_run_ids: list[str] = Field(default_factory=list)
     updated_at: datetime
 
     def validate_business_rules(self) -> None:
@@ -448,6 +474,12 @@ class ClassStateSnapshot(ContractModel):
             [status.concept_id for status in self.concept_status],
             code="CLASS_STATE_REFERENCE_CONFLICT",
             message="class concept identifiers must be unique",
+            details={"snapshot_id": self.snapshot_id},
+        )
+        _require_unique(
+            self.model_run_ids,
+            code="CLASS_MODEL_EVIDENCE_CONFLICT",
+            message="class model run identities must be unique",
             details={"snapshot_id": self.snapshot_id},
         )
         _require_unique(

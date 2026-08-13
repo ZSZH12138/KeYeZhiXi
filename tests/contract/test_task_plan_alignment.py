@@ -2,12 +2,15 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+import pytest
+
 from course_insight.contracts.assessment import (
     RemediationPlan,
     RemediationTarget,
     ScoreAuditRecord,
     ScoringResultBundle,
 )
+from course_insight.contracts.errors import DomainError
 from course_insight.contracts.events import LearningEvent
 from course_insight.contracts.knowledge import AssessmentBlueprint, KnowledgeBundle
 from course_insight.contracts.state import (
@@ -26,6 +29,55 @@ from course_insight.modules.m6_tutoring_fsm.stubs import M6TutoringControlServic
 
 
 NOW = datetime(2026, 7, 17, tzinfo=timezone.utc)
+
+
+def _task_plan(
+    *,
+    task_type: str = "qa",
+    blueprint_id: str | None = None,
+    workflow: list[str] | None = None,
+    next_module: str = "M2",
+) -> TaskPlan:
+    return TaskPlan(
+        task_id="task_1",
+        task_type=task_type,
+        course_id="course_1",
+        class_id="class_1",
+        learner_id="pseudonym_learner",
+        session_id="session_1",
+        blueprint_id=blueprint_id,
+        knowledge_bundle_id="bundle_1",
+        course_package_id="package_1",
+        workflow=["M2", "M7", "M6"] if workflow is None else workflow,
+        next_module=next_module,
+        created_at=NOW,
+    )
+
+
+def test_task_plan_rejects_noncanonical_assessment_workflow() -> None:
+    with pytest.raises(DomainError) as captured:
+        _task_plan(
+            task_type="stage_assessment",
+            blueprint_id="blueprint_1",
+            workflow=["M8", "M5"],
+            next_module="M8",
+        )
+
+    assert captured.value.code == "WORKFLOW_MISMATCH"
+
+
+def test_task_plan_rejects_next_module_other_than_workflow_head() -> None:
+    with pytest.raises(DomainError) as captured:
+        _task_plan(next_module="M7")
+
+    assert captured.value.code == "NEXT_MODULE_NOT_ALLOWED"
+
+
+def test_task_plan_rejects_blueprint_for_qa() -> None:
+    with pytest.raises(DomainError) as captured:
+        _task_plan(blueprint_id="blueprint_1")
+
+    assert captured.value.code == "BLUEPRINT_NOT_ALLOWED"
 
 
 def _knowledge_bundle() -> KnowledgeBundle:

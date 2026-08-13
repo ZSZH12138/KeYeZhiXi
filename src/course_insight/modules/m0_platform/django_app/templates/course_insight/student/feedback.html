@@ -1,0 +1,30 @@
+{% extends "course_insight/base.html" %}
+{% block title %}学习反馈 · 课业智析{% endblock %}
+{% block content %}
+  <h1>学习反馈</h1>
+  <p>{{ feedback.message }}</p>
+  <h2>量规分项</h2>
+  <ul>
+    {% for item in feedback.rubric_feedback %}
+      <li>{{ item.criterion_id }}：{{ item.earned_score }} / {{ item.max_score }} — {{ item.message }}</li>
+    {% empty %}
+      <li>暂无量规分项。</li>
+    {% endfor %}
+  </ul>
+  <h2>缺失知识点</h2>
+  <ul>
+    {% for concept_id in feedback.missing_concept_ids %}<li>{{ concept_id }}</li>{% empty %}<li>无</li>{% endfor %}
+  </ul>
+  <h2>证据引用</h2>
+  <ul>
+    {% for citation in feedback.citations %}
+      <li><strong>{{ citation.label }}</strong>：{{ citation.quote }}</li>
+    {% empty %}
+      <li>暂无可显示证据。</li>
+    {% endfor %}
+  </ul>
+  <h2>后续练习</h2>
+  <ul>
+    {% for item_id in feedback.next_practice_item_ids %}<li>{{ item_id }}</li>{% empty %}<li>暂无</li>{% endfor %}
+  </ul>
+{% endblock %}

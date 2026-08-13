@@ -129,7 +129,10 @@ class M1CourseGovernanceService:
                 code="UNAUTHORIZED_SOURCE",
                 module="m1",
                 message="source authorization manifest could not be read",
-                details={"path": str(path), "reason": type(error).__name__},
+                details={
+                    "input": "authorization_manifest",
+                    "reason": type(error).__name__,
+                },
             ) from error
         return rows
 
@@ -145,7 +148,7 @@ class M1CourseGovernanceService:
                 code="COURSE_PARSE_FAILED",
                 module="m1",
                 message="course source file does not exist",
-                details={"path": str(path)},
+                details={"input": "course_source"},
             )
         authorization_payload = authorization_rows.get(path.name)
         if authorization_payload is None:

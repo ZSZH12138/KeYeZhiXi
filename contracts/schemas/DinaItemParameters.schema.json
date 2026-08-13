@@ -1,0 +1,56 @@
+{
+  "additionalProperties": false,
+  "description": "DINA slip and guess estimates for one immutable item version.",
+  "properties": {
+    "concept_ids": {
+      "items": {
+        "type": "string"
+      },
+      "minItems": 1,
+      "title": "Concept Ids",
+      "type": "array"
+    },
+    "guess": {
+      "maximum": 0.4,
+      "minimum": 0.01,
+      "title": "Guess",
+      "type": "number"
+    },
+    "item_id": {
+      "minLength": 1,
+      "title": "Item Id",
+      "type": "string"
+    },
+    "item_version": {
+      "minLength": 1,
+      "title": "Item Version",
+      "type": "string"
+    },
+    "sample_size": {
+      "minimum": 1,
+      "title": "Sample Size",
+      "type": "integer"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "slip": {
+      "maximum": 0.4,
+      "minimum": 0.01,
+      "title": "Slip",
+      "type": "number"
+    }
+  },
+  "required": [
+    "item_id",
+    "item_version",
+    "concept_ids",
+    "slip",
+    "guess",
+    "sample_size"
+  ],
+  "title": "DinaItemParameters",
+  "type": "object"
+}

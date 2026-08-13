@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-Hans">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="referrer" content="same-origin">
+  <title>{% block title %}课业智析{% endblock %}</title>
+  <style>
+    :root { color-scheme: light; font-family: system-ui, sans-serif; }
+    body { margin: 0 auto; max-width: 72rem; padding: 1.25rem; line-height: 1.55; }
+    header { display: flex; gap: 1rem; align-items: center; justify-content: space-between; }
+    nav { display: flex; gap: .75rem; align-items: center; }
+    main { margin-top: 1.5rem; }
+    form p { display: grid; gap: .35rem; }
+    input, select, textarea, button { font: inherit; padding: .55rem; }
+    textarea { min-height: 8rem; }
+    .card { border: 1px solid #ccd3dc; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+    .errorlist { color: #9d1c1c; }
+    .muted { color: #52606d; }
+    table { border-collapse: collapse; width: 100%; }
+    th, td { border: 1px solid #ccd3dc; padding: .5rem; text-align: left; vertical-align: top; }
+  </style>
+</head>
+<body>
+  <header>
+    <strong>课业智析</strong>
+    {% if request.user.is_authenticated %}
+      <nav>
+        <a href="{% url 'student-home' %}">学生端</a>
+        <a href="{% url 'teacher-home' %}">教师端</a>
+        <form method="post" action="{% url 'logout' %}">
+          {% csrf_token %}
+          <button type="submit">退出</button>
+        </form>
+      </nav>
+    {% endif %}
+  </header>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import itertools
 import json
-from dataclasses import FrozenInstanceError
+from dataclasses import FrozenInstanceError, replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -30,6 +30,27 @@ from course_insight.contracts.tasking import TaskPlan
 from course_insight.contracts.tutoring import SessionStateSnapshot
 from course_insight.modules.m6_tutoring_fsm.repository import (
     InMemoryM6Repository,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_artifacts import (
+    LoadedPolicyArtifact,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_gate import (
+    ActivePolicyGate,
+    PolicyGateConfig,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_runtime import (
+    PolicyRuntime,
+    PolicyRuntimeGateInputs,
+    rules_policy_execution,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyArtifactManifest,
+    PolicyDecision,
+    PolicyPrediction,
+)
+from course_insight.modules.m6_tutoring_fsm.identity import request_fingerprint
+from course_insight.modules.m6_tutoring_fsm.service import (
+    M6TutoringControlService,
 )
 from course_insight.modules.m6_tutoring_fsm.state_machine import (
     DEFAULT_STATE_MACHINE,
@@ -339,6 +360,35 @@ def _valid_inputs(
             priority_concepts=(concept_id,),
         ),
     )
+
+
+def test_service_rejects_legacy_task_that_omits_m6_before_repository_access(
+) -> None:
+    class TrackingRepository(InMemoryM6Repository):
+        def __init__(self) -> None:
+            super().__init__()
+            self.request_lookup_count = 0
+
+        def get_decision_by_request(self, request_fingerprint: str) -> Any:
+            self.request_lookup_count += 1
+            return super().get_decision_by_request(request_fingerprint)
+
+    task, scoring, state = _valid_inputs()
+    legacy_task = task.model_copy(
+        update={"workflow": ["M8", "M2", "M7", "M5", "M9"]},
+        deep=True,
+    )
+    repository = TrackingRepository()
+    service = M6TutoringControlService(DEFAULT_STATE_MACHINE, repository)
+
+    with pytest.raises(DomainError) as raised:
+        service.decide_next_action(legacy_task, scoring, state, None)
+
+    assert raised.value.code == "MODULE_NOT_ALLOWED"
+    assert raised.value.module == "m4"
+    assert raised.value.details == {"module_name": "M6"}
+    assert repository.request_lookup_count == 0
+    assert repository.get_latest_session_state(legacy_task.session_id) is None
 
 
 def _decision_policy_types() -> tuple[type[Any], type[Any]]:
@@ -1147,3 +1197,404 @@ def test_reference_errors_do_not_echo_host_paths_or_sensitive_answers() -> None:
     assert raised.value.code == "TUTORING_REFERENCE_MISMATCH"
     assert sensitive_path not in serialized_error
     assert SENSITIVE_ANSWER not in serialized_error
+
+
+def _learned_runtime(
+    mode: str,
+    *,
+    configured_gate_version: str = "m6-active-gate-v1",
+) -> PolicyRuntime:
+    class PreferHintAdapter:
+        adapter_id = "test-prefer-hint"
+        adapter_version = "v1"
+        policy_id = "test-learned-policy-v1"
+
+        def select(self, context: Any, candidates: Any) -> PolicyDecision:
+            selected = next(
+                candidate for candidate in candidates if candidate.next_state == "S2"
+            )
+            candidate_ids = tuple(
+                candidate.candidate_id for candidate in candidates
+            )
+            return PolicyDecision(
+                request_fingerprint=context.request_fingerprint,
+                mode="active",
+                selected_candidate_id=selected.candidate_id,
+                candidate_ids=candidate_ids,
+                prediction=PolicyPrediction(
+                    policy_id=self.policy_id,
+                    candidate_id=selected.candidate_id,
+                    score=1.0,
+                    propensity=1.0,
+                    uncertainty=0.0,
+                    action_probabilities=tuple(
+                        (
+                            candidate_id,
+                            1.0 if candidate_id == selected.candidate_id else 0.0,
+                        )
+                        for candidate_id in candidate_ids
+                    ),
+                    model_scores=tuple(
+                        (
+                            candidate_id,
+                            1.0 if candidate_id == selected.candidate_id else 0.0,
+                        )
+                        for candidate_id in candidate_ids
+                    ),
+                ),
+            )
+
+    manifest = PolicyArtifactManifest(
+        policy_id="test-learned-policy-v1",
+        adapter_id="test-prefer-hint",
+        adapter_version="v1",
+        algorithm="linucb",
+        state_graph_version="m6-state-graph-v1",
+        baseline_policy_version="m6-rules-v1",
+        artifact_sha256="d" * 64,
+        feature_schema_version="m6-features-v1",
+        action_space_version="m6-action-space-v1",
+        reward_version="m6-reward-v1",
+        gate_policy_version="m6-active-gate-v1",
+        training_data_watermark="2026-07-27T00:00:00Z",
+        training_data_checksum="e" * 64,
+        status="approved",
+        created_at="2026-07-27T01:00:00Z",
+        artifact_reference="policy.json",
+        allowed_scopes=(f"course:{COURSE_ID}", f"class:{CLASS_ID}"),
+    )
+
+    def load_artifact(candidate_ids: tuple[str, ...]) -> LoadedPolicyArtifact:
+        return LoadedPolicyArtifact(
+            manifest=manifest,
+            payload={
+                "actions": {candidate_id: {} for candidate_id in candidate_ids}
+            },
+        )
+
+    return PolicyRuntime(
+        mode=mode,
+        learned_adapter=PreferHintAdapter(),
+        artifact_loader=load_artifact,
+        active_gate=ActivePolicyGate(
+            PolicyGateConfig(
+                gate_policy_version="m6-active-gate-v1",
+                minimum_support=1,
+                maximum_uncertainty=0.1,
+                rollout_percentage=1.0,
+                kill_switch=False,
+            )
+        ),
+        gate_inputs=PolicyRuntimeGateInputs(
+            support=10,
+            offline_evaluation_approved=True,
+            allowed_course_ids=(COURSE_ID,),
+            allowed_class_ids=(CLASS_ID,),
+        ),
+        gate_policy_version=configured_gate_version,
+    )
+
+
+def test_explicit_rules_runtime_matches_default_public_result_field_for_field() -> None:
+    task, scoring, state = _valid_inputs()
+    previous = _session("S1")
+    default_result = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        InMemoryM6Repository(),
+    ).decide_next_action(task, scoring, state, previous)
+    rules_result = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        InMemoryM6Repository(),
+        policy_runtime=PolicyRuntime(mode="rules"),
+    ).decide_next_action(
+        task.model_copy(deep=True),
+        scoring.model_copy(deep=True),
+        state.model_copy(deep=True),
+        previous.model_copy(deep=True),
+    )
+
+    assert rules_result.model_dump(mode="json") == default_result.model_dump(
+        mode="json"
+    )
+
+
+def test_service_shadow_prediction_cannot_change_the_public_result() -> None:
+    task, scoring, state = _valid_inputs()
+    repository = InMemoryM6Repository()
+    service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+        policy_runtime=_learned_runtime("shadow"),
+    )
+
+    result = service.decide_next_action(task, scoring, state, _session("S1"))
+    stored = repository.get_decision_by_request(
+        request_fingerprint(
+            task_plan=task,
+            scoring_result_bundle=scoring,
+            state_update_result=state,
+            caller_previous_session_state_snapshot=_session("S1"),
+        )
+    )
+
+    assert result.next_state() == "S3"
+    assert stored is not None
+    assert stored.policy_execution_ref is not None
+    assert stored.policy_execution_ref.mode == "shadow"
+    assert stored.policy_observation is not None
+    assert stored.policy_observation.selected_candidate_id.endswith("s1_to_s3.v1")
+    assert stored.policy_observation.shadow_action_id is not None
+    assert stored.policy_observation.shadow_action_id.endswith("s1_to_s2.v1")
+    assert stored.policy_observation.propensity == 1.0
+
+
+def test_service_active_adopts_gate_approved_safe_candidate_and_replays_it() -> None:
+    task, scoring, state = _valid_inputs()
+    previous = _session("S1")
+    repository = InMemoryM6Repository()
+    service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+        policy_runtime=_learned_runtime("active"),
+    )
+
+    prepared = service.prepare_policy_execution(task, scoring, state, previous)
+    rules_service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+        policy_runtime=PolicyRuntime(mode="rules"),
+    )
+    assert (
+        rules_service.prepare_policy_execution(task, scoring, state, previous)
+        == prepared
+    )
+    first = service.decide_next_action(task, scoring, state, previous)
+    replay = service.decide_next_action(task, scoring, state, previous)
+    stored = repository.get_decision_by_request(
+        request_fingerprint(
+            task_plan=task,
+            scoring_result_bundle=scoring,
+            state_update_result=state,
+            caller_previous_session_state_snapshot=previous,
+        )
+    )
+
+    assert first.next_state() == "S2"
+    assert replay.model_dump(mode="json") == first.model_dump(mode="json")
+    assert stored is not None
+    assert stored.policy_execution_ref == prepared
+    assert stored.policy_observation is not None
+    assert stored.policy_observation.policy_execution_fingerprint == (
+        prepared.policy_execution_fingerprint
+    )
+
+
+def test_policy_persistence_failure_falls_back_to_rules_behavior() -> None:
+    class FailingPolicyRepository(InMemoryM6Repository):
+        def commit_policy_execution(self, execution: Any) -> Any:
+            raise RuntimeError("policy persistence unavailable")
+
+    task, scoring, state = _valid_inputs()
+    repository = FailingPolicyRepository()
+    result = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+        policy_runtime=_learned_runtime("active"),
+    ).decide_next_action(task, scoring, state, _session("S1"))
+
+    assert result.next_state() == "S3"
+
+
+@pytest.mark.parametrize(
+    "failure_mode",
+    ("missing_committer", "domain_error", "runtime_error"),
+)
+def test_policy_commit_fallback_preserves_configured_gate_version(
+    failure_mode: str,
+) -> None:
+    class FailingPolicyRepository(InMemoryM6Repository):
+        def commit_policy_execution(self, execution: Any) -> Any:
+            del execution
+            if failure_mode == "domain_error":
+                raise DomainError(
+                    code="POLICY_PERSISTENCE_UNAVAILABLE",
+                    module="m6",
+                    message="policy persistence unavailable",
+                    details={},
+                    recoverable=True,
+                )
+            raise RuntimeError("policy persistence unavailable")
+
+    task, scoring, state = _valid_inputs()
+    repository = FailingPolicyRepository()
+    if failure_mode == "missing_committer":
+        repository.commit_policy_execution = None  # type: ignore[method-assign]
+    configured_gate = "configured-gate-v17"
+    service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+        policy_runtime=_learned_runtime(
+            "active",
+            configured_gate_version=configured_gate,
+        ),
+    )
+
+    execution = service.prepare_policy_execution(
+        task,
+        scoring,
+        state,
+        _session("S1"),
+    )
+
+    assert execution.mode == "rules"
+    assert execution.gate_policy_version == configured_gate
+
+
+def test_legacy_replay_rules_rebuild_preserves_configured_gate_version() -> None:
+    task, scoring, state = _valid_inputs()
+    previous = _session("S1")
+    repository = InMemoryM6Repository()
+    seed_service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+    )
+    seed_service.decide_next_action(task, scoring, state, previous)
+    request_key = request_fingerprint(
+        task_plan=task,
+        scoring_result_bundle=scoring,
+        state_update_result=state,
+        caller_previous_session_state_snapshot=previous,
+    )
+    stored = repository.get_decision_by_request(request_key)
+    assert stored is not None
+    legacy = replace(
+        stored,
+        policy_execution_ref=None,
+        policy_observation=None,
+    )
+    repository._decisions_by_request = {request_key: legacy}  # noqa: SLF001
+    repository._decisions_by_input = {  # noqa: SLF001
+        legacy.input_fingerprint: legacy
+    }
+    repository._decisions_by_turn = {  # noqa: SLF001
+        (legacy.session_id, legacy.turn_count): legacy
+    }
+    repository._policy_executions = {}  # noqa: SLF001
+    configured_gate = "configured-gate-v23"
+    service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+        policy_runtime=PolicyRuntime(
+            mode="rules",
+            gate_policy_version=configured_gate,
+        ),
+    )
+
+    prepared = service.prepare_policy_execution(
+        task,
+        scoring,
+        state,
+        previous,
+    )
+    replayed = service.decide_next_action(task, scoring, state, previous)
+
+    assert prepared.mode == "rules"
+    assert prepared.gate_policy_version == configured_gate
+    assert replayed.model_dump(mode="json") == legacy.result.model_dump(
+        mode="json"
+    )
+
+
+@pytest.mark.parametrize("entrypoint", ["prepare", "decide"])
+def test_replay_rejects_a_different_stored_binding_for_the_same_request(
+    entrypoint: str,
+) -> None:
+    task, scoring, state = _valid_inputs()
+    previous = _session("S1")
+    repository = InMemoryM6Repository()
+    service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        repository,
+        policy_runtime=_learned_runtime("active"),
+    )
+    service.decide_next_action(task, scoring, state, previous)
+    request_key = request_fingerprint(
+        task_plan=task,
+        scoring_result_bundle=scoring,
+        state_update_result=state,
+        caller_previous_session_state_snapshot=previous,
+    )
+    stored = repository.get_decision_by_request(request_key)
+    assert stored is not None
+    assert stored.policy_execution_ref is not None
+    repository._policy_executions = {  # noqa: SLF001
+        request_key: rules_policy_execution(request_key)
+    }
+
+    with pytest.raises(DomainError) as raised:
+        if entrypoint == "prepare":
+            service.prepare_policy_execution(task, scoring, state, previous)
+        else:
+            service.decide_next_action(task, scoring, state, previous)
+
+    assert raised.value.code == "TUTORING_POLICY_INTEGRITY_ERROR"
+    assert raised.value.details["reason"] == "replay_policy_execution_mismatch"
+
+
+def test_prepare_recovers_same_binding_when_same_request_wins_stale_race() -> None:
+    class PublishAuthoritativeReplayRepository(InMemoryM6Repository):
+        def __init__(self, authoritative: InMemoryM6Repository) -> None:
+            super().__init__()
+            self._authoritative = authoritative
+            self._publish_on_request_lookup = True
+
+        def get_decision_by_request(self, request_key: str) -> Any:
+            if self._publish_on_request_lookup:
+                self._publish_on_request_lookup = False
+                source = self._authoritative
+                self._snapshots = dict(source._snapshots)  # noqa: SLF001
+                self._decisions_by_request = dict(  # noqa: SLF001
+                    source._decisions_by_request  # noqa: SLF001
+                )
+                self._decisions_by_input = dict(  # noqa: SLF001
+                    source._decisions_by_input  # noqa: SLF001
+                )
+                self._decisions_by_turn = dict(  # noqa: SLF001
+                    source._decisions_by_turn  # noqa: SLF001
+                )
+                self._policy_executions = dict(  # noqa: SLF001
+                    source._policy_executions  # noqa: SLF001
+                )
+                return None
+            return super().get_decision_by_request(request_key)
+
+    task, scoring, state = _valid_inputs()
+    previous = _session("S1")
+    authoritative = InMemoryM6Repository()
+    authority_service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        authoritative,
+        policy_runtime=_learned_runtime("active"),
+    )
+    expected = authority_service.prepare_policy_execution(
+        task,
+        scoring,
+        state,
+        previous,
+    )
+    authority_service.decide_next_action(task, scoring, state, previous)
+    racing_repository = PublishAuthoritativeReplayRepository(authoritative)
+    racing_service = M6TutoringControlService(
+        DEFAULT_STATE_MACHINE,
+        racing_repository,
+        policy_runtime=PolicyRuntime(mode="rules"),
+    )
+
+    recovered = racing_service.prepare_policy_execution(
+        task,
+        scoring,
+        state,
+        previous,
+    )
+
+    assert recovered == expected

@@ -18,6 +18,7 @@ from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.learning_models import (
     AbilityEstimate,
     AdaptiveSelectionPolicy,
+    LearningModelRun,
     LearningObservationBatch,
 )
 from course_insight.contracts.platform import (
@@ -27,6 +28,7 @@ from course_insight.contracts.platform import (
 )
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.json_io import write_json
+from course_insight.application.assessment_workflow import AssessmentWorkflow
 from course_insight.modules.m0_platform.service import M0PlatformService
 from course_insight.modules.m1_course_governance.service import M1CourseGovernanceService
 from course_insight.modules.m2_evidence_retrieval.service import M2EvidenceRetrievalService
@@ -65,6 +67,126 @@ class AppCoordinator:
         self._m7 = m7_service
         self._m8 = m8_service
         self._m9 = m9_service
+        self._assessment_workflow = AssessmentWorkflow(
+            m0=m0_service,
+            m2=m2_service,
+            m4=m4_service,
+            m5=m5_service,
+            m6=m6_service,
+            m7=m7_service,
+            m8=m8_service,
+            m9=m9_service,
+        )
+
+    def start_assessment(
+        self,
+        *,
+        student_text: str,
+        task_type_hint: str | None,
+        course_id: str,
+        class_id: str,
+        learner_id: str,
+        session_id: str,
+        knowledge_bundle: KnowledgeBundle,
+    ) -> dict[str, ContractModel]:
+        """Create and durably index an assessment without copying its payload."""
+
+        return self._assessment_workflow.start(
+            student_text=student_text,
+            task_type_hint=task_type_hint,
+            course_id=course_id,
+            class_id=class_id,
+            learner_id=learner_id,
+            session_id=session_id,
+            knowledge_bundle=knowledge_bundle,
+        )
+
+    def submit_assessment(
+        self,
+        *,
+        assessment_submission: AssessmentSubmission,
+        request_id: str,
+        index_ref: EvidenceIndexRef,
+        knowledge_bundle: KnowledgeBundle,
+        state_policy_path: Path,
+        teacher_threshold_policy_path: Path,
+    ) -> dict[str, ContractModel]:
+        """Resume a submission from module-owned results and M0 checkpoints."""
+
+        return self._assessment_workflow.submit(
+            assessment_submission=assessment_submission,
+            request_id=request_id,
+            index_ref=index_ref,
+            knowledge_bundle=knowledge_bundle,
+            state_policy_path=state_policy_path,
+            teacher_threshold_policy_path=teacher_threshold_policy_path,
+        )
+
+    def get_pending_assessment(
+        self,
+        *,
+        paper_id: str,
+        learner_id: str,
+    ) -> dict[str, ContractModel]:
+        """Reload one authoritative, not-yet-submitted assessment paper."""
+
+        return self._assessment_workflow.pending_assessment(
+            paper_id=paper_id,
+            learner_id=learner_id,
+        )
+
+    def get_student_assessment(
+        self,
+        *,
+        paper_id: str,
+        learner_id: str,
+    ) -> dict[str, ContractModel]:
+        """Load student-safe authoritative assessment results."""
+
+        return self._assessment_workflow.student_result(
+            paper_id=paper_id,
+            learner_id=learner_id,
+        )
+
+    def get_teacher_review_context(
+        self,
+        *,
+        paper_id: str,
+        course_id: str,
+        class_id: str,
+    ) -> dict[str, ContractModel]:
+        """Load scoring, state, and analytics within an exact teacher scope."""
+
+        return self._assessment_workflow.teacher_context(
+            paper_id=paper_id,
+            course_id=course_id,
+            class_id=class_id,
+        )
+
+    def review_assessment(
+        self,
+        *,
+        paper_id: str,
+        review_submission: TeacherReviewSubmission,
+        request_id: str,
+        knowledge_bundle: KnowledgeBundle,
+        state_policy_path: Path,
+        teacher_threshold_policy_path: Path,
+        course_id: str,
+        class_id: str,
+    ) -> dict[str, ContractModel]:
+        """Resume a teacher review without applying an existing audit twice."""
+
+        return self._assessment_workflow.review(
+            paper_id=paper_id,
+            review_submission=review_submission,
+            request_id=request_id,
+            knowledge_bundle=knowledge_bundle,
+            state_policy_path=state_policy_path,
+            teacher_threshold_policy_path=teacher_threshold_policy_path,
+            course_id=course_id,
+            class_id=class_id,
+        )
 
     def initialize_course(
         self,
@@ -164,20 +286,20 @@ class AppCoordinator:
             rubric_scoring_results=[rubric_result],
         )
         self._m0.append_learning_events(events=scoring.learning_events)
+        observation_batch = self._build_observation_batch(scoring)
+        learning_model_run = (
+            None
+            if observation_batch is None
+            else self._run_learning_models(observation_batch, knowledge_bundle)
+        )
         state = self._m5.update_state(
             scoring_result_bundle=scoring,
             knowledge_bundle=knowledge_bundle,
             previous_learner_state_snapshot=None,
             previous_class_state_snapshot=None,
             state_policy_path=state_policy_path,
-        )
-        # M5-06: convert score audits to learning observations and run models
-        observation_batch = self._m5.convert_to_observations(
-            bundle=scoring,
-            knowledge=knowledge_bundle,
-        )
-        learning_models = self._m5.run_learning_models(
-            observation_batch=observation_batch,
+            learning_observation_batch=observation_batch,
+            learning_model_run=learning_model_run,
         )
         tutoring = self._m6.decide_next_action(
             task_plan=task_plan,
@@ -199,7 +321,7 @@ class AppCoordinator:
             state_update_result=state,
             teacher_threshold_policy_path=teacher_threshold_policy_path,
         )
-        return {
+        result: dict[str, ContractModel] = {
             "task_plan": task_plan,
             "assessment_paper": paper,
             "scoring_preparation": preparation,
@@ -207,11 +329,13 @@ class AppCoordinator:
             "rubric_scoring_result": rubric_result,
             "scoring_result": scoring,
             "state_result": state,
-            "learning_models": learning_models,
             "tutoring_result": tutoring,
             "feedback": feedback,
             "analytics": analytics,
         }
+        if learning_model_run is not None:
+            result["learning_model_run"] = learning_model_run
+        return result
 
     def run_teacher_review_cycle(
         self,
@@ -234,12 +358,34 @@ class AppCoordinator:
             teacher_review_decision=decision,
         )
         self._m0.append_learning_events(events=reviewed.learning_events)
-        recomputed = self._m5.update_state(
-            scoring_result_bundle=reviewed,
-            knowledge_bundle=knowledge_bundle,
-            previous_learner_state_snapshot=state_update_result.learner_state_snapshot,
-            previous_class_state_snapshot=state_update_result.class_state_snapshot,
-            state_policy_path=state_policy_path,
+        rejected = (
+            reviewed.get_audit_record(decision.audit_id).review_status
+            == "rejected"
+        )
+        observation_batch = (
+            None if rejected else self._build_observation_batch(reviewed)
+        )
+        learning_model_run = (
+            None
+            if observation_batch is None
+            else self._run_learning_models(observation_batch, knowledge_bundle)
+        )
+        recomputed = (
+            state_update_result.model_copy(deep=True)
+            if rejected
+            else self._m5.update_state(
+                scoring_result_bundle=reviewed,
+                knowledge_bundle=knowledge_bundle,
+                previous_learner_state_snapshot=(
+                    state_update_result.learner_state_snapshot
+                ),
+                previous_class_state_snapshot=(
+                    state_update_result.class_state_snapshot
+                ),
+                state_policy_path=state_policy_path,
+                learning_observation_batch=observation_batch,
+                learning_model_run=learning_model_run,
+            )
         )
         refreshed = self._m9.build_teacher_analytics(
             knowledge_bundle=knowledge_bundle,
@@ -247,12 +393,36 @@ class AppCoordinator:
             state_update_result=recomputed,
             teacher_threshold_policy_path=teacher_threshold_policy_path,
         )
-        return {
+        result: dict[str, ContractModel] = {
             "review_decision": decision,
             "reviewed_scoring_result": reviewed,
             "recomputed_state_result": recomputed,
             "refreshed_analytics": refreshed,
         }
+        if learning_model_run is not None:
+            result["learning_model_run"] = learning_model_run
+        return result
+
+    def _build_observation_batch(
+        self,
+        scoring: ScoringResultBundle,
+    ) -> LearningObservationBatch | None:
+        builder = getattr(self._m8, "build_observation_batch", None)
+        if not callable(builder):
+            return None
+        return builder(scoring.paper_id, scoring)
+
+    def _run_learning_models(
+        self,
+        observation_batch: LearningObservationBatch,
+        knowledge_bundle: KnowledgeBundle,
+    ) -> LearningModelRun | None:
+        """Forward authoritative M8 evidence without constructing an empty batch."""
+
+        runner = getattr(self._m5, "run_learning_models", None)
+        if not callable(runner):
+            return None
+        return runner(observation_batch, knowledge_bundle)
 
     def run_intelligence_architecture(
         self,

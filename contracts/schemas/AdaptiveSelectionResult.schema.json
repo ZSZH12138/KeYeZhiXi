@@ -76,7 +76,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "M8 item selection output; empty until IRT is configured.",
+  "description": "M8 constrained item-selection output.",
   "properties": {
     "ability_estimate": {
       "anyOf": [
@@ -88,6 +88,19 @@
         }
       ],
       "default": null
+    },
+    "failure_code": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Failure Code"
     },
     "item_ids": {
       "items": {

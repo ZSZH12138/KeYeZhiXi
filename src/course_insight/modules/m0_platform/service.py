@@ -14,6 +14,7 @@ from course_insight.contracts.platform import ActorContext, AsyncJobStatus
 from course_insight.infrastructure.sqlite import SQLiteM0Repository
 from course_insight.modules.m0_platform.event_store import M0EventStore
 from course_insight.modules.m0_platform.repository import M0Repository
+from course_insight.modules.m0_platform.workflow import AssessmentRun
 
 
 T = TypeVar("T", bound=ContractModel)
@@ -52,11 +53,17 @@ class M0PlatformService:
         database_path: Path,
         runtime_dir: Path,
         config_dir: Path,
+        *,
+        repository: M0Repository | None = None,
     ) -> None:
         self._database_path = database_path
         self._runtime_dir = runtime_dir
         self._config_dir = config_dir
-        self._repository: M0Repository = SQLiteM0Repository(database_path)
+        self._repository: M0Repository = (
+            SQLiteM0Repository(database_path)
+            if repository is None
+            else repository
+        )
         self._event_store = M0EventStore(
             repository=self._repository,
             audit_log_path=runtime_dir / "audit" / "learning_events.jsonl",
@@ -78,7 +85,6 @@ class M0PlatformService:
             if not self._runtime_dir.is_dir() or not self._config_dir.is_dir():
                 raise OSError("platform directories are unavailable")
             self._repository.initialize()
-            self._event_store.deliver_pending()
         except Exception as error:
             raise DomainError(
                 code="DATABASE_UNAVAILABLE",
@@ -93,13 +99,12 @@ class M0PlatformService:
         actor_context: ActorContext,
         requested_at: datetime,
     ) -> AsyncJobStatus:
-        """Declare the future Django shell as a deliberately skipped job.
+        """Preserve the legacy empty architecture-scaffold declaration.
 
-        原始输入：M0 认证边界产生的 ActorContext 和请求时间。
-        契约来源：platform.ActorContext 与 platform.AsyncJobStatus。
-        返回消费者：AppCoordinator 架构连通性检查。
-        业务校验：只保留匿名 actor 标识，不启动 Django 或后台任务。
-        错误码：无；当前空实现固定返回 skipped。
+        The production Django shell is started and checked through ``manage.py``
+        and the M0 health endpoints. This existing method remains a deliberately
+        skipped placeholder because ``ArchitectureScaffoldResult`` requires
+        every component of that legacy aggregate to be empty or skipped.
         """
 
         return AsyncJobStatus(
@@ -124,9 +129,6 @@ class M0PlatformService:
         """
 
         try:
-            # Deliver only records left by prior calls. Newly inserted rows stay
-            # observable in the outbox for a later worker/retry cycle.
-            self._event_store.deliver_pending()
             accepted_ids, duplicate_ids = self._repository.append_events(events)
         except Exception as error:
             raise DomainError(
@@ -145,6 +147,176 @@ class M0PlatformService:
             duplicate_event_ids=list(duplicate_ids),
             failed_event_ids=[],
             persisted_at=persisted_at,
+        )
+
+    def record_assessment_run(self, run: AssessmentRun) -> AssessmentRun:
+        """Insert, recover, or safely adopt payload-free workflow metadata."""
+
+        return self._repository.insert_or_get_assessment_run(run)
+
+    def adopt_legacy_assessment_run(
+        self,
+        run: AssessmentRun,
+    ) -> AssessmentRun:
+        """CAS-fill frozen dependencies on one exact pre-v9 workflow row."""
+
+        return self._repository.adopt_legacy_assessment_run(run)
+
+    def get_assessment_run(self, operation_id: str) -> AssessmentRun | None:
+        return self._repository.get_assessment_run(operation_id)
+
+    def get_assessment_run_by_paper(
+        self,
+        paper_id: str,
+        *,
+        operation: str | None = None,
+        status: str | None = None,
+    ) -> AssessmentRun | None:
+        return self._repository.get_assessment_run_by_paper(
+            paper_id,
+            operation=operation,
+            status=status,
+        )
+
+    def get_assessment_run_by_attempt(
+        self,
+        attempt_id: str,
+        *,
+        operation: str | None = None,
+        status: str | None = None,
+    ) -> AssessmentRun | None:
+        return self._repository.get_assessment_run_by_attempt(
+            attempt_id,
+            operation=operation,
+            status=status,
+        )
+
+    def claim_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> AssessmentRun | None:
+        return self._repository.claim_assessment_run(
+            operation_id,
+            worker_id=worker_id,
+            now=now,
+            lease_until=lease_until,
+        )
+
+    def renew_assessment_run_lease(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> bool:
+        return self._repository.renew_assessment_run_lease(
+            operation_id,
+            expected_version=expected_version,
+            worker_id=worker_id,
+            now=now,
+            lease_until=lease_until,
+        )
+
+    def advance_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        checkpoint: str,
+        worker_id: str,
+        now: datetime,
+        feedback_id: str | None = None,
+        report_id: str | None = None,
+        scoring_result_checksum: str | None = None,
+        state_version: int | None = None,
+        previous_state_frozen: bool | None = None,
+        previous_learner_snapshot_id: str | None = None,
+        previous_learner_state_version: int | None = None,
+        previous_class_snapshot_id: str | None = None,
+        previous_class_state_version: int | None = None,
+        policy_id: str | None = None,
+        adapter_id: str | None = None,
+        adapter_version: str | None = None,
+        artifact_sha256: str | None = None,
+        feature_schema_version: str | None = None,
+        action_space_version: str | None = None,
+        gate_policy_version: str | None = None,
+    ) -> AssessmentRun:
+        return self._repository.advance_assessment_run(
+            operation_id,
+            expected_version=expected_version,
+            checkpoint=checkpoint,
+            worker_id=worker_id,
+            now=now,
+            feedback_id=feedback_id,
+            report_id=report_id,
+            scoring_result_checksum=scoring_result_checksum,
+            state_version=state_version,
+            previous_state_frozen=previous_state_frozen,
+            previous_learner_snapshot_id=previous_learner_snapshot_id,
+            previous_learner_state_version=previous_learner_state_version,
+            previous_class_snapshot_id=previous_class_snapshot_id,
+            previous_class_state_version=previous_class_state_version,
+            policy_id=policy_id,
+            adapter_id=adapter_id,
+            adapter_version=adapter_version,
+            artifact_sha256=artifact_sha256,
+            feature_schema_version=feature_schema_version,
+            action_space_version=action_space_version,
+            gate_policy_version=gate_policy_version,
+        )
+
+    def reclaim_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> AssessmentRun:
+        return self._repository.reclaim_assessment_run(
+            operation_id,
+            worker_id=worker_id,
+            now=now,
+            lease_until=lease_until,
+        )
+
+    def complete_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        now: datetime,
+    ) -> AssessmentRun:
+        return self._repository.complete_assessment_run(
+            operation_id,
+            expected_version=expected_version,
+            worker_id=worker_id,
+            now=now,
+        )
+
+    def fail_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        error_code: str,
+        now: datetime,
+    ) -> AssessmentRun:
+        return self._repository.fail_assessment_run(
+            operation_id,
+            expected_version=expected_version,
+            worker_id=worker_id,
+            error_code=error_code,
+            now=now,
         )
 
     def save_contract_snapshot(self, obj: ContractModel, path: Path) -> Path:
@@ -184,7 +356,9 @@ class M0PlatformService:
 
         target = self._snapshot_path(path)
         try:
-            return model_type.from_json_file(target)
+            restored = model_type.from_json_file(target)
+            self._validate_snapshot_payload(restored.to_dict())
+            return restored
         except Exception as error:
             raise DomainError(
                 code="CONFIG_INVALID",

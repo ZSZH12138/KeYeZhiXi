@@ -1,0 +1,10 @@
+{% extends "course_insight/base.html" %}
+{% block title %}班级入口 · 课业智析{% endblock %}
+{% block content %}
+  <h1>班级入口</h1>
+  <p>课程：{{ course_id }}；班级：{{ class_id }}</p>
+  <form method="get" action="{% url 'teacher-review-lookup' %}">
+    {{ lookup_form.as_p }}
+    <button type="submit">查看试卷分析</button>
+  </form>
+{% endblock %}

@@ -2,13 +2,21 @@
 
 ## 项目定位
 
-课业智析是 Python 3.11+、Pydantic v2 的模块化单体。当前交付 84 个数据契约、
+课业智析是 Python 3.11+、Pydantic v2 的模块化单体。当前交付 91 个数据契约、
 10 个公开服务、`AppCoordinator`、Schema 导出和中性空示例。模块之间传递完整
 契约对象；`AppCoordinator` 只调用公开服务，不读任何业务表。
 
 架构入口见 [架构说明](docs/architecture.md) 和
 [接口指南](docs/interface_guide.md)。契约 Schema、空示例和来源图位于
 [contracts/](contracts/)。
+
+### 2026-07-27 运维补充
+
+- Web、部署、进程角色与回滚边界见 [deployment.md](docs/deployment.md)；
+- SQLite→PostgreSQL 迁移与源数据限制见 [postgresql_migration.md](docs/postgresql_migration.md)；
+- M0 leased outbox Worker 的投递语义与状态文件见 [outbox_worker.md](docs/outbox_worker.md)；
+- M6 策略模式、制品、门禁、回滚和 OPE 边界见
+  [m6_policy_operations.md](docs/m6_policy_operations.md)。
 
 ### 本阶段能力
 
@@ -18,11 +26,19 @@
 - 知识点/先修/误区/题卡/量规/蓝图/Q 矩阵引用校验；
 - 幂等任务规划、固定蓝图组卷、客观规则评分和主观评分编排；
 - 版本化评分审计、教师复核 v2、个体/班级状态和 S0—S5 辅导；
+- M6 私有 `rules`/`shadow`/`active` 运行时、JSON-only LinUCB 制品、奖励/OPE、
+  双后端策略持久化和 M0 恢复冻结；默认仍为零 rollout/零探索的 `rules`；
 - 证据化学生反馈、教师报告与低证据保护；
-- M5 DINA 认知诊断、BKT 知识追踪的契约与空运行；
-- M8 IRT、自适应选题和在线标定契约，M9 模型质量/审核边界；
+- M5 真实 DINA 认知诊断、BKT 知识追踪、完整历史恢复和模型驱动状态；
+- M8 真实 2PL IRT、能力估计和受约束自适应选题，M9 模型质量与教师审核发布；
 - M7/M9 统一的 DeepSeek API 契约与空适配器；
-- M0 Django 学生/教师外层契约与跳过状态；
+- M0 配置优先级、真实 Django 学生/教师 Web、两层权限、roles 完整状态同步、
+  runtime snapshot 与独立 leased outbox Worker；
+- SQLite/PostgreSQL 可切换的 M0、M4—M9 持久化与显式
+  SQLite→PostgreSQL 导入器；
+- M4 私有意图 adapter 的规则、shadow、active 三阶段运行方式；公开 `TaskPlan`
+  契约与八字段业务身份保持不变，运维边界见
+  [M4 意图运维说明](docs/m4_intent_operations.md)；
 - SQLite 迁移、幂等事件、原子 JSON 快照和 Schema 导出。
 
 ## 快速开始：独立 Anaconda 环境
@@ -36,6 +52,10 @@ conda activate course-insight-framework
 python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
 python -m pytest -q
 ```
+
+M0 Web/Worker 使用根 `manage.py`：`python manage.py runserver` 启动开发 Web，
+`python manage.py run_outbox_worker` 启动独立 Worker。生产配置与完整验收步骤见
+[部署说明](docs/deployment.md)。
 
 导出公开契约 Schema：
 
@@ -54,7 +74,7 @@ python -m course_insight.cli export-schemas
 ├─ README.md                      接手工程师首要入口
 ├─ config/                        可提交的无密钥示例配置
 ├─ contracts/
-│  ├─ schemas/                    84 份公开契约 Schema
+│  ├─ schemas/                    91 份公开契约 Schema
 │  ├─ examples/                   1 份中性架构空结果示例
 │  └─ contract_provenance.json    契约生产者—消费者来源图
 ├─ data/raw_course/               本地原始资料占位；真实资料不提交
@@ -64,7 +84,7 @@ python -m course_insight.cli export-schemas
 ├─ src/course_insight/
 │  ├─ contracts/                  Pydantic 契约 Python 包
 │  ├─ application/                AppCoordinator 跨模块编排
-│  ├─ infrastructure/             SQLite/JSON/日志基线、DeepSeek 空适配器与未来数据库适配器
+│  ├─ infrastructure/             配置、SQLite/PostgreSQL、JSON/日志、导入器与 DeepSeek 空适配器
 │  ├─ modules/m0_platform/        M0 责任域
 │  ├─ modules/m1_course_governance/
 │  ├─ modules/m2_evidence_retrieval/
@@ -93,9 +113,9 @@ python -m course_insight.cli export-schemas
 | [M1](src/course_insight/modules/m1_course_governance/README.md) | 谢 | 授权、来源版本、确定性分块 | 课程 MD、元数据 JSON、授权 CSV | `CoursePackage` | M2、M3 |
 | [M2](src/course_insight/modules/m2_evidence_retrieval/README.md) | 谢 | RAG；词法/pgvector 索引与审计 | M1 `CoursePackage`；M6/M8 `EvidenceQuery`；检索策略 | `EvidenceIndexRef`、`EvidenceBundle`、`RetrievalAudit` | M7、M9 |
 | [M3](src/course_insight/modules/m3_knowledge_bundle/README.md) | 谢 | 知识、题卡、量规、蓝图、Q 矩阵和标定依据 | M1 `CoursePackage`；教师确认 JSON | `KnowledgeBundle` | M4、M5、M8、M9 |
-| [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务识别、蓝图选择、引用冻结和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
+| [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务识别、私有可重放意图决策、蓝图选择、引用冻结和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
 | [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`CognitiveDiagnosisResult`、`KnowledgeTraceSnapshot`、`LearningModelRun` | M6、M9 |
-| [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 确定性状态机；证据门槛与会话幂等 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult` | M2、M7 |
+| [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 状态机；安全候选、版本化私有策略与会话幂等 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult`；私有策略记录不进入公共契约 | M2、M7 |
 | [M7](src/course_insight/modules/m7_local_model/README.md) | 冯 | 量规评分、学生反馈与 DeepSeek API 边界 | M8 scoring task；M6 feedback task；M2 evidence | `RubricScoringResult`、`StudentFeedbackPackage`、`LLMGenerationResult` | M8、M0 |
 | [M8](src/course_insight/modules/m8_assessment_scoring/README.md) | 童 | 组卷、评分、IRT、自适应选题与在线标定 | M4/M3/M5；作答；M7 result；M9 review | `AssessmentPaper`、`ScoringPreparationResult`、`ScoringResultBundle`、`IRTParameterSet`、`CalibrationRunResult`、`AdaptiveSelectionResult` | M0、M2、M5、M6、M9 |
 | [M9](src/course_insight/modules/m9_teacher_analytics/README.md) | 冯 | 教师分析、DeepSeek 叙述、模型质量和审核 | M3/M8/M5；标定 result；复核表单 | `TeacherAnalyticsBundle`、`TeacherReviewDecision`、`LLMGenerationResult`、`ModelQualityReport`、`CalibrationReviewDecision` | M0、M8 |
@@ -103,7 +123,7 @@ python -m course_insight.cli export-schemas
 生产者—消费者的机器可检验映射见
 [contract_provenance.json](contracts/contract_provenance.json)。
 
-## 契约总览（84 个）
+## 契约总览（91 个）
 
 每个类都继承 `schema_version: str`，拒绝额外字段，要求带时区时间，并继承
 `to_dict() -> dict[str, Any]`、`to_json(indent: int = 2) -> str`、
@@ -228,7 +248,7 @@ python -m course_insight.cli export-schemas
 | `ActorContext` | `actor_id:str; role:student\|teacher\|course_admin\|system_admin; course_ids:list[str]; class_ids:list[str]; issued_at:datetime` | 鉴权范围不可重复；只用伪匿名身份 |
 | `AssessmentSubmission` | `submission_id:str; attempt_id:str; paper_id:str; learner_id:str; answers:dict[str,str\|bool\|int\|float]; submitted_at:datetime` | Django 学生表单到 M8 的无路径输入；答案键为题目实例 ID |
 | `TeacherReviewSubmission` | `submission_id:str; audit_id:str; expected_audit_version:int; reviewer_id:str; decision:confirm\|override\|reject; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; submitted_at:datetime` | Django 教师表单到 M9 的无路径输入；M9 转成同词汇的 `TeacherReviewDecision` |
-| `AsyncJobStatus` | `job_id:str; job_type:django_frontend\|vector_index\|llm_generation\|learning_model\|calibration; status:queued\|running\|succeeded\|failed\|skipped; progress:float; result_ref/error_code; created_at/finished_at` | 终态必须有完成时间；当前 Django 为 `skipped` |
+| `AsyncJobStatus` | `job_id:str; job_type:django_frontend\|vector_index\|llm_generation\|learning_model\|calibration; status:queued\|running\|succeeded\|failed\|skipped; progress:float; result_ref/error_code; created_at/finished_at` | 终态必须有完成时间；legacy Django scaffold 作业保持 `skipped` |
 
 ### M2/M7/M9 智能边界契约（[intelligence.py](src/course_insight/contracts/intelligence.py)）
 
@@ -252,7 +272,7 @@ python -m course_insight.cli export-schemas
 | `LearningObservationBatch` | `batch_id:str; learner_id:str; observations:list[LearningObservation]; watermark:str; created_at:datetime` | 观测 ID 唯一且学习者一致；空列表是合法架构输入 |
 | `CognitiveDiagnosisResult` | `run_id; learner_id; model_type:DINA\|DINO\|GDINA\|NCDM; model_version; concept_mastery; observation_count; status; generated_at` | 概率为 [0,1]；`empty` 时掌握字典必须为空 |
 | `KnowledgeTraceSnapshot` | `trace_id; learner_id; model_type:BKT\|BKT_FORGETTING\|DKT; model_version; concept_probabilities; watermark/count; status; updated_at` | 概率为 [0,1]；`empty` 时追踪字典必须为空 |
-| `LearningModelRun` | `run_id; diagnosis; knowledge_trace; observation_count; status; created_at` | DINA/BKT 学习者、观测数和空状态必须对齐 |
+| `LearningModelRun` | `run_id; diagnosis; knowledge_trace; observation_count; status; created_at` | DINA/BKT 学习者、观测数、版本和状态必须对齐 |
 | `IRTItemParameters` | `item_id/version; discrimination; difficulty; guessing; sample_size` | 题目版本不可变；区分度为正，猜测率在 [0,1) |
 | `IRTParameterSet` | `parameter_set_id; model_type:1PL\|2PL\|3PL; version; item_parameters; sample_size; status:empty\|shadow\|approved\|rejected; created_at` | 题目版本唯一；空集不带参数/样本 |
 | `AbilityEstimate` | `estimate_id; learner_id; parameter_set_id; theta; standard_error; status; estimated_at` | 仅 `estimated` 状态可同时携带 theta 和标准误 |
@@ -262,7 +282,7 @@ python -m course_insight.cli export-schemas
 | `ModelQualityReport` | `report_id; subject_ref; metrics; observation_count; status:insufficient_data\|ready\|failed; generated_at` | 证据不足时禁止伪造质量指标 |
 | `CalibrationReviewDecision` | `decision_id; calibration_run_id; reviewer_id; decision:approve\|reject\|defer; target_parameter_version; reason; reviewed_at` | M9 教师对 M8 shadow 标定的审核契约 |
 
-`DomainError` 不是 84 个 Pydantic 类之一；它固定包含 `code`、`module`、
+`DomainError` 不是 91 个 Pydantic 类之一；它固定包含 `code`、`module`、
 `message`、`details`、`recoverable`，公开 `to_dict()`、`with_detail()` 和稳定
 字符串表示。来源图辅助模型位于
 [provenance.py](src/course_insight/contracts/provenance.py)。
@@ -280,10 +300,12 @@ python -m course_insight.cli export-schemas
 - `initialize() -> None`：读取本地 config/runtime，初始化迁移；供应用启动使用；
   错误 `DATABASE_UNAVAILABLE`。
 - `prepare_django_frontend(actor_context: ActorContext, requested_at: datetime)
-  -> AsyncJobStatus`：M0 的 Django 外层准备入口；当前不启动服务或作业，
-  固定返回 `skipped`。
+  -> AsyncJobStatus`：为保持既有 `ArchitectureScaffoldResult` 公共语义，作为
+  legacy intelligence scaffold 固定返回 `skipped`；它不启动 Web 或 Worker。
+  真实 Django 已由独立 URL/View/Template、WSGI/ASGI 与 health 入口提供。
 - `append_learning_events(events: list[LearningEvent]) -> EventAck`：事件来自 M8
-  scoring；确认供 `AppCoordinator`；错误 `EVENT_PERSIST_FAILED`。
+  scoring；事件与 outbox 同事务持久化，确认供 `AppCoordinator`；文件投递只由
+  独立 Worker 完成；错误 `EVENT_PERSIST_FAILED`。
 - `save_contract_snapshot(obj: ContractModel, path: Path) -> Path`：任意上游契约
   写入 runtime 原子快照；错误 `CONFIG_INVALID`。
 - `load_contract_snapshot(model_type: type[T], path: Path) -> T`：恢复同类型契约；
@@ -357,15 +379,24 @@ class_aggregation_policy: Any)`。
   state_policy_path: Path) -> StateUpdateResult`：scoring 来自 M8、bundle 来自 M3、
   前版状态来自本模块；输出给 M6/M9；错误 `INSUFFICIENT_EVIDENCE`、
   `STALE_STATE_VERSION`、`STATE_POLICY_INVALID`、`STATE_REFERENCE_MISMATCH`。
-- `run_learning_models(observation_batch: LearningObservationBatch)
-  -> LearningModelRun`：为同一学习者返回对齐的空 DINA 认知诊断与空 BKT
-  知识追踪；不做概率估计。
+- `run_learning_models(observation_batch: LearningObservationBatch,
+  knowledge_bundle: KnowledgeBundle|None=None) -> LearningModelRun`：空观测保留
+  `empty` 架构语义；正式观测使用已训练且已收敛的 DINA/BKT 模型和完整治理历史，
+  返回认知诊断、知识追踪、模型版本与审计水位。数据或模型不足时明确失败。
 
 ### M6TutoringControlService
 
 源码：[service.py](src/course_insight/modules/m6_tutoring_fsm/service.py)。构造：
 `M6TutoringControlService(state_machine_definition: Any,
-repository: M6Repository)`。
+repository: M6Repository, policy_runtime: PolicyRuntime|None = None)`。
+
+- `prepare_policy_execution(task_plan: TaskPlan,
+  scoring_result_bundle: ScoringResultBundle,
+  state_update_result: StateUpdateResult,
+  previous_session_state_snapshot: SessionStateSnapshot|None)
+  -> PolicyExecutionRef`：应用层内部 first-writer 冻结入口；返回 M6 私有模型，
+  不进入公共 schema/provenance。直接调用 `decide_next_action(...)` 时仍会惰性执行
+  相同绑定。
 
 - `decide_next_action(task_plan: TaskPlan,
   scoring_result_bundle: ScoringResultBundle,
@@ -373,7 +404,10 @@ repository: M6Repository)`。
   previous_session_state_snapshot: SessionStateSnapshot|None)
   -> TutoringControlResult`：输入来自 M4/M8/M5/本模块；查询给 M2、反馈任务给
   M7。Repository 会恢复最新会话，以 canonical SHA-256 指纹完成重放、重启与
-  并发下的 insert-or-get；错误 `TUTORING_REFERENCE_MISMATCH`、
+  并发下的 insert-or-get。默认 rules 不读取学习制品；shadow 不改变公共动作；
+  active 只有通过安全候选、版本、作用域、支持度、不确定性、OPE、rollout 和
+  kill-switch 门禁才可采用候选。任一失败回退 rules。错误
+  `TUTORING_REFERENCE_MISMATCH`、`TUTORING_POLICY_INTEGRITY_ERROR`、
   `INVALID_STATE_TRANSITION`。
 
 ### M7LocalModelService
@@ -419,11 +453,14 @@ parameter_item_generator: Any)`。
   来自本模块、决定来自 M9；新版本给 M0/M5/M9；错误
   `REVIEW_VERSION_CONFLICT`、`REVIEW_TOTAL_MISMATCH` 及复核契约错误。
 - `calibrate_irt(observation_batch: LearningObservationBatch,
-  requested_at: datetime) -> CalibrationRunResult`：当前产生空 2PL 参数集，
-  不估计、不声称收敛、不伪造质量指标。
+  requested_at: datetime) -> CalibrationRunResult`：足量数据运行真实 2PL 标定，
+  成功时只产生 `shadow` 参数；数据不足返回明确失败，不伪造指标。
 - `select_adaptive_items(policy: AdaptiveSelectionPolicy,
-  ability_estimate: AbilityEstimate, requested_at: datetime)
-  -> AdaptiveSelectionResult`：当前不计算 IRT 信息量，返回空题目列表。
+  ability_estimate: AbilityEstimate, parameter_set: IRTParameterSet,
+  candidate_items: list[ItemCard], administered_item_ids: frozenset[str],
+  exposure_snapshot: ItemExposureSnapshot, requested_at: datetime)
+  -> AdaptiveSelectionResult`：只使用 approved 参数，按信息量、概念配额、
+  难度、已作答和曝光约束选择并持久化题目。
 
 ### M9TeacherAnalyticsService
 
@@ -440,8 +477,8 @@ suggestion_rule_engine: Any)`。
   -> LLMGenerationResult`：仅接受 DeepSeek `teacher_narrative` 用例；当前空实现
   不访问网络且不生成叙述；其他用例返回 `LLM_USE_CASE_INVALID`。
 - `build_model_quality_report(calibration_result: CalibrationRunResult,
-  requested_at: datetime) -> ModelQualityReport`：为 M8 空标定返回
-  `insufficient_data`，不伪造指标；后续作为参数发布门槛。
+  requested_at: datetime) -> ModelQualityReport`：检查收敛、样本覆盖、参数边界
+  和信息量，输出 `ready`、`failed` 或 `insufficient_data`，作为参数发布门槛。
 - `record_teacher_review(raw_review_path: Path|TeacherReviewSubmission,
   current_scoring_result_bundle: ScoringResultBundle) -> TeacherReviewDecision`：原始
   JSON 来自教师、当前审计来自 M8；决定回 M8；错误 `REPORT_SCOPE_INVALID` 和
@@ -452,6 +489,16 @@ suggestion_rule_engine: Any)`。
 源码：[coordinator.py](src/course_insight/application/coordinator.py)。构造接收
 `m0_service`—`m9_service` 十个对应公开服务，不接收仓储：
 
+- `start_assessment(...)`：为一次 Web 流程创建 M4 `TaskPlan`、M8
+  `AssessmentPaper` 与 M0 的无 payload 流程索引。
+- `submit_assessment(...)`：按稳定标识恢复试卷，执行既有评分、状态、辅导、
+  反馈与教师分析链；客观题全量流程允许主观任务列表为空。
+- `get_student_assessment(...)`：在 M0 校验 actor/course/class/learner 归属后，
+  从 M8/M7 的公开入口取得权威评分与反馈。
+- `get_teacher_review_context(...)`：校验教师课程/班级作用域，并从 M8/M5/M9
+  的公开入口恢复复核上下文。
+- `review_assessment(...)`：复用既有教师复核链，追加评分审计版本和新的学习事件，
+  并按 checkpoint 恢复失败后的重放。
 - `initialize_course(*, raw_course_files, course_metadata_path,
   source_authorization_path, output_dir, concept_seed_path, item_seed_path,
   rubric_seed_path, blueprint_seed_path, prerequisite_seed_path,
@@ -466,12 +513,27 @@ suggestion_rule_engine: Any)`。
   teacher_threshold_policy_path) -> dict[str,ContractModel]`，返回复核后的评分、状态与分析对象。
 - `run_intelligence_architecture(*, actor_context: ActorContext,
   course_package_id: str, learner_id: str, requested_at: datetime)
-  -> ArchitectureScaffoldResult`，贯通 M0 Django、M2 pgvector/RAG、M5 DINA/BKT、
-  M7/M9 DeepSeek、M8 IRT/自适应在线标定与 M9 质量门槛；全部返回空结果。
+  -> ArchitectureScaffoldResult`，保留为 legacy 智能能力脚手架；M0 的作业字段
+  为兼容契约保持 `skipped`。该入口没有作答数据，因此继续返回空模型探测；
+  正式测评流程中的 M5 DINA/BKT、M8 IRT/自适应功能使用真实实现。
+  M2 pgvector 与 M7/M9 DeepSeek 网络适配器仍未启用，真实 Django 不由该入口启动。
 - `export_run_manifest(*, objects: list[ContractModel], output_path: Path) -> Path`，
   仅导出 ID、checksum、时间，不导出学生答案。
 
-编排器只直接产生 `ASSESSMENT_FLOW_INVALID`；其他 `DomainError` 原样来自对应服务。
+拆分 Web 用例使用 M0 的稳定 operation ID、短 lease、CAS 版本与 checkpoint；
+权威领域对象仍由 M4/M5/M7/M8/M9 各自持久化。既有一站式方法签名保留。
+编排器产生的流程错误使用稳定 `DomainError`；其他错误原样来自对应服务。
+
+每个拆分操作还冻结知识包、课程包、证据索引和 policy checksum；M5 更新前以
+`state_inputs_frozen` 固定精确 learner/class 前态。长模块调用使用 CAS heartbeat
+续租；M5/M9 对 policy 只读取一次，并对同一份内存字节完成 checksum 校验和严格
+解析，避免校验后文件被替换。M6 在 `state_saved` 与 `tutoring_saved` 之间增加
+`policy_frozen`，冻结 `policy_id`、adapter ID/version、artifact SHA-256、
+feature/action/gate version；恢复逐字段精确比较。v9 依赖字段与 v11 M0 freeze
+字段的历史 workflow 接管都受限于全 NULL、合法 checkpoint、已保存状态和 CAS，
+部分迁移状态继续 fail closed。
+失租 owner 的结果会被丢弃，且不能继续推进或写终态。登录限流使用
+actor+IP、actor 与 IP 三个 HMAC 桶，成功登录保留共享 IP 历史。
 
 ## 三类系统边界原始 JSON
 
@@ -535,45 +597,64 @@ suggestion_rule_engine: Any)`。
 
 ## PostgreSQL 目标、SQLite 基线、JSON 与 runtime 边界
 
-目标部署使用 PostgreSQL，M2 的向量扩展使用 pgvector。当前不安装、不连接
-这两个服务；下列 SQLite 表提供可替换的本地持久化边界，不是多人部署配置。
-后续迁移必须保持模块前缀、主身份、追加式版本和契约不变。
+目标部署使用 PostgreSQL；M2 未来的向量扩展仍归 M2/pgvector。仓库已经包含
+Psycopg 3 连接池、checksum-locked core migrations、M0/M4—M9 PostgreSQL
+Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整可运行基线；
+两个后端必须保持模块前缀、幂等身份、追加式版本与现有 Pydantic 契约一致。
+
+本文档不声称真实 PostgreSQL 联调已在当前机器跑通。live tests 必须同时提供
+`COURSE_INSIGHT_TEST_DATABASE_URL` 和与 DSN 库名完全一致的
+`COURSE_INSIGHT_TEST_DATABASE_NAME`；库名还必须带分隔的 `test`、`ci` 或 `tmp`
+标记。缺少变量会明确 `skip`，保留库或危险命名会 fail closed。
 
 | 表 | 归属 | 主身份/版本 |
 |---|---|---|
 | `schema_migrations` | infrastructure | migration version |
 | `m0_learning_events` | M0 | event_id、idempotency_key |
-| `m0_event_outbox` | M0 | event_id；事件与待投递 JSONL 同事务提交，成功投递后删除 |
+| `m0_event_outbox` | M0 | event_id、lease/version；事件同事务提交，Worker 在事务外投递 |
+| `m0_assessment_runs` | M0 | operation_id、checkpoint、CAS version；只存流程关联元数据 |
 | `m1_course_packages` | M1 | course_package_id + package_version |
 | `m2_evidence_indexes` | M2 | index_id + index_version |
 | `m3_knowledge_bundles` | M3 | knowledge_bundle_id + bundle_version |
 | `m4_task_plans` | M4 | task_id、idempotency_key |
-| `m5_learner_states` | M5 | learner_id + state_version |
-| `m5_class_states` | M5 | snapshot_id、aggregation_policy_version |
+| `m4_intent_decisions` | M4 私有审计 | request_key、输入 checksum、决策/影子元数据；无原始学生文本 |
+| `m5_learner_states` | M5 | course_id + class_id + learner_id + state_version |
+| `m5_class_states` | M5 | course_id + class_id + state_version |
+| `m5_state_updates` | M5 | attempt_id + state_version |
 | `m6_session_states` | M6 | session_id + turn_count |
 | `m6_tutoring_decisions` | M6 | request/input fingerprint、session_id + turn_count |
+| `m6_policy_artifacts` | M6 private | policy_id、artifact SHA-256；immutable manifest |
+| `m6_policy_executions` | M6 private | request fingerprint、policy execution fingerprint |
+| `m6_policy_observations` | M6 private | decision/request/execution identity；logging propensity |
+| `m6_policy_rewards` | M6 private | execution fingerprint + `m6-reward-v1` |
+| `m6_policy_evaluations` | M6 private | policy_id + canonical JSONL dataset identity |
+| `m7_student_feedback` | M7 | feedback_id |
+| `m8_assessment_papers` | M8 | paper_id，并持久化 course/class 执行作用域 |
 | `m8_score_audits` | M8 | audit_id + audit_version；只能追加 |
+| `m8_scoring_results` | M8 | attempt_id + 审计版本集合 |
 | `m9_teacher_reviews` | M9 | decision_id、audit_id + expected version |
+| `m9_teacher_analytics` | M9 | course_id + class_id + report_id |
 
-M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词；项目不建立
-本地模型权重表。每个仓储只访问本模块前缀。教师确认的 JSON 是只读输入；
-`runtime/` 保存数据库、JSON 快照、索引、日志和运行清单。运行产物不得回写
-`data/` 或 `contracts/`。
+M7 的持久表保存现有学生反馈契约，不保存 DeepSeek 密钥、完整提示词或本地模型
+权重。每个仓储只访问本模块前缀。教师确认的 JSON 是只读输入；`runtime/`
+保存数据库、JSON 快照、索引、日志和运行清单。运行产物不得回写 `data/` 或
+`contracts/`。
 
-## 智能架构空编排
+## Legacy 无数据脚手架边界
 
-`AppCoordinator.run_intelligence_architecture` 是统一的智能能力空结果编排入口。
-它不需要 Django、PostgreSQL/pgvector、DeepSeek 密钥或模型数据：
+`AppCoordinator.run_intelligence_architecture` 保留为无作答数据的兼容探测入口。
+它不能代替正式测评学习闭环：
 
-1. M0 返回 Django 外层 `skipped` 作业。
+1. M0 为保持 legacy `ArchitectureScaffoldResult.is_empty()` 语义返回 Django
+   作业 `skipped`；真实 Web 由独立部署入口启动并通过 health 检查。
 2. M2 返回 `backend=pgvector`、`status=empty` 的逻辑索引和空 RAG 审计。
 3. M7 返回 DeepSeek 评分空结果，M9 返回 DeepSeek 教师叙述空结果。
-4. M5 返回 DINA 认知诊断和 BKT 知识追踪空运行。
-5. M8 返回 IRT 空标定与空自适应选题。
-6. M9 为空标定返回 `insufficient_data` 质量报告。
-7. 编排器将上述值组合为 `ArchitectureScaffoldResult(status="empty")`。
+4. 因该入口没有学习观测，M5/M8 返回数据不足或空探测结果。
+5. M9 对空标定返回 `insufficient_data` 质量报告。
+6. 编排器将上述值组合为 `ArchitectureScaffoldResult(status="empty")`。
 
-该入口只组织并返回显式空结果，不伪造真实模型运行。
+该入口不伪造真实模型运行。M0 已实现的 Web/Worker/PostgreSQL 能力不应被写成
+算法空实现。
 
 ## 新工程师入口与推荐顺序
 
@@ -586,8 +667,8 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
   最后读 [AppCoordinator](src/course_insight/application/coordinator.py)。
 - 谢：按 M1 `service.py` → M2 `service.py` → M3 `service.py` 阅读，先理解
   `CoursePackage` 和证据定位，再处理 RAG/pgvector 引用与 Q 矩阵标定依据。
-- 童：先读 M8 `paper_generator.py`/`rule_scorer.py`/`service.py` 的审计身份和
-  IRT/在线标定边界，再读 M5 `update_policy.py`、`aggregation.py` 与 DINA/BKT 空运行。
+- 童：先读 M8 `paper_generator.py`/`rule_scorer.py`/`service.py` 的审计身份，
+  再读 `irt_2pl.py`/`adaptive_selector.py` 和 M5 `dina.py`/`bkt.py`/`service.py`。
 - 冯：先读 M7 DeepSeek 空适配器及量规/证据约束，再读 M9
   `reports.py`/`suggestions.py`、DeepSeek 叙述与模型质量门槛。
 
@@ -595,22 +676,26 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
 `contracts/schemas/` 和 `contracts/contract_provenance.json`，并保持生产者—消费者
 边界一致。
 
-## 当前空实现与后续落点
+## 当前能力状态与后续落点
 
 | 模块 | 当前可运行行为 | 真实实现与启用条件 |
 |---|---|---|
-| M0 | SQLite/JSONL/快照基线；Django 准备作业 `skipped` | M0 实现 Django 页面/权限/表单；持久化适配器切 PostgreSQL |
+| M0 | 配置、日志、SQLite/PostgreSQL、真实 Django/权限/表单、流程恢复、leased Worker | 在目标环境完成生产容量、备份与真实 PostgreSQL 验收 |
 | M1 | 仅固定本地文本解析与段落切分 | 在 parser registry 后增加可替换解析器 |
 | M2 | 词法匹配基线；pgvector 逻辑索引/审计为 `empty` | 实现 embedding 适配器、pgvector 迁移/重建与检索评估 |
 | M3 | 只接受教师确认 JSON，不自动抽取知识 | schema validator 后的教师审核工作流 |
-| M4 | 五类确定性规则识别、显式蓝图映射、SHA-256 幂等身份和 SQLite 原子复用，不含意图模型 | 可替换意图 adapter，但保持 `TaskPlan` 和八字段业务身份 |
-| M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
-| M6 | 8 条合法迁移、确定性目标/动作、证据门槛、SHA-256 身份，以及 SQLite 决策重放、会话恢复和并发控制；不做策略学习 | 可在保持公共契约和审计身份不变的前提下，引入经验证的版本化策略适配器 |
+| M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 91 个公开契约、`TaskPlan` 和八字段业务身份 |
+| M5 | 真实 DINA/BKT、完整历史、版本化模型与模型驱动状态 | 使用达到治理门槛的去标识化数据训练；数据不足时明确失败 |
+| M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline |
 | M7 | `PlaceholderRubricAdapter` 未配置时抛出 `MODEL_ADAPTER_UNCONFIGURED`；DeepSeek 适配器返回 `empty` | 安全、超时、限流和输出校验完成后在 M7 启用 DeepSeek API |
-| M8 | 固定 anchor/规则评分；IRT 标定与自适应选题为 `empty` | 足量数据下实现 IRT shadow 标定，经 M9 质量/教师审核后启用 |
-| M9 | 阈值统计/规则建议；DeepSeek 叙述 `empty`；质量 `insufficient_data` | 实现模型指标与标定审核；在 M9 启用 DeepSeek 教师叙述 |
+| M8 | 权重组卷、冻结评分证据、真实 2PL/EAP、审核发布和受约束自适应选题 | 生产启用前提供足量作答并完成 M9 质量与教师审批 |
+| M9 | 阈值统计/规则建议、真实 IRT 质量门槛与标定审核；DeepSeek 叙述仍 `empty` | 安全、超时、限流和输出校验完成后启用 DeepSeek 教师叙述 |
 
-后续实现必须保留 84 个契约、10 个服务和 `AppCoordinator` 的责任边界，
+M6 私有 OPE/approval 尚未正式接入 M9；当前 M9 公共质量入口只接收 M8
+`CalibrationRunResult`。公共 91 个 schema、`decide_next_action(...)` 四输入签名
+和 contract provenance 均未为 M6 policy learning 改动。
+
+后续实现必须保留 91 个契约、10 个服务和 `AppCoordinator` 的责任边界，
 不得把密钥、日志、真实运行数据或主机路径写入可分发项目文件。
 
 ## 禁止事项与安全边界
@@ -619,7 +704,8 @@ M7 后续只记录 DeepSeek 调用元数据，不保存密钥或完整提示词�
 - 禁止核心内部 HTTP、路由装饰器、网络客户端和绕过 `AppCoordinator` 的编排。
 - 禁止真实姓名、学号、邮箱、电话、身份映射、密钥和真实 `.env`。
 - 禁止 DeepSeek 以外的 LLM、本地模型权重、硬编码 `DEEPSEEK_API_KEY`，以及未经教师审核的高风险自动评分。
-- 禁止在当前空实现中访问网络、连接 PostgreSQL/pgvector、读取密钥或伪造模型指标。
+- 智能空实现禁止访问模型网络、连接 pgvector、读取 DeepSeek 密钥或伪造
+  DINA/BKT/IRT/模型质量指标；M0 仅按显式配置连接 SQLite/PostgreSQL。
 - 禁止把数据库、日志、索引、快照、模型文件或真实课程资料写入受管数据目录。
 - 所有路径、JSON/CSV、时间、引用、分数和版本都必须在系统边界校验；错误只
   返回稳定代码和相对/安全信息。

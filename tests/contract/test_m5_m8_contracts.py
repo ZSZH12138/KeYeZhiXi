@@ -1,45 +1,84 @@
-"""M5/M8 契约序列化往返测试。"""
+"""M5/M8 authoritative evidence contract tests."""
+
+from course_insight.contracts.learning_models import LearningObservation
+from course_insight.modules.m8_assessment_scoring.paper_record import (
+    FrozenAssessmentRecord,
+)
+from course_insight.modules.m8_assessment_scoring.rule_scorer import RuleScorer
+from course_insight.modules.m8_assessment_scoring.service import M8AssessmentService
+from tests.factories.m5_m8 import (
+    UTC_TIME,
+    make_knowledge_bundle,
+    make_paper,
+    make_rubric,
+    make_submission,
+)
 
 
-class TestContractRoundtrip:
-    def _roundtrip(self, obj):
-        """obj -> dict -> obj，验证字段一致。"""
-        cls = type(obj)
-        data = obj.model_dump(mode="json")
-        restored = cls.model_validate(data)
-        assert restored == obj
-        return restored
+class _RecordRepository:
+    def __init__(self, record: FrozenAssessmentRecord) -> None:
+        self.record = record
 
-    def test_state_update_result_roundtrip(self, m5_service, scoring_result_bundle, knowledge_bundle, state_policy_path):
-        result = m5_service.update_state(
-            scoring_result_bundle, knowledge_bundle, None, None, state_policy_path,
-        )
-        self._roundtrip(result)
+    def get_paper_record(self, paper_id: str) -> FrozenAssessmentRecord | None:
+        return self.record if paper_id == self.record.paper.paper_id else None
 
-    def test_learner_state_snapshot_roundtrip(self, m5_service, scoring_result_bundle, knowledge_bundle, state_policy_path):
-        result = m5_service.update_state(
-            scoring_result_bundle, knowledge_bundle, None, None, state_policy_path,
-        )
-        self._roundtrip(result.learner_state_snapshot)
 
-    def test_class_state_snapshot_roundtrip(self, m5_service, scoring_result_bundle, knowledge_bundle, state_policy_path):
-        result = m5_service.update_state(
-            scoring_result_bundle, knowledge_bundle, None, None, state_policy_path,
-        )
-        self._roundtrip(result.class_state_snapshot)
+def test_old_paper_uses_its_frozen_rubric_version() -> None:
+    paper = make_paper(subjective=True)
+    record = FrozenAssessmentRecord(
+        paper=paper,
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[make_rubric(version="1.0.0")],
+    )
+    service = M8AssessmentService(
+        _RecordRepository(record),
+        RuleScorer(),
+        object(),
+    )
 
-    def test_diagnosis_result_roundtrip(self, m5_service, scoring_result_bundle, knowledge_bundle, state_policy_path):
-        result = m5_service.update_state(
-            scoring_result_bundle, knowledge_bundle, None, None, state_policy_path,
-        )
-        self._roundtrip(result.diagnosis_result)
+    preparation = service.prepare_scoring(
+        paper,
+        make_submission(paper),
+        make_knowledge_bundle(rubric_version="2.0.0"),
+    )
 
-    def test_assessment_paper_roundtrip(self, m8_service, task_plan, knowledge_bundle):
-        paper = m8_service.generate_paper(task_plan, knowledge_bundle, None, None)
-        self._roundtrip(paper)
+    assert preparation.rubric_scoring_tasks[0].rubric.version == "1.0.0"
 
-    def test_scoring_result_bundle_roundtrip(self, scoring_result_bundle):
-        self._roundtrip(scoring_result_bundle)
 
-    def test_scoring_preparation_roundtrip(self, scoring_preparation):
-        self._roundtrip(scoring_preparation)
+def test_learning_observation_roundtrip_keeps_binary_policy() -> None:
+    observation = LearningObservation(
+        observation_id="obs_1",
+        learner_id="learner_1",
+        course_id="course_1",
+        class_id="class_1",
+        attempt_id="attempt_1",
+        item_id="item_2",
+        item_version="1.0.0",
+        concept_ids=["concept_2"],
+        score=1.0,
+        max_score=1.0,
+        response_outcome="correct",
+        outcome_policy_version="1.0.0",
+        source_audit_id="audit_1",
+        source_audit_version=1,
+        occurred_at=UTC_TIME,
+    )
+
+    restored = LearningObservation.model_validate(
+        observation.model_dump(mode="json")
+    )
+
+    assert restored == observation
+
+
+def test_m5_m8_public_modules_export_only_real_service_boundaries() -> None:
+    """Catch test-only placeholder services leaking into production imports."""
+
+    from course_insight.modules import m5_learner_class_state as m5
+    from course_insight.modules import m8_assessment_scoring as m8
+
+    assert m5.__all__ == ["M5Repository", "M5StateService"]
+    assert m8.__all__ == ["M8AssessmentService", "M8Repository"]
+    assert not hasattr(m5, "M5StateServiceStub")
+    assert not hasattr(m8, "M8AssessmentServiceStub")

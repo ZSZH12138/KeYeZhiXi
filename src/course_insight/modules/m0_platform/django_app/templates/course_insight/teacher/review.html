@@ -1,0 +1,27 @@
+{% extends "course_insight/base.html" %}
+{% block title %}评分复核 · 课业智析{% endblock %}
+{% block content %}
+  <h1>评分复核</h1>
+  <p>审计：{{ review.audit.audit_id }} v{{ review.audit.audit_version }}；建议分 {{ review.audit.total_score }} / {{ review.audit.max_score }}</p>
+  <h2>学生答案证据片段</h2>
+  <table>
+    <thead><tr><th>量规</th><th>当前分</th><th>答案证据</th><th>课程证据</th><th>理由</th></tr></thead>
+    <tbody>
+      {% for criterion in review.audit.criteria %}
+        <tr>
+          <td>{{ criterion.criterion_id }}</td>
+          <td>{{ criterion.score }}</td>
+          <td>{{ criterion.student_evidence }}</td>
+          <td>{{ criterion.course_evidence_id|default:"—" }}</td>
+          <td>{{ criterion.reason }}</td>
+        </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="flow_token" value="{{ flow }}">
+    {{ form.as_p }}
+    <button type="submit">提交复核</button>
+  </form>
+{% endblock %}

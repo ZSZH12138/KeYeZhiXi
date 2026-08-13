@@ -8,9 +8,11 @@
 
 M0 是系统外层和横切基础：负责配置、事件、快照、健康状态，并规定
 Django 页面、会话、鉴权和表单提交的边界。Django 属于 M0，不新增业务模块；
-视图只负责将请求转成契约并调用 `AppCoordinator`。当前 Django 仅有架构空作业，
-返回 `skipped`，不启动 Web 服务。持久化目标是 PostgreSQL，现有 SQLite
-只是可运行基线。
+视图只负责将请求转成既有 Pydantic 契约并调用 `AppCoordinator`。当前已经有
+真实 Django settings、URL、View、Template、models、两层权限、表单和 migration；
+根 `manage.py` 提供 Web 与管理命令入口。持久化可以由配置选择 SQLite 或
+PostgreSQL；真实 PostgreSQL 是否通过联调，必须以提供受保护测试库后的当次测试
+结果为准。
 
 ## 输入来源
 
@@ -24,26 +26,49 @@ Django 页面、会话、鉴权和表单提交的边界。Django 属于 M0，不
 ## 输出
 
 - `EventAck`：事件幂等持久化确认。
-- `AsyncJobStatus`：Django 或后台作业的可移植状态；当前前端准备作业为 `skipped`。
+- `AsyncJobStatus`：legacy intelligence architecture scaffold 中的 Django
+  作业占位状态；为保持既有公共契约固定为 `skipped`。
 - 原子契约快照和不含密钥/主机路径的健康状态。
 
 公开新入口 `prepare_django_frontend(actor_context, requested_at) -> AsyncJobStatus`
-只声明并返回架构占位状态；真实 Django view、URL 和模板后续仍放在 M0 边界。
+仍服务于 legacy `run_intelligence_architecture()` 空脚手架，固定返回
+`skipped`，不会启动 Web 或 Worker。这个兼容状态不代表 Django 未实现；真实 Web
+由根 `manage.py`/WSGI/ASGI 独立启动，就绪性由 `/health/ready/` 检查。
 
 ## 当前可运行能力
 
-- `initialize()` 创建运行/配置目录、迁移 SQLite，并重试投递上次运行遗留的 outbox。
+- `initialize()` 创建运行/配置目录并应用所选后端的核心 migration；它不执行
+  JSONL 文件 I/O，也不顺手投递 outbox。
 - `append_learning_events()` 在同一事务写入 `m0_learning_events` 与
-  `m0_event_outbox`，以 `event_id` 幂等；新 outbox 保留到下一次初始化或事件追加时，
-  再投递到 `runtime_dir/audit/learning_events.jsonl`。当前没有常驻后台 worker。
+  `m0_event_outbox`，以 `event_id` 幂等；新 outbox 通过 leased Worker 投递到
+  `runtime_dir/audit/learning_events.jsonl`，语义是 at-least-once。
 - `save_contract_snapshot()` / `load_contract_snapshot()` 在 `runtime_dir` 内原子保存、
   恢复契约，并拒绝敏感字段及 Windows/POSIX 主机绝对路径。
 - `health_check()` 只返回配置、数据库和运行目录的状态，不返回路径、环境变量或密钥。
-- `prepare_django_frontend()` 固定返回 `status="skipped"`，不会启动 Web 服务。
+- `prepare_django_frontend()` 为保持 legacy 公共脚手架契约固定返回
+  `status="skipped"`；真实 Django URL/View/Template、权限与健康检查走独立入口。
+- M0 只持久化拆分测评流程的关联 ID、checkpoint、lease 和幂等状态；M4/M5/M7/
+  M8/M9 各自保存所属领域对象，View 与 M0 都不跨模块读业务表。流程行同时冻结
+  知识包/证据索引/policy checksum 与精确 M5 前态引用；长模块调用由 CAS 心跳
+  续租，失租调用方不能继续推进、失败或完成流程。M5/M9 对冻结 policy 单次读取，
+  checksum 校验和解析使用同一份字节。
+- v8→v9 的旧流程行只在 replay identity、TaskPlan 知识包/课程包锚点和全空新增
+  字段同时满足时执行一次 CAS 接管；部分填充、缺少精确后状态引用或不可能的
+  checkpoint 继续 fail closed。
+- 登录失败使用经过 HMAC 的 actor+IP、actor 与 IP 三层桶；成功登录只清理
+  actor 相关桶，保留共享 IP 风险历史。
 
-本阶段尚未实现 `.env`、`app.json`、`roles.csv` 的正式装载，`app.log`、常驻 outbox
-worker、真实 Django 页面/权限和 PostgreSQL 适配器也仍属于后续里程碑。因此当前代码是
-可运行的 M0 基线，不代表分工计划书中的 M0 最终交付已全部完成。
+本阶段已经有 `.env` / `app.json` 配置加载、`roles.csv` 校验与同步、
+`app.log` 结构化日志、独立 outbox Worker、M0 Web Django migration 与
+PostgreSQL 适配器入口。M5 的 DINA/BKT、M8 的 2PL IRT/能力估计/自适应选择
+和 M9 本地质量门槛已经实现；M7/M9 DeepSeek 网络调用仍未启用。生产长期运行
+与真实 PostgreSQL 仍需在目标环境验收，平台持久化本身不会绕过模型数据门槛。
+
+运维文档入口：
+
+- [deployment.md](../../../../docs/deployment.md)
+- [postgresql_migration.md](../../../../docs/postgresql_migration.md)
+- [outbox_worker.md](../../../../docs/outbox_worker.md)
 
 专项验证：
 

@@ -1,10 +1,15 @@
 """Deterministic zero-argument M4 service stub."""
 
 from datetime import datetime, timedelta, timezone
+from threading import Lock
 
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m4_task_orchestration.identity import (
     canonical_idempotency_key,
+)
+from course_insight.modules.m4_task_orchestration.intent_service import (
+    M4IntentService,
+    StoredIntentDecision,
 )
 from course_insight.modules.m4_task_orchestration.repository import M4Repository
 from course_insight.modules.m4_task_orchestration.service import (
@@ -17,6 +22,8 @@ class _StubM4Repository:
 
     def __init__(self) -> None:
         self._plans_by_key: dict[str, TaskPlan] = {}
+        self._intent_decisions: dict[str, StoredIntentDecision] = {}
+        self._lock = Lock()
 
     def insert_or_get_task_plan(
         self,
@@ -39,13 +46,43 @@ class _StubM4Repository:
                 return plan.model_copy(deep=True)
         return None
 
+    def get_intent_decision(
+        self,
+        request_key: str,
+    ) -> StoredIntentDecision | None:
+        with self._lock:
+            return self._intent_decisions.get(request_key)
+
+    def insert_or_get_intent_decision(
+        self,
+        decision: StoredIntentDecision,
+    ) -> StoredIntentDecision:
+        with self._lock:
+            existing = self._intent_decisions.get(decision.request_key)
+            if existing is not None:
+                return existing
+            self._intent_decisions = {
+                **self._intent_decisions,
+                decision.request_key: decision,
+            }
+            return decision
+
 
 class M4TaskOrchestrationServiceStub(M4TaskOrchestrationService):
     """Instantiate M4 with fixed local placeholder dependencies."""
 
     def __init__(self) -> None:
-        repository: M4Repository = _StubM4Repository()
-        super().__init__(repository, canonical_idempotency_key)
+        repository = _StubM4Repository()
+        intent_service = M4IntentService(
+            repository,
+            canonical_idempotency_key,
+        )
+        typed_repository: M4Repository = repository
+        super().__init__(
+            typed_repository,
+            canonical_idempotency_key,
+            intent_service=intent_service,
+        )
 
     def _created_at(self) -> datetime:
         return datetime(

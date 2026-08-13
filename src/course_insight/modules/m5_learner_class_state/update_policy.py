@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -9,6 +10,10 @@ from typing import Any
 from course_insight.contracts.assessment import ScoreAuditRecord, ScoringResultBundle
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import KnowledgeBundle
+from course_insight.contracts.learning_models import (
+    LearningModelRun,
+    LearningObservationBatch,
+)
 from course_insight.contracts.state import (
     ConceptState,
     DiagnosisResult,
@@ -16,7 +21,6 @@ from course_insight.contracts.state import (
     LearnerStateSnapshot,
     MisconceptionStrength,
 )
-from course_insight.infrastructure.json_io import read_json
 
 
 @dataclass(frozen=True)
@@ -36,15 +40,40 @@ class StatePolicy:
     def from_path(cls, path: Path) -> "StatePolicy":
         """Load a strict policy document without silently applying defaults."""
 
-        payload = read_json(path)
         try:
+            content = path.read_bytes()
+        except (OSError, TypeError, ValueError) as exc:
+            raise DomainError(
+                code="STATE_POLICY_INVALID",
+                module="m5",
+                message="state policy could not be loaded",
+                details={
+                    "policy": "state",
+                    "reason": type(exc).__name__,
+                },
+                recoverable=True,
+            ) from exc
+        return cls.from_bytes(content)
+
+    @classmethod
+    def from_bytes(cls, content: bytes) -> "StatePolicy":
+        """Parse one already-read strict policy document."""
+
+        try:
+            payload = json.loads(
+                content.decode("utf-8"),
+                parse_constant=_reject_nonfinite_json_constant,
+            )
             policy = cls(**payload)
-        except (TypeError, ValueError) as exc:
+        except (TypeError, UnicodeError, ValueError) as exc:
             raise DomainError(
                 code="STATE_POLICY_INVALID",
                 module="m5",
                 message="state policy fields are missing or invalid",
-                details={"path": str(path)},
+                details={
+                    "policy": "state",
+                    "reason": type(exc).__name__,
+                },
             ) from exc
         probabilities = (
             policy.consolidating_threshold,
@@ -64,9 +93,13 @@ class StatePolicy:
                 code="STATE_POLICY_INVALID",
                 module="m5",
                 message="state policy thresholds or scope are inconsistent",
-                details={"path": str(path)},
+                details={"policy": "state"},
             )
         return policy
+
+
+def _reject_nonfinite_json_constant(value: str) -> Any:
+    raise ValueError(f"non-finite JSON constant is not allowed: {value}")
 
 
 def audit_version_key(record: ScoreAuditRecord) -> str:
@@ -93,8 +126,9 @@ class DeterministicStateUpdatePolicy:
         self,
         bundle: ScoringResultBundle,
         knowledge: KnowledgeBundle,
+        observations: LearningObservationBatch | None = None,
     ) -> DiagnosisResult:
-        """Diagnose latest audits using governed remediation references."""
+        """Diagnose each audit through its authoritative frozen item mapping."""
 
         audits = latest_audits(bundle)
         if not audits:
@@ -103,6 +137,13 @@ class DeterministicStateUpdatePolicy:
                 module="m5",
                 message="at least one score audit is required for state updating",
                 recoverable=True,
+            )
+        if observations is not None:
+            return self._build_authoritative_diagnosis(
+                bundle,
+                knowledge,
+                observations,
+                audits,
             )
         target_concepts = _unique(
             [target.concept_id for target in bundle.remediation_plan.targets]
@@ -159,6 +200,141 @@ class DeterministicStateUpdatePolicy:
             generated_at=bundle.finalized_at,
         )
 
+    @staticmethod
+    def _build_authoritative_diagnosis(
+        bundle: ScoringResultBundle,
+        knowledge: KnowledgeBundle,
+        observations: LearningObservationBatch,
+        audits: list[ScoreAuditRecord],
+    ) -> DiagnosisResult:
+        if observations.learner_id != bundle.learner_id:
+            raise DomainError(
+                code="STATE_REFERENCE_MISMATCH",
+                module="m5",
+                message="observation batch learner does not match scoring evidence",
+            )
+        observation_by_audit = {
+            (item.source_audit_id, item.source_audit_version): item
+            for item in observations.observations
+            if item.attempt_id == bundle.attempt_id
+        }
+        audit_keys = {(item.audit_id, item.audit_version) for item in audits}
+        if set(observation_by_audit) != audit_keys:
+            raise DomainError(
+                code="STATE_REFERENCE_MISMATCH",
+                module="m5",
+                message="observations must exactly cover current score audits",
+                details={"attempt_id": bundle.attempt_id},
+            )
+
+        q_concepts: dict[tuple[str, str], list[str]] = {}
+        for entry in knowledge.q_matrix:
+            if not entry.is_active():
+                continue
+            key = (entry.item_id, entry.item_version)
+            q_concepts = {
+                **q_concepts,
+                key: [*q_concepts.get(key, []), entry.concept_id],
+            }
+        diagnosis_rows: list[ItemDiagnosis] = []
+        for audit in audits:
+            observation = observation_by_audit[(audit.audit_id, audit.audit_version)]
+            item_key = (observation.item_id, observation.item_version)
+            concepts = _unique(q_concepts.get(item_key, []))
+            if not concepts or set(concepts) != set(observation.concept_ids):
+                raise DomainError(
+                    code="STATE_REFERENCE_MISMATCH",
+                    module="m5",
+                    message="frozen item concepts do not match the governed Q-matrix",
+                    details={
+                        "item_id": observation.item_id,
+                        "item_version": observation.item_version,
+                    },
+                )
+            if (
+                observation.score != audit.total_score
+                or observation.max_score != audit.max_score
+            ):
+                raise DomainError(
+                    code="STATE_REFERENCE_MISMATCH",
+                    module="m5",
+                    message="observation score differs from its source audit",
+                    details={"audit_id": audit.audit_id},
+                )
+            item = knowledge.get_item(*item_key)
+            misconceptions = (
+                list(item.misconception_ids)
+                if observation.response_outcome == "incorrect"
+                else []
+            )
+            prerequisites = _unique(
+                [
+                    relation.from_concept_id
+                    for relation in knowledge.prerequisite_relations
+                    if relation.to_concept_id in concepts
+                ]
+            )
+            diagnosis_rows.append(
+                ItemDiagnosis(
+                    item_instance_id=audit.item_instance_id,
+                    concept_ids=concepts,
+                    misconception_ids=misconceptions,
+                    error_type=(
+                        "correct"
+                        if observation.response_outcome == "correct"
+                        else "incorrect"
+                    ),
+                    confidence=audit.confidence,
+                    evidence_audit_ids=[audit_version_key(audit)],
+                    prerequisite_gap_ids=prerequisites,
+                )
+            )
+
+        diagnosed_concepts = _unique(
+            [concept for row in diagnosis_rows for concept in row.concept_ids]
+        )
+        diagnosed_misconceptions = _unique(
+            [
+                misconception
+                for row in diagnosis_rows
+                for misconception in row.misconception_ids
+            ]
+        )
+        requested_concepts = _unique(
+            [target.concept_id for target in bundle.remediation_plan.targets]
+        )
+        requested_misconceptions = _unique(
+            [
+                target.misconception_id
+                for target in bundle.remediation_plan.targets
+                if target.misconception_id is not None
+            ]
+        )
+        priority_concepts = requested_concepts or diagnosed_concepts
+        priority_misconceptions = (
+            requested_misconceptions or diagnosed_misconceptions
+        )
+        if not set(priority_concepts) <= set(diagnosed_concepts) or not set(
+            priority_misconceptions
+        ) <= set(diagnosed_misconceptions):
+            raise DomainError(
+                code="STATE_REFERENCE_MISMATCH",
+                module="m5",
+                message="remediation priorities are absent from item diagnoses",
+            )
+        return DiagnosisResult(
+            diagnosis_id=(
+                f"{bundle.attempt_id}_diagnosis_v"
+                f"{max(item.audit_version for item in audits)}"
+            ),
+            attempt_id=bundle.attempt_id,
+            learner_id=bundle.learner_id,
+            item_diagnoses=diagnosis_rows,
+            priority_concept_ids=priority_concepts,
+            priority_misconception_ids=priority_misconceptions,
+            generated_at=bundle.finalized_at,
+        )
+
     def build_learner_state(
         self,
         bundle: ScoringResultBundle,
@@ -166,6 +342,7 @@ class DeterministicStateUpdatePolicy:
         diagnosis: DiagnosisResult,
         previous: LearnerStateSnapshot | None,
         policy: StatePolicy,
+        learning_model_run: LearningModelRun | None = None,
     ) -> LearnerStateSnapshot:
         """Build a new immutable version from current latest audit evidence."""
 
@@ -185,25 +362,20 @@ class DeterministicStateUpdatePolicy:
         review_required = bundle.requires_teacher_review()
         priority_concepts = set(diagnosis.priority_concept_ids)
         priority_misconceptions = set(diagnosis.priority_misconception_ids)
-        # M5-03: build previous state lookups for cumulative merging
-        prev_concepts = (
-            {cs.concept_id: cs for cs in previous.concept_states}
-            if previous is not None
-            else {}
-        )
-        prev_misconceptions = (
-            {
-                ms.misconception_id: ms
-                for cs in previous.concept_states
-                for ms in cs.misconceptions
-            }
-            if previous is not None
-            else {}
-        )
-        current_evidence = len(audits)
+        if learning_model_run is not None:
+            if (
+                learning_model_run.status != "completed"
+                or learning_model_run.diagnosis.learner_id != bundle.learner_id
+                or learning_model_run.knowledge_trace.learner_id != bundle.learner_id
+            ):
+                raise DomainError(
+                    code="LEARNING_MODEL_RUN_INVALID",
+                    module="m5",
+                    message="state updating requires a completed learner model run",
+                    recoverable=True,
+                )
         concept_states: list[ConceptState] = []
         for concept in knowledge.concepts:
-            prev_cs = prev_concepts.get(concept.concept_id)
             governed_misconceptions = [
                 item
                 for item in knowledge.misconception_tags
@@ -219,46 +391,60 @@ class DeterministicStateUpdatePolicy:
                         else 0.2
                     ),
                     evidence_count=(
-                        (
-                            prev_misconceptions[item.misconception_id].evidence_count
-                            if item.misconception_id in prev_misconceptions
-                            else 0
-                        )
-                        + (
-                            current_evidence
-                            if item.misconception_id in priority_misconceptions
-                            else 0
-                        )
+                        len(audits)
+                        if item.misconception_id in priority_misconceptions
+                        else 0
                     ),
                     last_seen_at=bundle.finalized_at,
                 )
                 for item in governed_misconceptions
             ]
             is_priority = concept.concept_id in priority_concepts
-            current_mastery = (
-                score_ratio if is_priority else max(0.5, score_ratio)
+            model_mastery = (
+                None
+                if learning_model_run is None
+                else learning_model_run.knowledge_trace.concept_probabilities.get(
+                    concept.concept_id
+                )
             )
-            # M5-03: weighted average merge with previous mastery
-            if prev_cs is not None and prev_cs.evidence_count > 0:
-                total_ev = prev_cs.evidence_count + current_evidence
-                merged_mastery = (
-                    prev_cs.mastery_probability * prev_cs.evidence_count
-                    + current_mastery * current_evidence
-                ) / total_ev
-            else:
-                merged_mastery = current_mastery
+            if learning_model_run is not None and model_mastery is None:
+                raise DomainError(
+                    code="LEARNING_MODEL_EVIDENCE_INCOMPLETE",
+                    module="m5",
+                    message="BKT model run does not cover every governed concept",
+                    details={"concept_id": concept.concept_id},
+                    recoverable=True,
+                )
+            diagnosis_mastery = (
+                None
+                if learning_model_run is None
+                else learning_model_run.diagnosis.concept_mastery.get(
+                    concept.concept_id
+                )
+            )
+            mastery_probability = (
+                model_mastery
+                if model_mastery is not None
+                else score_ratio
+                if is_priority
+                else max(0.5, score_ratio)
+            )
+            confidence = (
+                0.5 + 0.5 * abs(diagnosis_mastery - 0.5) * 2.0
+                if diagnosis_mastery is not None
+                else 0.6
+                if is_priority
+                else 0.5
+            )
             concept_states.append(
                 ConceptState(
                     concept_id=concept.concept_id,
-                    mastery_probability=merged_mastery,
-                    mastery_confidence=(0.6 if is_priority else 0.5),
+                    mastery_probability=mastery_probability,
+                    mastery_confidence=confidence,
                     misconceptions=misconception_states,
                     hint_dependency=(0.5 if is_priority and review_required else 0.0),
                     recent_correction_rate=(0.0 if review_required else score_ratio),
-                    evidence_count=(
-                        (prev_cs.evidence_count if prev_cs else 0)
-                        + (current_evidence if is_priority else 0)
-                    ),
+                    evidence_count=(len(audits) if is_priority else 0),
                     updated_at=bundle.finalized_at,
                 )
             )
@@ -274,9 +460,24 @@ class DeterministicStateUpdatePolicy:
             state_version=version,
             concept_states=concept_states,
             overall_mastery=overall,
-            evidence_count=(
-                (previous.evidence_count if previous is not None else 0)
-                + current_evidence
+            evidence_count=len(audits),
+            model_run_id=(
+                None if learning_model_run is None else learning_model_run.run_id
+            ),
+            dina_model_version=(
+                None
+                if learning_model_run is None
+                else learning_model_run.diagnosis.model_version
+            ),
+            bkt_model_version=(
+                None
+                if learning_model_run is None
+                else learning_model_run.knowledge_trace.model_version
+            ),
+            observation_watermark=(
+                None
+                if learning_model_run is None
+                else learning_model_run.knowledge_trace.observation_watermark
             ),
             updated_at=bundle.finalized_at,
         )

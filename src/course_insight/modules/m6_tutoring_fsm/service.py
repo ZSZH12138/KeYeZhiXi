@@ -20,6 +20,7 @@ from course_insight.modules.m6_tutoring_fsm.decision_policy import (
     M6DecisionPolicy,
 )
 from course_insight.modules.m6_tutoring_fsm.identity import (
+    EvidenceIdentity,
     build_evidence_identity,
     derive_identifier,
     has_new_evidence,
@@ -31,6 +32,16 @@ from course_insight.modules.m6_tutoring_fsm.repository import (
     TutoringDecisionRecord,
     isolated_session_snapshot,
 )
+from course_insight.modules.m6_tutoring_fsm.policy_runtime import (
+    PolicyRuntime,
+    rules_policy_execution,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    CandidateAction,
+    PolicyExecutionRef,
+    TutoringPolicyContext,
+)
+from course_insight.modules.m6_tutoring_fsm.safety_envelope import SafetyEnvelope
 from course_insight.modules.m6_tutoring_fsm.state_machine import (
     DEFAULT_STATE_MACHINE,
     DefaultTutoringStateMachine,
@@ -47,6 +58,8 @@ class M6TutoringControlService:
         self,
         state_machine_definition: Any,
         repository: M6Repository,
+        *,
+        policy_runtime: PolicyRuntime | None = None,
     ) -> None:
         self._state_machine_definition = (
             state_machine_definition
@@ -55,6 +68,86 @@ class M6TutoringControlService:
         )
         self._repository = repository
         self._policy = M6DecisionPolicy()
+        self._policy_runtime = (
+            policy_runtime if policy_runtime is not None else PolicyRuntime()
+        )
+        self._safety_envelope = SafetyEnvelope()
+
+    def prepare_policy_execution(
+        self,
+        task_plan: TaskPlan,
+        scoring_result_bundle: ScoringResultBundle,
+        state_update_result: StateUpdateResult,
+        previous_session_state_snapshot: SessionStateSnapshot | None,
+    ) -> PolicyExecutionRef:
+        """First-write the private policy identity for the public M6 request."""
+
+        task_plan.assert_module_allowed("M6")
+        _validate_cross_contract_references(
+            task_plan,
+            scoring_result_bundle,
+            state_update_result,
+            previous_session_state_snapshot,
+        )
+        request_key = request_fingerprint(
+            task_plan=task_plan,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            caller_previous_session_state_snapshot=(
+                previous_session_state_snapshot
+            ),
+        )
+        stored = self._load_policy_execution(request_key)
+        if stored is not None:
+            replay = self._repository.get_decision_by_request(request_key)
+            if replay is not None:
+                self._validate_replay_policy_execution(
+                    replay,
+                    stored,
+                    request_key,
+                )
+            return stored
+        replay = self._repository.get_decision_by_request(request_key)
+        if replay is not None:
+            return self._prepare_replay_policy_execution(replay, request_key)
+
+        try:
+            previous = self._resolve_previous_snapshot(
+                task_plan,
+                scoring_result_bundle,
+                previous_session_state_snapshot,
+            )
+        except DomainError as error:
+            if (
+                error.module != "m6"
+                or error.code != "TUTORING_REFERENCE_MISMATCH"
+                or error.details.get("reason")
+                != "caller_session_history_is_stale"
+            ):
+                raise
+            replay = self._repository.get_decision_by_request(request_key)
+            if replay is None:
+                raise
+            return self._prepare_replay_policy_execution(replay, request_key)
+        input_key = input_fingerprint(
+            task_plan=task_plan,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            authoritative_previous_session_state_snapshot=previous,
+        )
+        _, _, _, context, candidates = self._build_policy_inputs(
+            task_plan,
+            scoring_result_bundle,
+            state_update_result,
+            previous,
+            request_key,
+        )
+        desired = self._policy_runtime.prepare_execution(
+            context,
+            candidates,
+            input_fingerprint=input_key,
+        )
+        return self._commit_policy_execution(desired)
 
     def decide_next_action(
         self,
@@ -65,6 +158,7 @@ class M6TutoringControlService:
     ) -> TutoringControlResult:
         """Return the unique authoritative action for the supplied M6 inputs."""
 
+        task_plan.assert_module_allowed("M6")
         _validate_cross_contract_references(
             task_plan,
             scoring_result_bundle,
@@ -81,6 +175,7 @@ class M6TutoringControlService:
         )
         replay = self._repository.get_decision_by_request(request_key)
         if replay is not None:
+            self._prepare_replay_policy_execution(replay, request_key)
             return _validated_replay(replay, task_plan, request_key)
 
         try:
@@ -100,7 +195,92 @@ class M6TutoringControlService:
             replay = self._repository.get_decision_by_request(request_key)
             if replay is None:
                 raise
+            self._prepare_replay_policy_execution(replay, request_key)
             return _validated_replay(replay, task_plan, request_key)
+        input_key = input_fingerprint(
+            task_plan=task_plan,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            authoritative_previous_session_state_snapshot=previous,
+        )
+        (
+            targets,
+            current_evidence,
+            signals,
+            context,
+            candidates,
+        ) = self._build_policy_inputs(
+            task_plan,
+            scoring_result_bundle,
+            state_update_result,
+            previous,
+            request_key,
+        )
+        execution = self._load_policy_execution(request_key)
+        if execution is None:
+            desired = self._policy_runtime.prepare_execution(
+                context,
+                candidates,
+                input_fingerprint=input_key,
+            )
+            execution = self._commit_policy_execution(desired)
+        runtime_selection = self._policy_runtime.select(
+            execution,
+            context,
+            candidates,
+            created_at=scoring_result_bundle.finalized_at.isoformat(),
+        )
+        next_state = runtime_selection.public_candidate.next_state
+        self._state_machine_definition.validate_transition(
+            previous.current_state,
+            next_state,
+        )
+        candidate_result = build_tutoring_result(
+            task_plan=task_plan,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            previous_session_state_snapshot=previous,
+            next_state=next_state,
+            target_concept_ids=targets,
+            authoritative_input_fingerprint=input_key,
+            policy_version=self._policy.policy_version,
+            signals=signals,
+        )
+        candidate = TutoringDecisionRecord(
+            decision_id=derive_identifier("decision", input_key),
+            session_id=task_plan.session_id,
+            turn_count=candidate_result.session_state_snapshot.turn_count,
+            previous_turn_count=previous.turn_count,
+            request_fingerprint=request_key,
+            input_fingerprint=input_key,
+            evidence_identity=current_evidence,
+            result=candidate_result,
+            policy_execution_ref=execution,
+            policy_observation=runtime_selection.observation,
+        )
+        authoritative = self._repository.commit_decision(candidate, previous)
+        if (
+            authoritative.request_fingerprint == request_key
+            and authoritative.policy_execution_ref is not None
+            and authoritative.policy_execution_ref != execution
+        ):
+            _raise_policy_integrity_error("decision_policy_execution_mismatch")
+        return _validated_replay(authoritative, task_plan, authoritative.request_fingerprint)
+
+    def _build_policy_inputs(
+        self,
+        task_plan: TaskPlan,
+        scoring_result_bundle: ScoringResultBundle,
+        state_update_result: StateUpdateResult,
+        previous: SessionStateSnapshot,
+        request_key: str,
+    ) -> tuple[
+        list[str],
+        EvidenceIdentity,
+        DecisionSignals,
+        TutoringPolicyContext,
+        tuple[CandidateAction, ...],
+    ]:
         targets = select_target_concept_ids(
             diagnosis_result=state_update_result.diagnosis_result,
             remediation_plan=scoring_result_bundle.remediation_plan,
@@ -123,43 +303,145 @@ class M6TutoringControlService:
             self._policy,
             evidence_progressed,
         )
-        next_state = self._policy.decide_next_state(
-            previous.current_state,
-            signals,
-        )
-        self._state_machine_definition.validate_transition(
-            previous.current_state,
-            next_state,
-        )
-        input_key = input_fingerprint(
-            task_plan=task_plan,
-            scoring_result_bundle=scoring_result_bundle,
-            state_update_result=state_update_result,
-            authoritative_previous_session_state_snapshot=previous,
-        )
-        candidate_result = build_tutoring_result(
-            task_plan=task_plan,
-            scoring_result_bundle=scoring_result_bundle,
-            state_update_result=state_update_result,
-            previous_session_state_snapshot=previous,
-            next_state=next_state,
-            target_concept_ids=targets,
-            authoritative_input_fingerprint=input_key,
-            policy_version=self._policy.policy_version,
-            signals=signals,
-        )
-        candidate = TutoringDecisionRecord(
-            decision_id=derive_identifier("decision", input_key),
-            session_id=task_plan.session_id,
-            turn_count=candidate_result.session_state_snapshot.turn_count,
-            previous_turn_count=previous.turn_count,
+        context = TutoringPolicyContext(
             request_fingerprint=request_key,
-            input_fingerprint=input_key,
-            evidence_identity=current_evidence,
-            result=candidate_result,
+            current_state=previous.current_state,
+            task_type=task_plan.task_type,
+            turn_count=previous.turn_count,
+            score_ratio=(
+                0.0
+                if scoring_result_bundle.max_score <= 0.0
+                else (
+                    scoring_result_bundle.total_score
+                    / scoring_result_bundle.max_score
+                )
+            ),
+            target_concept_count=len(targets),
+            signals=signals,
+            learner_evidence_count=(
+                state_update_result.learner_state_snapshot.evidence_count
+            ),
+            course_id=task_plan.course_id,
+            class_id=task_plan.class_id,
         )
-        authoritative = self._repository.commit_decision(candidate, previous)
-        return _validated_replay(authoritative, task_plan, authoritative.request_fingerprint)
+        candidates = self._safety_envelope.candidates_for(context)
+        return targets, current_evidence, signals, context, candidates
+
+    def _load_policy_execution(
+        self,
+        request_key: str,
+    ) -> PolicyExecutionRef | None:
+        getter = getattr(
+            self._repository,
+            "get_policy_execution_by_request",
+            None,
+        )
+        if not callable(getter):
+            return None
+        try:
+            execution = getter(request_key)
+        except DomainError as error:
+            if error.code == "TUTORING_POLICY_INTEGRITY_ERROR":
+                raise
+            return None
+        except Exception:
+            return None
+        if execution is None:
+            return None
+        if (
+            not isinstance(execution, PolicyExecutionRef)
+            or execution.request_fingerprint != request_key
+        ):
+            _raise_policy_integrity_error("policy_execution_request_mismatch")
+        return execution
+
+    def _commit_policy_execution(
+        self,
+        desired: PolicyExecutionRef,
+    ) -> PolicyExecutionRef:
+        committer = getattr(self._repository, "commit_policy_execution", None)
+        if not callable(committer):
+            return (
+                desired
+                if desired.mode == "rules"
+                else self._rules_policy_execution(
+                    desired.request_fingerprint,
+                    desired.input_fingerprint,
+                )
+            )
+        try:
+            execution = committer(desired)
+        except DomainError as error:
+            if error.code == "TUTORING_POLICY_INTEGRITY_ERROR":
+                raise
+            return self._rules_policy_execution(
+                desired.request_fingerprint,
+                desired.input_fingerprint,
+            )
+        except Exception:
+            return self._rules_policy_execution(
+                desired.request_fingerprint,
+                desired.input_fingerprint,
+            )
+        if (
+            not isinstance(execution, PolicyExecutionRef)
+            or execution.request_fingerprint != desired.request_fingerprint
+        ):
+            _raise_policy_integrity_error("policy_execution_request_mismatch")
+        return execution
+
+    def _prepare_replay_policy_execution(
+        self,
+        replay: TutoringDecisionRecord,
+        request_key: str,
+    ) -> PolicyExecutionRef:
+        expected = (
+            replay.policy_execution_ref
+            if replay.policy_execution_ref is not None
+            else self._rules_policy_execution(request_key)
+        )
+        stored = self._load_policy_execution(request_key)
+        authoritative = (
+            stored
+            if stored is not None
+            else self._commit_policy_execution(expected)
+        )
+        self._validate_replay_policy_execution(
+            replay,
+            authoritative,
+            request_key,
+        )
+        return authoritative
+
+    def _validate_replay_policy_execution(
+        self,
+        replay: TutoringDecisionRecord,
+        execution: PolicyExecutionRef,
+        request_key: str,
+    ) -> None:
+        expected = (
+            replay.policy_execution_ref
+            if replay.policy_execution_ref is not None
+            else self._rules_policy_execution(request_key)
+        )
+        if (
+            replay.request_fingerprint != request_key
+            or execution != expected
+        ):
+            _raise_policy_integrity_error("replay_policy_execution_mismatch")
+
+    def _rules_policy_execution(
+        self,
+        request_key: str,
+        input_key: str | None = None,
+    ) -> PolicyExecutionRef:
+        return rules_policy_execution(
+            request_key,
+            gate_policy_version=(
+                self._policy_runtime.configured_gate_policy_version
+            ),
+            input_fingerprint=input_key,
+        )
 
     def _resolve_previous_snapshot(
         self,
@@ -333,5 +615,14 @@ def _raise_reference_mismatch(reason: str) -> None:
         code="TUTORING_REFERENCE_MISMATCH",
         module="m6",
         message="task, scoring, state, and session identities must align",
+        details={"reason": reason},
+    )
+
+
+def _raise_policy_integrity_error(reason: str) -> None:
+    raise DomainError(
+        code="TUTORING_POLICY_INTEGRITY_ERROR",
+        module="m6",
+        message="stored tutoring policy execution is inconsistent",
         details={"reason": reason},
     )

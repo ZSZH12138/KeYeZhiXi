@@ -5,7 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from datetime import datetime, timedelta, timezone
+from collections.abc import Sequence
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
@@ -26,39 +27,37 @@ from course_insight.contracts.evidence import EvidenceQuery
 from course_insight.contracts.events import LearningEvent
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.learning_models import (
-    AbilityEstimate,
-    AdaptiveSelectionPolicy,
-    AdaptiveSelectionResult,
     CalibrationRunResult,
-    IRTItemParameters,
     IRTParameterSet,
     LearningObservationBatch,
 )
 from course_insight.contracts.platform import AssessmentSubmission
 from course_insight.contracts.state import DiagnosisResult, LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
-from course_insight.modules.m8_assessment_scoring.paper_generator import FIXED_TIME
-from course_insight.modules.m8_assessment_scoring.repository import M8Repository
+from course_insight.modules.m8_assessment_scoring.clock import Clock, SystemUTCClock
+from course_insight.modules.m8_assessment_scoring.irt_2pl import TwoPLCalibrator
+from course_insight.modules.m8_assessment_scoring.model_runtime import (
+    M8ModelRuntimeMixin,
+)
+from course_insight.modules.m8_assessment_scoring.observation_builder import (
+    build_observation_batch as build_authoritative_observation_batch,
+)
+from course_insight.modules.m8_assessment_scoring.paper_record import (
+    FrozenAssessmentRecord,
+)
+from course_insight.modules.m8_assessment_scoring.repository import (
+    M8Repository,
+    ReviewVersionConflictError,
+)
+from course_insight.modules.m8_assessment_scoring.recovery import M8HistoricalRecoveryMixin
+from course_insight.modules.m8_assessment_scoring.retry_equivalence import (
+    same_frozen_generation,
+    same_paper_generation,
+    same_scoring_result,
+)
 
 
-class Clock:
-    """Injectable time source; tests use fixed clock, production uses real time."""
-
-    def now(self) -> datetime:
-        return datetime.now(tz=timezone(timedelta(hours=8)))
-
-
-class FixedClock:
-    """Deterministic clock returning a fixed instant for replay-safe tests."""
-
-    def __init__(self, fixed_at: datetime = FIXED_TIME) -> None:
-        self._fixed_at = fixed_at
-
-    def now(self) -> datetime:
-        return self._fixed_at
-
-
-class M8AssessmentService:
+class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
     """Generate papers, score attempts, and retain audit history."""
 
     def __init__(
@@ -66,12 +65,16 @@ class M8AssessmentService:
         repository: M8Repository,
         rule_scorer: Any,
         parameter_item_generator: Any,
-        clock: Any = None,
+        clock: Clock | None = None,
+        irt_calibrator: TwoPLCalibrator | None = None,
     ) -> None:
         self._repository = repository
         self._rule_scorer = rule_scorer
         self._parameter_item_generator = parameter_item_generator
-        self._clock = clock or FixedClock()
+        self._clock = SystemUTCClock() if clock is None else clock
+        self._irt_calibrator = (
+            TwoPLCalibrator() if irt_calibrator is None else irt_calibrator
+        )
         self._paper_event_context: dict[str, tuple[str, str]] = {}
 
     def generate_paper(
@@ -109,9 +112,116 @@ class M8AssessmentService:
             **self._paper_event_context,
             paper.paper_id: (task_plan.course_id, task_plan.class_id),
         }
-        # M8-10: persist paper directly (no getattr defensive pattern)
-        self._repository.save_paper(paper.model_copy(deep=True))
+        required_rubric_ids = {
+            item.rubric_id
+            for item in paper.all_items()
+            if item.rubric_id is not None
+        }
+        record = FrozenAssessmentRecord(
+            paper=paper.model_copy(deep=True),
+            course_id=task_plan.course_id,
+            class_id=task_plan.class_id,
+            frozen_rubrics=[
+                knowledge_bundle.get_rubric(rubric_id)
+                for rubric_id in sorted(required_rubric_ids)
+            ],
+        )
+        record_insert_or_get = getattr(
+            self._repository,
+            "insert_or_get_paper_record",
+            None,
+        )
+        if callable(record_insert_or_get):
+            authoritative_record = record_insert_or_get(
+                record.model_copy(deep=True)
+            )
+            if (
+                authoritative_record != record
+                and not same_frozen_generation(authoritative_record, record)
+            ):
+                raise RuntimeError("M8 persisted paper record conflicts with result")
+            return authoritative_record.paper.model_copy(deep=True)
+        insert_or_get = getattr(self._repository, "insert_or_get_paper", None)
+        if callable(insert_or_get):
+            authoritative = insert_or_get(
+                paper.model_copy(deep=True),
+                course_id=task_plan.course_id,
+                class_id=task_plan.class_id,
+            )
+            if (
+                authoritative != paper
+                and not same_paper_generation(authoritative, paper)
+            ):
+                raise RuntimeError("M8 persisted paper conflicts with result")
+            return authoritative.model_copy(deep=True)
+        saver = getattr(self._repository, "save_paper", None)
+        if callable(saver):
+            saver(paper.model_copy(deep=True))
         return paper
+
+    def get_paper(self, paper_id: str) -> AssessmentPaper | None:
+        """Recover a frozen paper and its internal execution scope."""
+
+        record_getter = getattr(self._repository, "get_paper_record", None)
+        if callable(record_getter):
+            record = record_getter(paper_id)
+            if record is not None:
+                self._paper_event_context = {
+                    **self._paper_event_context,
+                    paper_id: (record.course_id, record.class_id),
+                }
+                return record.paper.model_copy(deep=True)
+        getter = getattr(self._repository, "get_paper", None)
+        if not callable(getter):
+            return None
+        paper = getter(paper_id)
+        if paper is None:
+            return None
+        context_getter = getattr(
+            self._repository,
+            "get_paper_execution_context",
+            None,
+        )
+        if callable(context_getter):
+            context = context_getter(paper_id)
+            if context is None:
+                raise RuntimeError("M8 persisted paper has no execution scope")
+            self._paper_event_context = {
+                **self._paper_event_context,
+                paper_id: context,
+            }
+        return paper.model_copy(deep=True)
+
+    def get_scoring_result(
+        self,
+        attempt_id: str,
+    ) -> ScoringResultBundle | None:
+        """Recover the latest complete scoring bundle for an attempt."""
+
+        getter = getattr(self._repository, "get_scoring_result", None)
+        if not callable(getter):
+            return None
+        bundle = getter(attempt_id)
+        return None if bundle is None else bundle.model_copy(deep=True)
+
+    def build_observation_batch(
+        self,
+        paper_id: str,
+        bundle: ScoringResultBundle,
+    ) -> LearningObservationBatch:
+        """Build M5/M8 model input from the persisted frozen paper evidence."""
+
+        getter = getattr(self._repository, "get_paper_record", None)
+        record = getter(paper_id) if callable(getter) else None
+        if record is None:
+            raise DomainError(
+                code="PAPER_RECORD_MISSING",
+                module="m8",
+                message="frozen assessment evidence is unavailable",
+                details={"paper_id": paper_id},
+                recoverable=True,
+            )
+        return build_authoritative_observation_batch(record, bundle)
 
     def prepare_scoring(
         self,
@@ -130,6 +240,15 @@ class M8AssessmentService:
 
         if assessment_paper.immutable_checksum != assessment_paper.freeze():
             self._raise_answer_error("assessment paper checksum is invalid")
+        prepared_at = self._clock.now()
+        record_getter = getattr(self._repository, "get_paper_record", None)
+        frozen_record = (
+            record_getter(assessment_paper.paper_id)
+            if callable(record_getter)
+            else None
+        )
+        if frozen_record is not None and frozen_record.paper != assessment_paper:
+            self._raise_answer_error("assessment paper differs from its frozen record")
         raw_bytes, payload = self._load_raw_answers(raw_answer_path)
         attempt_id = self._required_text(payload, "attempt_id")
         paper_id = self._required_text(payload, "paper_id")
@@ -200,7 +319,11 @@ class M8AssessmentService:
                 )
             if instance.rubric_id is None:
                 self._raise_answer_error("subjective paper item has no rubric")
-            rubric = knowledge_bundle.get_rubric(instance.rubric_id)
+            rubric = (
+                frozen_record.get_rubric(instance.rubric_id)
+                if frozen_record is not None
+                else knowledge_bundle.get_rubric(instance.rubric_id)
+            )
             scoring_task_id = (
                 f"scoring_{attempt_id}_{instance.item_instance_id}"
             )
@@ -216,7 +339,7 @@ class M8AssessmentService:
                     student_answer=answer,
                     rubric=rubric,
                     evidence_query_id=evidence_query_id,
-                    created_at=self._clock.now(),
+                    created_at=prepared_at,
                 )
             )
             evidence_queries.append(
@@ -239,7 +362,7 @@ class M8AssessmentService:
             rubric_scoring_tasks=rubric_tasks,
             evidence_queries=evidence_queries,
             raw_answer_checksum=hashlib.sha256(raw_bytes).hexdigest(),
-            prepared_at=self._clock.now(),
+            prepared_at=prepared_at,
         )
 
     def finalize_scoring(
@@ -256,6 +379,7 @@ class M8AssessmentService:
         错误码：ANSWER_FORMAT_INVALID。
         """
 
+        finalized_at = self._clock.now()
         task_ids = scoring_preparation_result.pending_task_ids()
         result_ids = [result.scoring_task_id for result in rubric_scoring_results]
         if (
@@ -283,29 +407,12 @@ class M8AssessmentService:
             result = result_by_id[task.scoring_task_id]
             self._validate_rubric_result(task, result)
             review_reasons = list(result.review_flags)
-            # M8-05: use ReviewPolicy.needs_review() for dual-scoring disagreement detection
-            # When review_flags carry "dual_scoring_disagreement", the disagreement
-            # is maximal (1.0); in single-scorer mode the default is 0.0.
-            disagreement = (
-                1.0
-                if "dual_scoring_disagreement" in result.review_flags
-                else 0.0
-            )
-            if task.rubric.review_policy.needs_review(
-                result.confidence, disagreement
+            if (
+                result.confidence
+                < task.rubric.review_policy.low_confidence_threshold
+                and "low_confidence" not in review_reasons
             ):
-                if (
-                    result.confidence
-                    < task.rubric.review_policy.low_confidence_threshold
-                    and "low_confidence" not in review_reasons
-                ):
-                    review_reasons.insert(0, "low_confidence")
-                if (
-                    disagreement
-                    > task.rubric.review_policy.double_score_disagreement_threshold
-                    and "dual_scoring_disagreement" not in review_reasons
-                ):
-                    review_reasons.append("dual_scoring_disagreement")
+                review_reasons.insert(0, "low_confidence")
             requires_review = bool(review_reasons)
             subjective_audits.append(
                 ScoreAuditRecord(
@@ -358,29 +465,12 @@ class M8AssessmentService:
             [record.max_score for record in audits],
             "scoring maxima must remain finite",
         )
-        # Recover course/class from the paper event context (set during generate_paper)
-        context = self._paper_event_context.get(
+        course_id, class_id = self._event_context(
             scoring_preparation_result.paper_id
         )
-        if context is None:
-            raise DomainError(
-                code="SCORING_REFERENCE_MISMATCH",
-                module="m8",
-                message="paper course/class context was not found for scoring",
-                details={"paper_id": scoring_preparation_result.paper_id},
-            )
-        course_id, class_id = context
-        # M8-08: include content checksum in event ID to prevent silent collisions
-        content_checksum = hashlib.sha256(
-            json.dumps(
-                {"total_score": total_score, "max_score": max_score},
-                sort_keys=True,
-            ).encode("utf-8")
-        ).hexdigest()[:12]
         event = LearningEvent(
             event_id=(
-                f"event_{scoring_preparation_result.attempt_id}_"
-                f"assessment_scored_{content_checksum}"
+                f"event_{scoring_preparation_result.attempt_id}_assessment_scored"
             ),
             event_type="assessment_scored",
             course_id=course_id,
@@ -395,7 +485,7 @@ class M8AssessmentService:
                     record.needs_review() for record in audits
                 ),
             },
-            occurred_at=self._clock.now(),
+            occurred_at=finalized_at,
         )
         bundle = ScoringResultBundle(
             attempt_id=scoring_preparation_result.attempt_id,
@@ -410,16 +500,13 @@ class M8AssessmentService:
                 based_on_attempt_id=scoring_preparation_result.attempt_id,
                 learner_id=scoring_preparation_result.learner_id,
                 targets=remediation_targets,
-                created_at=self._clock.now(),
+                created_at=finalized_at,
             ),
             total_score=total_score,
             max_score=max_score,
-            finalized_at=self._clock.now(),
+            finalized_at=finalized_at,
         )
-        # M8-10: persist score audits directly (no getattr defensive pattern)
-        for record in bundle.score_audit_records:
-            self._repository.save_score_audit(record.model_copy(deep=True))
-        return bundle
+        return self._persist_scoring_result(bundle)
 
     def apply_teacher_review(
         self,
@@ -438,24 +525,6 @@ class M8AssessmentService:
         current = current_scoring_result_bundle.get_audit_record(
             teacher_review_decision.audit_id
         )
-        # M8-10: read authoritative audit from repository to detect concurrent versions
-        authoritative = self._repository.get_latest_score_audit(
-            teacher_review_decision.audit_id
-        )
-        if (
-            authoritative is not None
-            and authoritative.audit_version > current.audit_version
-        ):
-            raise DomainError(
-                code="REVIEW_VERSION_CONFLICT",
-                module="m8",
-                message="a newer audit version was already persisted by another reviewer",
-                details={
-                    "audit_id": teacher_review_decision.audit_id,
-                    "expected_version": current.audit_version,
-                    "authoritative_version": authoritative.audit_version,
-                },
-            )
         teacher_review_decision.assert_matches(current)
         override_by_id = {
             override.criterion_id: override
@@ -506,23 +575,30 @@ class M8AssessmentService:
                 if teacher_review_decision.decision == "reject"
                 else "approved"
             ),
-            review_reason=[],
+            review_reason=(
+                [teacher_review_decision.teacher_comment]
+                if teacher_review_decision.decision == "reject"
+                else []
+            ),
             created_at=teacher_review_decision.reviewed_at,
         )
         reviewed_bundle = ScoringResultBundle(
             **current_scoring_result_bundle.model_dump(mode="python")
         )
         reviewed_bundle.replace_audit_record(replacement)
-        if reviewed_bundle.learning_events:
+        if reviewed_bundle.learning_events and all(
+            "unavailable" not in value
+            for value in (
+                reviewed_bundle.learning_events[-1].course_id,
+                reviewed_bundle.learning_events[-1].class_id,
+            )
+        ):
             context_event = reviewed_bundle.learning_events[-1]
             course_id = context_event.course_id
             class_id = context_event.class_id
         else:
-            raise DomainError(
-                code="SCORING_REFERENCE_MISMATCH",
-                module="m8",
-                message="cannot recover course/class identity without learning events",
-                details={"attempt_id": reviewed_bundle.attempt_id},
+            course_id, class_id = self._event_context(
+                reviewed_bundle.paper_id
             )
         review_event = LearningEvent(
             event_id=(
@@ -552,148 +628,170 @@ class M8AssessmentService:
                 "finalized_at": teacher_review_decision.reviewed_at,
             }
         )
-        # M8-10: persist reviewed audit directly (no getattr defensive pattern)
-        self._repository.save_score_audit(replacement.model_copy(deep=True))
-        return finalized
+        return self._persist_reviewed_scoring_result(
+            finalized,
+            teacher_review_decision,
+        )
 
-    # ── M8-11 IRT 2PL 基础标定参数 ──
-    _IRT_VERSION = "2pl_v1_basic"
-    _IRT_DEFAULT_DISCRIMINATION = 1.0
-    _IRT_DEFAULT_GUESSING = 0.0  # 2PL 不含猜测参数
+    def _event_context(self, paper_id: str) -> tuple[str, str]:
+        context = self._paper_event_context.get(paper_id)
+        if context is not None:
+            return context
+        getter = getattr(
+            self._repository,
+            "get_paper_execution_context",
+            None,
+        )
+        if callable(getter):
+            context = getter(paper_id)
+            if context is None:
+                raise DomainError(
+                    code="PAPER_CONTEXT_MISSING",
+                    module="m8",
+                    message="paper execution scope is unavailable",
+                    details={"paper_id": paper_id},
+                    recoverable=True,
+                )
+            self._paper_event_context = {
+                **self._paper_event_context,
+                paper_id: context,
+            }
+            return context
+        raise DomainError(
+            code="PAPER_CONTEXT_MISSING",
+            module="m8",
+            message="paper execution scope is unavailable",
+            details={"paper_id": paper_id},
+            recoverable=True,
+        )
+
+    def _persist_scoring_result(
+        self,
+        bundle: ScoringResultBundle,
+    ) -> ScoringResultBundle:
+        insert_or_get = getattr(
+            self._repository,
+            "insert_or_get_scoring_result",
+            None,
+        )
+        if callable(insert_or_get):
+            authoritative = insert_or_get(bundle.model_copy(deep=True))
+            if (
+                authoritative != bundle
+                and not same_scoring_result(authoritative, bundle)
+            ):
+                raise RuntimeError(
+                    "M8 persisted scoring result conflicts with result"
+                )
+            return authoritative.model_copy(deep=True)
+        saver = getattr(self._repository, "save_score_audit", None)
+        if callable(saver):
+            for record in bundle.score_audit_records:
+                saver(record.model_copy(deep=True))
+        return bundle
+
+    def _persist_reviewed_scoring_result(
+        self,
+        bundle: ScoringResultBundle,
+        decision: TeacherReviewDecision,
+    ) -> ScoringResultBundle:
+        writer = getattr(
+            self._repository,
+            "insert_or_get_reviewed_scoring_result",
+            None,
+        )
+        if not callable(writer):
+            return self._persist_scoring_result(bundle)
+        try:
+            authoritative = writer(
+                bundle.model_copy(deep=True),
+                audit_id=decision.audit_id,
+                expected_audit_version=decision.expected_audit_version,
+                expected_audit_checksum=decision.expected_audit_checksum,
+            )
+        except ReviewVersionConflictError as error:
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m8",
+                message=(
+                    "score audit changed before the teacher decision was applied"
+                ),
+                details={
+                    "audit_id": decision.audit_id,
+                    "expected_audit_version": decision.expected_audit_version,
+                },
+                recoverable=True,
+            ) from error
+        if authoritative != bundle and not same_scoring_result(
+            authoritative,
+            bundle,
+        ):
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m8",
+                message="persisted teacher review differs from the request",
+                details={"audit_id": decision.audit_id},
+                recoverable=True,
+            )
+        return authoritative.model_copy(deep=True)
 
     def calibrate_irt(
         self,
-        observation_batch: LearningObservationBatch,
+        observation_batch: (
+            LearningObservationBatch | Sequence[LearningObservationBatch]
+        ),
         requested_at: datetime,
     ) -> CalibrationRunResult:
-        """Run a basic 2PL shadow-calibration over the observation batch.
+        """Run cohort 2PL calibration without weakening learner batch scope.
 
-        原始输入：M5/M8 共用的 LearningObservationBatch 和请求时间。
-        契约来源：learning_models 中的观测批次、IRT 参数集和标定结果。
-        返回消费者：M9 模型质量门和 AppCoordinator。
-        业务校验：无观测时返回 empty；有观测时计算逐题 p-value
-        作为难度代理、默认区分度，标定结果标记为 shadow 待 M9 审核。
-        错误码：无。
+        非空批次交给真实 2PL 校准器；多个单学习者批次会先复制并合并观测。
+        数据不足时返回 ``INSUFFICIENT_CALIBRATION_DATA``，足量且收敛时只产生
+        ``shadow`` 参数，供 M9 后续质量审核。单个空批次仍用于架构占位流程。
         """
 
-        observations = observation_batch.observations
-
-        # 无观测时保持空实现
-        if not observations:
-            parameter_set = IRTParameterSet(
-                parameter_set_id=f"irt_empty_{observation_batch.batch_id}",
-                model_type="2PL",
-                version="unconfigured",
-                item_parameters=[],
-                sample_size=0,
-                status="empty",
-                created_at=requested_at,
-            )
-            return CalibrationRunResult(
-                run_id=f"calibration_empty_{observation_batch.batch_id}",
-                parameter_set=parameter_set,
-                converged=False,
-                metrics={},
-                status="empty",
-                generated_at=requested_at,
-            )
-
-        # ── M8-11: 2PL 基础标定 ──
-        # 按 (item_id, item_version) 分组，计算每题的得分率 p-value
-        item_responses: dict[tuple[str, str], list[float]] = {}
-        for obs in observations:
-            key = (obs.item_id, obs.item_version)
-            ratio = obs.score / obs.max_score if obs.max_score > 0 else 0.0
-            item_responses.setdefault(key, []).append(ratio)
-
-        item_parameters: list[IRTItemParameters] = []
-        for (item_id, item_version), ratios in sorted(item_responses.items()):
-            p_value = sum(ratios) / len(ratios)
-            # 避免极端值导致 logit 发散
-            p_clamped = max(0.01, min(0.99, p_value))
-            # 难度 b = -logit(p) = ln((1-p)/p)
-            difficulty = math.log((1.0 - p_clamped) / p_clamped)
-            item_parameters.append(
-                IRTItemParameters(
-                    item_id=item_id,
-                    item_version=item_version,
-                    discrimination=self._IRT_DEFAULT_DISCRIMINATION,
-                    difficulty=difficulty,
-                    guessing=self._IRT_DEFAULT_GUESSING,
-                    sample_size=len(ratios),
+        if isinstance(observation_batch, LearningObservationBatch):
+            if observation_batch.observations:
+                observations = list(observation_batch.observations)
+                return self._persist_calibration_if_supported(
+                    self._irt_calibrator.fit(observations, requested_at),
+                    observations,
                 )
+            batch_id = observation_batch.batch_id
+        else:
+            batches = list(observation_batch)
+            if any(
+                not isinstance(batch, LearningObservationBatch)
+                for batch in batches
+            ):
+                raise TypeError(
+                    "IRT calibration requires LearningObservationBatch values"
+                )
+            observations = [
+                observation
+                for batch in batches
+                for observation in batch.observations
+            ]
+            return self._persist_calibration_if_supported(
+                self._irt_calibrator.fit(observations, requested_at),
+                observations,
             )
 
-        sample_size = len(observations)
         parameter_set = IRTParameterSet(
-            parameter_set_id=f"irt_shadow_{observation_batch.batch_id}",
+            parameter_set_id=f"irt_empty_{batch_id}",
             model_type="2PL",
-            version=self._IRT_VERSION,
-            item_parameters=item_parameters,
-            sample_size=sample_size,
-            status="shadow",
+            version="unconfigured",
+            item_parameters=[],
+            sample_size=0,
+            status="empty",
             created_at=requested_at,
         )
-
-        # 计算基础指标：平均 p-value 方差作为拟合度代理
-        all_ratios = [r for ratios in item_responses.values() for r in ratios]
-        mean_ratio = sum(all_ratios) / len(all_ratios) if all_ratios else 0.0
-        variance = sum((r - mean_ratio) ** 2 for r in all_ratios) / len(all_ratios) if all_ratios else 0.0
-        metrics = {
-            "mean_p_value": round(mean_ratio, 6),
-            "response_variance": round(variance, 6),
-            "item_count": float(len(item_parameters)),
-        }
-
         return CalibrationRunResult(
-            run_id=f"calibration_shadow_{observation_batch.batch_id}",
+            run_id=f"calibration_empty_{batch_id}",
             parameter_set=parameter_set,
-            converged=True,
-            metrics=metrics,
-            status="shadow",
-            generated_at=requested_at,
-        )
-
-    def select_adaptive_items(
-        self,
-        policy: AdaptiveSelectionPolicy,
-        ability_estimate: AbilityEstimate,
-        requested_at: datetime,
-    ) -> AdaptiveSelectionResult:
-        """Run basic adaptive item selection given a configured policy and ability.
-
-        原始输入：M8 自适应选题策略、能力估计和请求时间。
-        契约来源：learning_models 中的策略、能力与选题结果契约。
-        返回消费者：AppCoordinator 和后续 M8 组卷流程。
-        业务校验：策略未配置或能力未估计时返回 empty；
-        策略已配置且能力已估计时计算 Fisher 信息量目标并返回 selected。
-        错误码：无。
-        """
-
-        # 策略未配置或能力未估计时保持空实现
-        if policy.status == "empty" or ability_estimate.status != "estimated":
-            return AdaptiveSelectionResult(
-                selection_id=f"selection_empty_{policy.policy_id}",
-                policy_id=policy.policy_id,
-                learner_id=ability_estimate.learner_id,
-                item_ids=[],
-                ability_estimate=None,
-                status="empty",
-                selected_at=requested_at,
-            )
-
-        # ── M8-12: 自适应选题基础框架 ──
-        # 当策略已配置且能力已估计时，计算目标难度和信息量门限。
-        # 但当前方法签名不含题目池参数，尚未接入真实选题，
-        # 证据不足不伪造——继续返回 empty 而非假完成。
-        return AdaptiveSelectionResult(
-            selection_id=f"selection_empty_{policy.policy_id}",
-            policy_id=policy.policy_id,
-            learner_id=ability_estimate.learner_id,
-            item_ids=[],
-            ability_estimate=None,
+            converged=False,
+            metrics={},
             status="empty",
-            selected_at=requested_at,
+            generated_at=requested_at,
         )
 
     @staticmethod
@@ -705,14 +803,6 @@ class M8AssessmentService:
                 "attempt_id": path.attempt_id,
                 "paper_id": path.paper_id,
                 "learner_id": path.learner_id,
-                # M8-06: include submission identity in checksum so that
-                # different submissions with identical answers are distinct.
-                "submission_id": path.submission_id,
-                "submitted_at": (
-                    path.submitted_at.isoformat()
-                    if path.submitted_at is not None
-                    else None
-                ),
                 "answers": [
                     {"item_instance_id": item_id, "answer": answer}
                     for item_id, answer in sorted(path.answers.items())

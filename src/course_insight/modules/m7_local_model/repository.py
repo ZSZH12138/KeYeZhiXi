@@ -27,3 +27,22 @@ class M7Repository(Protocol):
 
     def save_feedback(self, package: StudentFeedbackPackage) -> None:
         """Retain one generated student-feedback package."""
+
+    def insert_or_get_feedback(
+        self,
+        package: StudentFeedbackPackage,
+    ) -> StudentFeedbackPackage:
+        """Persist one feedback package or return its identical winner."""
+
+    def get_feedback(
+        self,
+        feedback_id: str,
+    ) -> StudentFeedbackPackage | None:
+        """Load a generated package by stable feedback identity."""
+
+    def get_feedback_for_task(
+        self,
+        task_id: str,
+        learner_id: str,
+    ) -> StudentFeedbackPackage | None:
+        """Load the package for one task and learner."""

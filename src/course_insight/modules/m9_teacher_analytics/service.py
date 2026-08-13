@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -26,7 +28,13 @@ from course_insight.contracts.platform import TeacherReviewSubmission
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.deepseek import EmptyDeepSeekAdapter
 from course_insight.infrastructure.json_io import read_json
-from course_insight.modules.m9_teacher_analytics.repository import M9Repository
+from course_insight.modules.m9_teacher_analytics.model_quality import (
+    build_calibration_quality_report,
+)
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9Repository,
+    ReviewDecisionConflictError,
+)
 from course_insight.modules.m9_teacher_analytics.reports import (
     build_class_report,
     build_individual_report,
@@ -36,6 +44,41 @@ from course_insight.modules.m9_teacher_analytics.suggestions import (
     TeacherThresholdPolicy,
     build_teaching_suggestions,
 )
+
+
+def _read_verified_teacher_policy(
+    path: Path,
+    expected_checksum: str,
+) -> TeacherThresholdPolicy:
+    try:
+        content = path.read_bytes()
+    except (OSError, TypeError, ValueError) as exc:
+        raise DomainError(
+            code="REPORT_SCOPE_INVALID",
+            module="m9",
+            message="teacher threshold policy could not be loaded",
+            details={
+                "policy": "teacher_threshold",
+                "reason": "unavailable",
+            },
+            recoverable=True,
+        ) from exc
+    actual_checksum = hashlib.sha256(content).hexdigest()
+    if type(expected_checksum) is not str or not hmac.compare_digest(
+        actual_checksum,
+        expected_checksum,
+    ):
+        raise DomainError(
+            code="REPORT_SCOPE_INVALID",
+            module="m9",
+            message="teacher threshold policy does not match the frozen dependency",
+            details={
+                "policy": "teacher_threshold",
+                "reason": "checksum_mismatch",
+            },
+            recoverable=True,
+        )
+    return TeacherThresholdPolicy.from_bytes(content)
 
 
 class M9TeacherAnalyticsService:
@@ -77,22 +120,19 @@ class M9TeacherAnalyticsService:
         calibration_result: CalibrationRunResult,
         requested_at: datetime,
     ) -> ModelQualityReport:
-        """Return an insufficient-data report for empty IRT calibration.
+        """Evaluate one IRT calibration for teacher approval.
 
         原始输入：M8 标定结果和质量检查请求时间。
         契约来源：CalibrationRunResult 与 ModelQualityReport。
         返回消费者：AppCoordinator、教师复核和后续模型发布门。
-        业务校验：空标定不得声明质量指标或可发布状态。
-        错误码：无；当前空实现固定返回 insufficient_data。
+        业务校验：空标定不得声明指标；只有收敛、覆盖、参数稳定性和信息量
+        同时达标的 shadow 标定才能返回 ready。
+        错误码：无；未达门槛返回 failed 或 insufficient_data。
         """
 
-        return ModelQualityReport(
-            report_id=f"quality_empty_{calibration_result.run_id}",
-            subject_ref=calibration_result.parameter_set.parameter_set_id,
-            metrics={},
-            observation_count=calibration_result.parameter_set.sample_size,
-            status="insufficient_data",
-            generated_at=requested_at,
+        return build_calibration_quality_report(
+            calibration_result,
+            requested_at,
         )
 
     def build_teacher_analytics(
@@ -116,18 +156,50 @@ class M9TeacherAnalyticsService:
             scoring_result_bundle,
             state_update_result,
         )
-        try:
-            policy = TeacherThresholdPolicy.from_path(
-                teacher_threshold_policy_path
-            )
-        except Exception as error:
-            raise DomainError(
-                code="REPORT_SCOPE_INVALID",
-                module="m9",
-                message="teacher threshold policy could not be loaded",
-                details={"path": str(teacher_threshold_policy_path)},
-                recoverable=True,
-            ) from error
+        policy = TeacherThresholdPolicy.from_path(
+            teacher_threshold_policy_path
+        )
+        return self._build_teacher_analytics_with_policy(
+            knowledge_bundle=knowledge_bundle,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            policy=policy,
+        )
+
+    def build_teacher_analytics_with_frozen_policy(
+        self,
+        knowledge_bundle: KnowledgeBundle,
+        scoring_result_bundle: ScoringResultBundle,
+        state_update_result: StateUpdateResult,
+        teacher_threshold_policy_path: Path,
+        expected_policy_checksum: str,
+    ) -> TeacherAnalyticsBundle:
+        """Build analytics using the exact policy bytes identified by M0."""
+
+        self._validate_scope(
+            knowledge_bundle,
+            scoring_result_bundle,
+            state_update_result,
+        )
+        policy = _read_verified_teacher_policy(
+            teacher_threshold_policy_path,
+            expected_policy_checksum,
+        )
+        return self._build_teacher_analytics_with_policy(
+            knowledge_bundle=knowledge_bundle,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            policy=policy,
+        )
+
+    def _build_teacher_analytics_with_policy(
+        self,
+        *,
+        knowledge_bundle: KnowledgeBundle,
+        scoring_result_bundle: ScoringResultBundle,
+        state_update_result: StateUpdateResult,
+        policy: TeacherThresholdPolicy,
+    ) -> TeacherAnalyticsBundle:
         class_report = build_class_report(
             scoring_result_bundle,
             state_update_result,
@@ -157,8 +229,11 @@ class M9TeacherAnalyticsService:
         ]
         queue.sort(key=lambda item: item.priority_key())
         bundle = TeacherAnalyticsBundle(
-            report_id=(
-                f"report_{state_update_result.class_state_snapshot.snapshot_id}"
+            report_id=teacher_analytics_report_id(
+                course_id=knowledge_bundle.course_id,
+                class_state_snapshot_id=(
+                    state_update_result.class_state_snapshot.snapshot_id
+                ),
             ),
             class_report=class_report,
             individual_reports=[individual],
@@ -169,10 +244,50 @@ class M9TeacherAnalyticsService:
             ),
             generated_at=state_update_result.updated_at,
         )
+        insert_or_get = getattr(
+            self._repository,
+            "insert_or_get_analytics",
+            None,
+        )
+        if callable(insert_or_get):
+            authoritative = insert_or_get(
+                bundle.model_copy(deep=True),
+                course_id=knowledge_bundle.course_id,
+            )
+            if authoritative != bundle:
+                raise RuntimeError("M9 persisted analytics conflicts with result")
+            return authoritative.model_copy(deep=True)
         saver = getattr(self._repository, "save_analytics", None)
         if callable(saver):
             saver(bundle.model_copy(deep=True))
         return bundle
+
+    def get_analytics(
+        self,
+        report_id: str,
+    ) -> TeacherAnalyticsBundle | None:
+        getter = getattr(self._repository, "get_analytics", None)
+        if not callable(getter):
+            return None
+        bundle = getter(report_id)
+        return None if bundle is None else bundle.model_copy(deep=True)
+
+    def get_latest_analytics(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+        learner_id: str | None = None,
+    ) -> TeacherAnalyticsBundle | None:
+        getter = getattr(self._repository, "get_latest_analytics", None)
+        if not callable(getter):
+            return None
+        bundle = getter(
+            course_id=course_id,
+            class_id=class_id,
+            learner_id=learner_id,
+        )
+        return None if bundle is None else bundle.model_copy(deep=True)
 
     def record_teacher_review(
         self,
@@ -195,6 +310,9 @@ class M9TeacherAnalyticsService:
                     audit_id=raw_review_path.audit_id,
                     expected_audit_version=(
                         raw_review_path.expected_audit_version
+                    ),
+                    expected_audit_checksum=(
+                        raw_review_path.expected_audit_checksum
                     ),
                     decision=raw_review_path.decision,
                     final_total_score=raw_review_path.final_total_score,
@@ -243,10 +361,52 @@ class M9TeacherAnalyticsService:
             decision.audit_id
         )
         decision.assert_matches(current)
+        insert_or_get = getattr(
+            self._repository,
+            "insert_or_get_review_decision",
+            None,
+        )
+        if callable(insert_or_get):
+            try:
+                authoritative = insert_or_get(decision.model_copy(deep=True))
+            except ReviewDecisionConflictError as error:
+                raise DomainError(
+                    code="REVIEW_VERSION_CONFLICT",
+                    module="m9",
+                    message=(
+                        "another teacher decision already reviewed this audit version"
+                    ),
+                    details={
+                        "audit_id": decision.audit_id,
+                        "expected_audit_version": (
+                            decision.expected_audit_version
+                        ),
+                    },
+                    recoverable=True,
+                ) from error
+            if authoritative != decision:
+                raise DomainError(
+                    code="REVIEW_VERSION_CONFLICT",
+                    module="m9",
+                    message="persisted teacher review conflicts with the request",
+                    details={"audit_id": decision.audit_id},
+                    recoverable=True,
+                )
+            return authoritative.model_copy(deep=True)
         saver = getattr(self._repository, "save_review_decision", None)
         if callable(saver):
             saver(decision.model_copy(deep=True))
         return decision
+
+    def get_review_decision(
+        self,
+        decision_id: str,
+    ) -> TeacherReviewDecision | None:
+        getter = getattr(self._repository, "get_review_decision", None)
+        if not callable(getter):
+            return None
+        decision = getter(decision_id)
+        return None if decision is None else decision.model_copy(deep=True)
 
     @staticmethod
     def _validate_scope(
@@ -274,3 +434,11 @@ class M9TeacherAnalyticsService:
                 message="knowledge, score, and state report scopes must align",
                 recoverable=True,
             )
+
+
+def teacher_analytics_report_id(
+    *,
+    course_id: str,
+    class_state_snapshot_id: str,
+) -> str:
+    return f"report_{course_id}_{class_state_snapshot_id}"

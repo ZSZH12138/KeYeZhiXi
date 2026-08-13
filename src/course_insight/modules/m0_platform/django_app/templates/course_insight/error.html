@@ -1,0 +1,7 @@
+{% extends "course_insight/base.html" %}
+{% block title %}请求未完成 · 课业智析{% endblock %}
+{% block content %}
+  <h1>请求未完成</h1>
+  <p>{{ safe_message }}</p>
+  <p class="muted">状态码：{{ status_code }}</p>
+{% endblock %}

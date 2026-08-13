@@ -1,15 +1,25 @@
 # Exact dependency resolution for the Python 3.11/3.12 CI matrix.
 annotated-types==0.7.0
+asgiref==3.12.1
 colorama==0.4.6 ; sys_platform == "win32"
 coverage==7.15.2
+Django==5.2.16
 iniconfig==2.3.0
 packaging==26.2
 pluggy==1.6.0
+psycopg==3.3.4
+psycopg-binary==3.3.4
+psycopg-pool==3.3.1
 pydantic==2.13.4
 pydantic-core==2.46.4
+pydantic-settings==2.14.2
 Pygments==2.20.0
 pytest==9.1.1
 pytest-cov==7.1.0
+pytest-django==4.12.0
+python-dotenv==1.2.2
 setuptools==83.0.0
+sqlparse==0.5.5
 typing-extensions==4.16.0
 typing-inspection==0.4.2
+tzdata==2026.3 ; sys_platform == "win32"

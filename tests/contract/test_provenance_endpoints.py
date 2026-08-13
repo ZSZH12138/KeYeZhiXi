@@ -23,6 +23,7 @@ from course_insight.modules.m9_teacher_analytics.service import (
 
 
 PROVENANCE_PATH = Path("contracts/contract_provenance.json")
+SCHEMA_PATH = Path("contracts/schemas")
 SERVICE_TYPES = {
     "M0": M0PlatformService,
     "M1": M1CourseGovernanceService,
@@ -67,3 +68,32 @@ def test_internal_provenance_references_public_service_boundaries() -> None:
 
     assert sorted(set(missing_methods)) == []
     assert sorted(set(missing_parameters)) == []
+
+
+def test_m6_public_signature_and_the_91_schema_surface_are_frozen() -> None:
+    """Catch private policy learning leaking into the public contract surface."""
+
+    parameters = signature(
+        M6TutoringControlService.decide_next_action
+    ).parameters
+
+    assert tuple(parameters) == (
+        "self",
+        "task_plan",
+        "scoring_result_bundle",
+        "state_update_result",
+        "previous_session_state_snapshot",
+    )
+    schema_names = {
+        path.name for path in SCHEMA_PATH.glob("*.schema.json")
+    }
+    assert len(schema_names) == 91
+    assert {
+        "BktConceptParameters.schema.json",
+        "BktModelArtifact.schema.json",
+        "ConceptResponse.schema.json",
+        "ConceptResponseSequence.schema.json",
+        "DinaItemParameters.schema.json",
+        "DinaModelArtifact.schema.json",
+        "ItemExposureSnapshot.schema.json",
+    } <= schema_names

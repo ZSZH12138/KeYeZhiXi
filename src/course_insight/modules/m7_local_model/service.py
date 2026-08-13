@@ -187,10 +187,62 @@ class M7LocalModelService:
                     "must_hide_answer": feedback_generation_task.must_hide_answer(),
                 },
             )
+        insert_or_get = getattr(
+            self._prompt_repository,
+            "insert_or_get_feedback",
+            None,
+        )
+        if callable(insert_or_get):
+            authoritative = insert_or_get(package.model_copy(deep=True))
+            if authoritative != package:
+                raise RuntimeError("M7 persisted feedback conflicts with result")
+            return authoritative.model_copy(deep=True)
         feedback_saver = getattr(self._prompt_repository, "save_feedback", None)
         if callable(feedback_saver):
             feedback_saver(package.model_copy(deep=True))
         return package
+
+    def get_feedback(
+        self,
+        feedback_id: str,
+    ) -> StudentFeedbackPackage | None:
+        """Recover feedback by its stable identity."""
+
+        getter = getattr(self._prompt_repository, "get_feedback", None)
+        if not callable(getter):
+            return None
+        package = getter(feedback_id)
+        return None if package is None else package.model_copy(deep=True)
+
+    def get_feedback_for_task(
+        self,
+        task_id: str,
+        learner_id: str,
+    ) -> StudentFeedbackPackage | None:
+        """Recover the feedback package for one task and learner."""
+
+        getter = getattr(
+            self._prompt_repository,
+            "get_feedback_for_task",
+            None,
+        )
+        if not callable(getter):
+            getter = getattr(
+                self._prompt_repository,
+                "get_feedback_by_task_and_learner",
+                None,
+            )
+        if not callable(getter):
+            return None
+        package = getter(task_id, learner_id)
+        return None if package is None else package.model_copy(deep=True)
+
+    def get_feedback_by_task_and_learner(
+        self,
+        task_id: str,
+        learner_id: str,
+    ) -> StudentFeedbackPackage | None:
+        return self.get_feedback_for_task(task_id, learner_id)
 
     @staticmethod
     def _require_aligned_evidence(

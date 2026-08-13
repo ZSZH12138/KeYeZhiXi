@@ -10,7 +10,7 @@ from course_insight.contracts.errors import DomainError
 from course_insight.contracts.events import LearningEvent
 from course_insight.contracts.platform import ActorContext
 from course_insight.contracts.tasking import TaskPlan
-from course_insight.infrastructure.sqlite import SCHEMA_VERSION, connect_sqlite
+from course_insight.infrastructure.sqlite import SCHEMA_VERSION, connect_sqlite, migrate
 from course_insight.modules.m0_platform.service import M0PlatformService
 
 
@@ -58,7 +58,7 @@ def _task_plan() -> TaskPlan:
         blueprint_id=None,
         knowledge_bundle_id="knowledge_bundle_1",
         course_package_id="course_package_1",
-        workflow=["M2", "M7"],
+        workflow=["M2", "M7", "M6"],
         next_module="M2",
         created_at=NOW,
     )
@@ -147,7 +147,7 @@ def test_append_learning_events_collapses_same_batch_duplicates(
     assert outbox_count == 1
 
 
-def test_later_append_delivers_prior_outbox_once(
+def test_later_append_does_not_deliver_prior_outbox(
     service: M0PlatformService,
     tmp_path: Path,
 ) -> None:
@@ -157,8 +157,7 @@ def test_later_append_delivers_prior_outbox_once(
     service.append_learning_events([_event(2)])
 
     audit_path = tmp_path / "runtime" / "audit" / "learning_events.jsonl"
-    assert audit_path.read_text(encoding="utf-8").count("\n") == 1
-    assert '"event_id":"event_1"' in audit_path.read_text(encoding="utf-8")
+    assert not audit_path.exists()
     with connect_sqlite(_database_path(service)) as connection:
         pending_ids = [
             row[0]
@@ -166,10 +165,10 @@ def test_later_append_delivers_prior_outbox_once(
                 "SELECT event_id FROM m0_event_outbox ORDER BY event_id"
             ).fetchall()
         ]
-    assert pending_ids == ["event_2"]
+    assert pending_ids == ["event_1", "event_2"]
 
 
-def test_initialize_delivers_outbox_left_by_previous_process(
+def test_initialize_does_not_deliver_outbox_left_by_previous_process(
     service: M0PlatformService,
     tmp_path: Path,
 ) -> None:
@@ -184,12 +183,12 @@ def test_initialize_delivers_outbox_left_by_previous_process(
     restarted_service.initialize()
 
     audit_path = tmp_path / "runtime" / "audit" / "learning_events.jsonl"
-    assert '"event_id":"event_1"' in audit_path.read_text(encoding="utf-8")
+    assert not audit_path.exists()
     with connect_sqlite(_database_path(service)) as connection:
         outbox_count = connection.execute(
             "SELECT COUNT(*) FROM m0_event_outbox"
         ).fetchone()[0]
-    assert outbox_count == 0
+    assert outbox_count == 1
 
 
 def test_event_and_outbox_roll_back_together_on_outbox_failure(
@@ -253,7 +252,115 @@ def test_health_check_returns_only_safe_component_statuses(
     assert "DEEPSEEK_API_KEY" not in rendered
 
 
-def test_prepare_django_frontend_remains_skipped(
+def test_health_check_marks_database_unavailable_when_m0_event_table_is_missing(
+    service: M0PlatformService,
+) -> None:
+    service.initialize()
+    with connect_sqlite(_database_path(service)) as connection:
+        connection.execute("DROP TABLE m0_learning_events")
+
+    health = service.health_check()
+
+    assert health["database"] == "unavailable"
+
+
+def test_initialize_fails_closed_when_m0_event_table_is_missing(
+    service: M0PlatformService,
+) -> None:
+    service.initialize()
+    with connect_sqlite(_database_path(service)) as connection:
+        connection.execute("DROP TABLE m0_learning_events")
+
+    with pytest.raises(DomainError) as captured:
+        service.initialize()
+
+    assert captured.value.code == "DATABASE_UNAVAILABLE"
+    with connect_sqlite(_database_path(service)) as connection:
+        event_table = connection.execute(
+            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("m0_learning_events",),
+        ).fetchone()
+    assert event_table is None
+
+
+def test_migration_rejects_missing_m0_outbox_table(
+    service: M0PlatformService,
+) -> None:
+    service.initialize()
+    with connect_sqlite(_database_path(service)) as connection:
+        connection.execute("DROP TABLE m0_event_outbox")
+
+        with pytest.raises(RuntimeError, match="M0 schema is incompatible"):
+            migrate(connection)
+
+
+def test_initialize_rejects_weakened_m0_event_constraints(
+    service: M0PlatformService,
+) -> None:
+    service.initialize()
+    with connect_sqlite(_database_path(service)) as connection:
+        connection.execute("DROP TABLE m0_event_outbox")
+        connection.execute("DROP TABLE m0_learning_events")
+        connection.execute(
+            """
+            CREATE TABLE m0_learning_events (
+                event_id TEXT PRIMARY KEY,
+                idempotency_key TEXT NOT NULL UNIQUE,
+                event_type TEXT NOT NULL,
+                occurred_at TEXT NOT NULL,
+                payload TEXT NOT NULL
+            )
+            """
+        )
+        connection.execute(
+            """
+            CREATE TABLE m0_event_outbox (
+                event_id TEXT PRIMARY KEY
+                    REFERENCES m0_learning_events(event_id) ON DELETE CASCADE,
+                record TEXT NOT NULL CHECK (
+                    CASE WHEN json_valid(record)
+                        THEN json(record) = record
+                        ELSE 0
+                    END
+                )
+            )
+            """
+        )
+
+    with pytest.raises(DomainError) as captured:
+        service.initialize()
+
+    assert captured.value.code == "DATABASE_UNAVAILABLE"
+    with connect_sqlite(_database_path(service)) as connection:
+        schema_sql = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?",
+            ("m0_learning_events",),
+        ).fetchone()[0]
+    assert "CHECK" not in schema_sql.upper()
+
+
+def test_prepare_django_frontend_preserves_legacy_skipped_contract(
+    service: M0PlatformService,
+) -> None:
+    service.initialize()
+    actor = ActorContext(
+        actor_id="pseudonym_teacher",
+        role="teacher",
+        course_ids=["course_1"],
+        class_ids=["class_1"],
+        issued_at=NOW,
+    )
+
+    status = service.prepare_django_frontend(actor, NOW)
+
+    assert status.status == "skipped"
+    assert status.progress == 0.0
+    assert status.result_ref is None
+    assert status.error_code is None
+    assert status.finished_at == NOW
+
+
+def test_prepare_django_frontend_does_not_require_runtime_readiness(
     service: M0PlatformService,
 ) -> None:
     actor = ActorContext(
@@ -329,6 +436,45 @@ def test_snapshot_rejects_secret_fields_without_leaking_values(
     assert captured.value.code == "CONFIG_INVALID"
     assert secret_value not in str(captured.value)
     assert captured.value.details == {"contract": "_UnsafeSecretContract"}
+
+
+def test_load_snapshot_rejects_host_absolute_paths(
+    service: M0PlatformService,
+    tmp_path: Path,
+) -> None:
+    service.initialize()
+    unsafe_value = "C:/Users/DELL/private/session.json"
+    snapshot_path = tmp_path / "runtime" / "snapshots" / "unsafe-load.json"
+    snapshot_path.parent.mkdir(parents=True)
+    _task_plan().model_copy(
+        update={"session_id": unsafe_value},
+        deep=True,
+    ).to_json_file(snapshot_path)
+
+    with pytest.raises(DomainError) as captured:
+        service.load_contract_snapshot(TaskPlan, snapshot_path)
+
+    assert captured.value.code == "CONFIG_INVALID"
+    assert captured.value.details == {"contract": "TaskPlan"}
+    assert unsafe_value not in str(captured.value)
+
+
+def test_load_snapshot_rejects_secret_fields_without_leaking_values(
+    service: M0PlatformService,
+    tmp_path: Path,
+) -> None:
+    service.initialize()
+    secret_value = "not-a-real-secret"
+    snapshot_path = tmp_path / "runtime" / "snapshots" / "secret-load.json"
+    snapshot_path.parent.mkdir(parents=True)
+    _UnsafeSecretContract(api_key=secret_value).to_json_file(snapshot_path)
+
+    with pytest.raises(DomainError) as captured:
+        service.load_contract_snapshot(_UnsafeSecretContract, snapshot_path)
+
+    assert captured.value.code == "CONFIG_INVALID"
+    assert captured.value.details == {"contract": "_UnsafeSecretContract"}
+    assert secret_value not in str(captured.value)
 
 
 def test_snapshot_allows_portable_resource_references(

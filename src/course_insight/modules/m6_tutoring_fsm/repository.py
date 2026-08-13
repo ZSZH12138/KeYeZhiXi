@@ -15,6 +15,12 @@ from course_insight.modules.m6_tutoring_fsm.identity import (
     EvidenceIdentity,
     derive_identifier,
 )
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyArtifactManifest,
+    PolicyEvaluationRecord,
+    PolicyExecutionRef,
+    PolicyObservation,
+)
 
 
 _SESSION_TABLE = "m6_session_states"
@@ -33,6 +39,8 @@ class TutoringDecisionRecord:
     input_fingerprint: str
     evidence_identity: EvidenceIdentity
     result: TutoringControlResult
+    policy_execution_ref: PolicyExecutionRef | None = None
+    policy_observation: PolicyObservation | None = None
 
     def __post_init__(self) -> None:
         if not self.session_id or self.turn_count < 0:
@@ -52,6 +60,25 @@ class TutoringDecisionRecord:
         snapshot = self.result.session_state_snapshot
         if snapshot.session_id != self.session_id or snapshot.turn_count != self.turn_count:
             raise ValueError("decision columns must match the result session snapshot")
+        if (self.policy_execution_ref is None) != (
+            self.policy_observation is None
+        ):
+            raise ValueError(
+                "policy execution and observation must be stored together"
+            )
+        if self.policy_execution_ref is not None:
+            observation = self.policy_observation
+            assert observation is not None
+            if (
+                self.policy_execution_ref.request_fingerprint
+                != self.request_fingerprint
+                or observation.request_fingerprint != self.request_fingerprint
+                or observation.policy_execution_fingerprint
+                != self.policy_execution_ref.policy_execution_fingerprint
+            ):
+                raise ValueError(
+                    "policy observation must match its decision execution"
+                )
         self.result.assert_query_alignment()
 
     @property
@@ -100,6 +127,31 @@ class M6Repository(Protocol):
     ) -> TutoringDecisionRecord | None:
         """Load the latest evidence-bearing M6 decision for a session."""
 
+    def get_policy_execution_by_request(
+        self,
+        request_fingerprint: str,
+    ) -> PolicyExecutionRef | None:
+        """Load one immutable first-writer policy binding."""
+
+    def get_policy_artifact(
+        self,
+        policy_id: str,
+    ) -> PolicyArtifactManifest | None:
+        """Load one exact immutable policy manifest."""
+
+    def get_policy_evaluation(
+        self,
+        policy_id: str,
+        dataset_identity: str,
+    ) -> PolicyEvaluationRecord | None:
+        """Load one exact policy/dataset evaluation."""
+
+    def commit_policy_execution(
+        self,
+        execution: PolicyExecutionRef,
+    ) -> PolicyExecutionRef:
+        """Insert or return the first binding for one request fingerprint."""
+
     def commit_decision(
         self,
         record: TutoringDecisionRecord,
@@ -117,6 +169,62 @@ class InMemoryM6Repository:
         self._decisions_by_request: dict[str, TutoringDecisionRecord] = {}
         self._decisions_by_input: dict[str, TutoringDecisionRecord] = {}
         self._decisions_by_turn: dict[tuple[str, int], TutoringDecisionRecord] = {}
+        self._policy_executions: dict[str, PolicyExecutionRef] = {}
+        self._policy_artifacts: dict[str, PolicyArtifactManifest] = {}
+        self._policy_evaluations: dict[
+            tuple[str, str],
+            PolicyEvaluationRecord,
+        ] = {}
+
+    def save_policy_artifact(
+        self,
+        manifest: PolicyArtifactManifest,
+    ) -> PolicyArtifactManifest:
+        if not isinstance(manifest, PolicyArtifactManifest):
+            raise TypeError("manifest must be a PolicyArtifactManifest")
+        with self._lock:
+            stored = self._policy_artifacts.get(manifest.policy_id)
+            if stored is not None:
+                return stored
+            self._policy_artifacts = {
+                **self._policy_artifacts,
+                manifest.policy_id: manifest,
+            }
+            return manifest
+
+    def get_policy_artifact(
+        self,
+        policy_id: str,
+    ) -> PolicyArtifactManifest | None:
+        with self._lock:
+            return self._policy_artifacts.get(policy_id)
+
+    def save_policy_evaluation(
+        self,
+        evaluation: PolicyEvaluationRecord,
+    ) -> PolicyEvaluationRecord:
+        if not isinstance(evaluation, PolicyEvaluationRecord):
+            raise TypeError("evaluation must be a PolicyEvaluationRecord")
+        key = (evaluation.policy_id, evaluation.dataset_identity)
+        with self._lock:
+            stored = self._policy_evaluations.get(key)
+            if stored is not None:
+                return stored
+            self._policy_evaluations = {
+                **self._policy_evaluations,
+                key: evaluation,
+            }
+            return evaluation
+
+    def get_policy_evaluation(
+        self,
+        policy_id: str,
+        dataset_identity: str,
+    ) -> PolicyEvaluationRecord | None:
+        with self._lock:
+            return self._policy_evaluations.get(
+                (policy_id, dataset_identity)
+            )
 
     def save_session_state(self, snapshot: SessionStateSnapshot) -> None:
         candidate = isolated_session_snapshot(snapshot)
@@ -178,6 +286,36 @@ class InMemoryM6Repository:
                 return None
             latest = max(candidates, key=lambda item: item.turn_count)
             return latest.isolated_copy()
+
+    def get_policy_execution_by_request(
+        self,
+        request_fingerprint: str,
+    ) -> PolicyExecutionRef | None:
+        _require_fingerprint(request_fingerprint, "request_fingerprint")
+        with self._lock:
+            execution = self._policy_executions.get(request_fingerprint)
+            if execution is None:
+                return None
+            _validate_stored_policy_execution(request_fingerprint, execution)
+            return execution
+
+    def commit_policy_execution(
+        self,
+        execution: PolicyExecutionRef,
+    ) -> PolicyExecutionRef:
+        if not isinstance(execution, PolicyExecutionRef):
+            raise TypeError("execution must be a PolicyExecutionRef")
+        request_key = execution.request_fingerprint
+        with self._lock:
+            existing = self._policy_executions.get(request_key)
+            if existing is not None:
+                _validate_stored_policy_execution(request_key, existing)
+                return existing
+            self._policy_executions = {
+                **self._policy_executions,
+                request_key: execution,
+            }
+            return execution
 
     def commit_decision(
         self,
@@ -310,3 +448,19 @@ def _raise_reference_mismatch(reason: str) -> None:
         message="tutoring history does not match the authoritative session",
         details={"reason": reason},
     )
+
+
+def _validate_stored_policy_execution(
+    request_fingerprint: str,
+    execution: object,
+) -> None:
+    if (
+        not isinstance(execution, PolicyExecutionRef)
+        or execution.request_fingerprint != request_fingerprint
+    ):
+        raise DomainError(
+            code="TUTORING_POLICY_INTEGRITY_ERROR",
+            module="m6",
+            message="stored tutoring policy execution is inconsistent",
+            details={"reason": "policy_execution_request_mismatch"},
+        )

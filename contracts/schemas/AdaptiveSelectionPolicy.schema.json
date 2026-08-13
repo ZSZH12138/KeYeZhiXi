@@ -1,6 +1,6 @@
 {
   "additionalProperties": false,
-  "description": "M8 constraints for future IRT-information item selection.",
+  "description": "M8 constraints for governed IRT-information item selection.",
   "properties": {
     "concept_quotas": {
       "additionalProperties": {
@@ -8,6 +8,31 @@
       },
       "title": "Concept Quotas",
       "type": "object"
+    },
+    "difficulty_range": {
+      "default": [
+        -4.0,
+        4.0
+      ],
+      "maxItems": 2,
+      "minItems": 2,
+      "prefixItems": [
+        {
+          "type": "number"
+        },
+        {
+          "type": "number"
+        }
+      ],
+      "title": "Difficulty Range",
+      "type": "array"
+    },
+    "max_item_exposure_rate": {
+      "default": 0.2,
+      "exclusiveMinimum": 0.0,
+      "maximum": 1.0,
+      "title": "Max Item Exposure Rate",
+      "type": "number"
     },
     "max_items": {
       "minimum": 1,

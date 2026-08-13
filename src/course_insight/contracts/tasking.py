@@ -14,6 +14,8 @@ from course_insight.contracts.errors import DomainError
 _ASSESSMENT_TASK_TYPES = frozenset(
     {"diagnostic", "practice", "correction", "stage_assessment"}
 )
+_ASSESSMENT_WORKFLOW = ("M8", "M2", "M7", "M5", "M6", "M9")
+_QA_WORKFLOW = ("M2", "M7", "M6")
 
 
 class TaskPlan(ContractModel):
@@ -51,12 +53,31 @@ class TaskPlan(ContractModel):
                 message="workflow module names must be unique",
                 details={"task_id": self.task_id},
             )
-        if self.next_module not in self.workflow:
+        expected_workflow = (
+            _ASSESSMENT_WORKFLOW
+            if self.requires_assessment()
+            else _QA_WORKFLOW
+        )
+        if tuple(self.workflow) != expected_workflow:
+            raise DomainError(
+                code="WORKFLOW_MISMATCH",
+                module="m4",
+                message="workflow must match the frozen route for the task type",
+                details={
+                    "task_type": self.task_type,
+                    "expected_workflow": list(expected_workflow),
+                    "actual_workflow": list(self.workflow),
+                },
+            )
+        if self.next_module != self.workflow[0]:
             raise DomainError(
                 code="NEXT_MODULE_NOT_ALLOWED",
                 module="m4",
-                message="next_module must be present in the frozen workflow",
-                details={"next_module": self.next_module},
+                message="next_module must be the first frozen workflow module",
+                details={
+                    "next_module": self.next_module,
+                    "expected_next_module": self.workflow[0],
+                },
             )
         if self.requires_assessment() and self.blueprint_id is None:
             raise DomainError(
@@ -65,6 +86,16 @@ class TaskPlan(ContractModel):
                 message="assessment tasks require a frozen blueprint",
                 details={"task_type": self.task_type},
                 recoverable=True,
+            )
+        if not self.requires_assessment() and self.blueprint_id is not None:
+            raise DomainError(
+                code="BLUEPRINT_NOT_ALLOWED",
+                module="m4",
+                message="qa tasks must not bind an assessment blueprint",
+                details={
+                    "task_type": self.task_type,
+                    "blueprint_id": self.blueprint_id,
+                },
             )
 
     def requires_assessment(self) -> bool:

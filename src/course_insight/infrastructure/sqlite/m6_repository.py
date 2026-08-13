@@ -4,9 +4,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from dataclasses import replace
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
+from course_insight.contracts.errors import DomainError
 from course_insight.contracts.tutoring import (
     SessionStateSnapshot,
     TutoringControlResult,
@@ -21,6 +23,23 @@ from course_insight.modules.m6_tutoring_fsm.repository import (
     isolated_session_snapshot,
     validate_decision_commit,
     validate_session_append,
+)
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyArtifactManifest,
+    PolicyEvaluationRecord,
+    PolicyExecutionRef,
+    PolicyObservation,
+    PolicyRewardRecord,
+)
+
+
+_PolicyRecord = TypeVar(
+    "_PolicyRecord",
+    PolicyArtifactManifest,
+    PolicyExecutionRef,
+    PolicyObservation,
+    PolicyRewardRecord,
+    PolicyEvaluationRecord,
 )
 
 
@@ -131,7 +150,11 @@ class SQLiteM6Repository:
                 "request_fingerprint",
                 request_fingerprint,
             )
-            return None if row is None else _decision_from_row(row)
+            return (
+                None
+                if row is None
+                else _decision_with_policy(connection, row)
+            )
         finally:
             connection.close()
 
@@ -153,7 +176,290 @@ class SQLiteM6Repository:
                 """,
                 (session_id,),
             ).fetchone()
-            return None if row is None else _decision_from_row(row)
+            return (
+                None
+                if row is None
+                else _decision_with_policy(connection, row)
+            )
+        finally:
+            connection.close()
+
+    def save_policy_artifact(
+        self,
+        manifest: PolicyArtifactManifest,
+    ) -> PolicyArtifactManifest:
+        """Insert or verify one immutable policy artifact manifest."""
+
+        if not isinstance(manifest, PolicyArtifactManifest):
+            raise TypeError("manifest must be a PolicyArtifactManifest")
+        return self._save_policy_record(
+            table="m6_policy_artifacts",
+            key_columns=("policy_id",),
+            key_values=(manifest.policy_id,),
+            insert_columns=(
+                "policy_id",
+                "artifact_sha256",
+                "payload",
+                "payload_checksum",
+            ),
+            insert_values=(
+                manifest.policy_id,
+                manifest.artifact_sha256,
+                manifest.canonical_json(),
+                manifest.identity,
+            ),
+            record_type=PolicyArtifactManifest,
+            candidate=manifest,
+        )
+
+    def get_policy_artifact(
+        self,
+        policy_id: str,
+    ) -> PolicyArtifactManifest | None:
+        """Load one exact policy manifest by its governed policy ID."""
+
+        return self._get_policy_record(
+            table="m6_policy_artifacts",
+            key_columns=("policy_id",),
+            key_values=(policy_id,),
+            record_type=PolicyArtifactManifest,
+        )
+
+    def get_policy_execution_by_request(
+        self,
+        request_fingerprint: str,
+    ) -> PolicyExecutionRef | None:
+        """Load one immutable first-writer binding by public request."""
+
+        return self._get_policy_record(
+            table="m6_policy_executions",
+            key_columns=("request_fingerprint",),
+            key_values=(request_fingerprint,),
+            record_type=PolicyExecutionRef,
+        )
+
+    def commit_policy_execution(
+        self,
+        execution: PolicyExecutionRef,
+    ) -> PolicyExecutionRef:
+        """Insert or return the first policy binding for one request."""
+
+        if not isinstance(execution, PolicyExecutionRef):
+            raise TypeError("execution must be a PolicyExecutionRef")
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = _policy_row(
+                connection,
+                "m6_policy_executions",
+                ("request_fingerprint",),
+                (execution.request_fingerprint,),
+            )
+            if existing is None:
+                connection.execute(
+                    """
+                    INSERT INTO m6_policy_executions(
+                        request_fingerprint,
+                        policy_execution_fingerprint,
+                        payload,
+                        payload_checksum
+                    ) VALUES (?, ?, ?, ?)
+                    """,
+                    (
+                        execution.request_fingerprint,
+                        execution.policy_execution_fingerprint,
+                        execution.canonical_json(),
+                        execution.identity,
+                    ),
+                )
+                existing = _policy_row(
+                    connection,
+                    "m6_policy_executions",
+                    ("request_fingerprint",),
+                    (execution.request_fingerprint,),
+                )
+            if existing is None:
+                raise RuntimeError("M6 policy execution insert produced no row")
+            authoritative = _policy_record_from_row(
+                existing,
+                PolicyExecutionRef,
+            )
+            connection.execute("COMMIT")
+            return authoritative
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def get_policy_observation(
+        self,
+        decision_id: str,
+    ) -> PolicyObservation | None:
+        """Load the private policy observation for one decision."""
+
+        return self._get_policy_record(
+            table="m6_policy_observations",
+            key_columns=("decision_id",),
+            key_values=(decision_id,),
+            record_type=PolicyObservation,
+        )
+
+    def save_policy_reward(
+        self,
+        reward: PolicyRewardRecord,
+    ) -> PolicyRewardRecord:
+        """Insert or verify one immutable reward version."""
+
+        if not isinstance(reward, PolicyRewardRecord):
+            raise TypeError("reward must be a PolicyRewardRecord")
+        return self._save_policy_record(
+            table="m6_policy_rewards",
+            key_columns=("policy_execution_fingerprint", "reward_version"),
+            key_values=(
+                reward.policy_execution_fingerprint,
+                reward.reward_version,
+            ),
+            insert_columns=(
+                "reward_identity",
+                "policy_execution_fingerprint",
+                "reward_version",
+                "payload",
+                "payload_checksum",
+            ),
+            insert_values=(
+                reward.identity,
+                reward.policy_execution_fingerprint,
+                reward.reward_version,
+                reward.canonical_json(),
+                reward.identity,
+            ),
+            record_type=PolicyRewardRecord,
+            candidate=reward,
+        )
+
+    def get_policy_reward(
+        self,
+        policy_execution_fingerprint: str,
+        reward_version: str = "m6-reward-v1",
+    ) -> PolicyRewardRecord | None:
+        """Load one reward version for a policy execution."""
+
+        return self._get_policy_record(
+            table="m6_policy_rewards",
+            key_columns=("policy_execution_fingerprint", "reward_version"),
+            key_values=(policy_execution_fingerprint, reward_version),
+            record_type=PolicyRewardRecord,
+        )
+
+    def save_policy_evaluation(
+        self,
+        evaluation: PolicyEvaluationRecord,
+    ) -> PolicyEvaluationRecord:
+        """Insert or verify one offline evaluation dataset result."""
+
+        if not isinstance(evaluation, PolicyEvaluationRecord):
+            raise TypeError("evaluation must be a PolicyEvaluationRecord")
+        return self._save_policy_record(
+            table="m6_policy_evaluations",
+            key_columns=("policy_id", "dataset_identity"),
+            key_values=(evaluation.policy_id, evaluation.dataset_identity),
+            insert_columns=(
+                "evaluation_identity",
+                "policy_id",
+                "dataset_identity",
+                "payload",
+                "payload_checksum",
+            ),
+            insert_values=(
+                evaluation.identity,
+                evaluation.policy_id,
+                evaluation.dataset_identity,
+                evaluation.canonical_json(),
+                evaluation.identity,
+            ),
+            record_type=PolicyEvaluationRecord,
+            candidate=evaluation,
+        )
+
+    def get_policy_evaluation(
+        self,
+        policy_id: str,
+        dataset_identity: str,
+    ) -> PolicyEvaluationRecord | None:
+        """Load one offline evaluation by policy and dataset identity."""
+
+        return self._get_policy_record(
+            table="m6_policy_evaluations",
+            key_columns=("policy_id", "dataset_identity"),
+            key_values=(policy_id, dataset_identity),
+            record_type=PolicyEvaluationRecord,
+        )
+
+    def _get_policy_record(
+        self,
+        *,
+        table: str,
+        key_columns: tuple[str, ...],
+        key_values: tuple[object, ...],
+        record_type: type[_PolicyRecord],
+    ) -> _PolicyRecord | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            row = _policy_row(connection, table, key_columns, key_values)
+            return (
+                None
+                if row is None
+                else _policy_record_from_row(row, record_type)
+            )
+        finally:
+            connection.close()
+
+    def _save_policy_record(
+        self,
+        *,
+        table: str,
+        key_columns: tuple[str, ...],
+        key_values: tuple[object, ...],
+        insert_columns: tuple[str, ...],
+        insert_values: tuple[object, ...],
+        record_type: type[_PolicyRecord],
+        candidate: _PolicyRecord,
+    ) -> _PolicyRecord:
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            existing = _policy_row(
+                connection,
+                table,
+                key_columns,
+                key_values,
+            )
+            if existing is None:
+                _insert_policy_row(
+                    connection,
+                    table,
+                    insert_columns,
+                    insert_values,
+                )
+                existing = _policy_row(
+                    connection,
+                    table,
+                    key_columns,
+                    key_values,
+                )
+            if existing is None:
+                raise RuntimeError("M6 policy record insert produced no row")
+            stored = _policy_record_from_row(existing, record_type)
+            if stored != candidate:
+                _raise_policy_integrity_error("policy_record_identity_conflict")
+            connection.execute("COMMIT")
+            return stored
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
         finally:
             connection.close()
 
@@ -188,7 +494,7 @@ class SQLiteM6Repository:
                     candidate.input_fingerprint,
                 )
             if replay is not None:
-                authoritative = _decision_from_row(replay)
+                authoritative = _decision_with_policy(connection, replay)
                 connection.execute("COMMIT")
                 return authoritative
 
@@ -228,6 +534,41 @@ class SQLiteM6Repository:
                     decision_payload,
                 ),
             )
+            if candidate.policy_observation is not None:
+                observation = candidate.policy_observation
+                execution = candidate.policy_execution_ref
+                assert execution is not None
+                persisted_execution = _policy_row(
+                    connection,
+                    "m6_policy_executions",
+                    ("request_fingerprint",),
+                    (candidate.request_fingerprint,),
+                )
+                if persisted_execution is None or _policy_record_from_row(
+                    persisted_execution,
+                    PolicyExecutionRef,
+                ) != execution:
+                    _raise_policy_integrity_error(
+                        "decision_policy_execution_mismatch"
+                    )
+                connection.execute(
+                    """
+                    INSERT INTO m6_policy_observations(
+                        decision_id,
+                        request_fingerprint,
+                        policy_execution_fingerprint,
+                        payload,
+                        payload_checksum
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        candidate.decision_id,
+                        candidate.request_fingerprint,
+                        execution.policy_execution_fingerprint,
+                        observation.canonical_json(),
+                        observation.identity,
+                    ),
+                )
             stored_row = _decision_row(
                 connection,
                 "request_fingerprint",
@@ -235,7 +576,7 @@ class SQLiteM6Repository:
             )
             if stored_row is None:
                 raise RuntimeError("M6 decision insert produced no authoritative row")
-            stored = _decision_from_row(stored_row)
+            stored = _decision_with_policy(connection, stored_row)
             _assert_same_decision(stored, candidate)
             connection.execute("COMMIT")
             return stored
@@ -261,6 +602,15 @@ result_payload
 _DECISION_LOOKUP_COLUMNS = frozenset(
     {"request_fingerprint", "input_fingerprint"}
 )
+_POLICY_TABLE_COLUMNS = {
+    "m6_policy_artifacts": frozenset({"policy_id"}),
+    "m6_policy_executions": frozenset({"request_fingerprint"}),
+    "m6_policy_observations": frozenset({"decision_id"}),
+    "m6_policy_rewards": frozenset(
+        {"policy_execution_fingerprint", "reward_version"}
+    ),
+    "m6_policy_evaluations": frozenset({"policy_id", "dataset_identity"}),
+}
 
 
 def _latest_snapshot_row(
@@ -294,6 +644,43 @@ def _decision_row(
         """,
         (value,),
     ).fetchone()
+
+
+def _policy_row(
+    connection: sqlite3.Connection,
+    table: str,
+    key_columns: tuple[str, ...],
+    key_values: tuple[object, ...],
+) -> sqlite3.Row | None:
+    allowed_columns = _POLICY_TABLE_COLUMNS.get(table)
+    if (
+        allowed_columns is None
+        or not key_columns
+        or frozenset(key_columns) != allowed_columns
+        or len(key_columns) != len(key_values)
+    ):
+        raise ValueError("unsupported M6 policy lookup")
+    predicate = " AND ".join(f"{column} = ?" for column in key_columns)
+    return connection.execute(
+        f"SELECT * FROM {table} WHERE {predicate}",
+        key_values,
+    ).fetchone()
+
+
+def _insert_policy_row(
+    connection: sqlite3.Connection,
+    table: str,
+    columns: tuple[str, ...],
+    values: tuple[object, ...],
+) -> None:
+    if table not in _POLICY_TABLE_COLUMNS or len(columns) != len(values):
+        raise ValueError("unsupported M6 policy insert")
+    placeholders = ", ".join("?" for _ in values)
+    connection.execute(
+        f"INSERT INTO {table} ({', '.join(columns)}) "
+        f"VALUES ({placeholders})",
+        values,
+    )
 
 
 def _insert_snapshot(
@@ -354,6 +741,132 @@ def _decision_from_row(row: sqlite3.Row) -> TutoringDecisionRecord:
     if record.evidence_fingerprint != str(row["evidence_fingerprint"]):
         raise RuntimeError("M6 evidence fingerprint does not match its payload")
     return record
+
+
+def _decision_with_policy(
+    connection: sqlite3.Connection,
+    row: sqlite3.Row,
+) -> TutoringDecisionRecord:
+    record = _decision_from_row(row)
+    observation_row = _policy_row(
+        connection,
+        "m6_policy_observations",
+        ("decision_id",),
+        (record.decision_id,),
+    )
+    if observation_row is None:
+        return record
+    observation = _policy_record_from_row(
+        observation_row,
+        PolicyObservation,
+    )
+    execution_row = _policy_row(
+        connection,
+        "m6_policy_executions",
+        ("request_fingerprint",),
+        (record.request_fingerprint,),
+    )
+    if execution_row is None:
+        _raise_policy_integrity_error("policy_observation_missing_execution")
+    execution = _policy_record_from_row(execution_row, PolicyExecutionRef)
+    if (
+        observation.decision_id not in (None, record.decision_id)
+        or observation.request_fingerprint != record.request_fingerprint
+        or observation.policy_execution_fingerprint
+        != execution.policy_execution_fingerprint
+    ):
+        _raise_policy_integrity_error("policy_observation_identity_mismatch")
+    return replace(
+        record,
+        policy_execution_ref=execution,
+        policy_observation=observation,
+    )
+
+
+def _policy_record_from_row(
+    row: sqlite3.Row,
+    record_type: type[_PolicyRecord],
+) -> _PolicyRecord:
+    payload = str(row["payload"])
+    _require_canonical_json(payload, "policy record")
+    try:
+        value = json.loads(payload)
+        if type(value) is not dict:
+            raise ValueError("policy record must be an object")
+        if record_type is PolicyArtifactManifest:
+            value["allowed_scopes"] = tuple(value["allowed_scopes"])
+        elif record_type is PolicyObservation:
+            value["candidate_ids"] = tuple(value["candidate_ids"])
+        record = record_type(**value)
+    except Exception:
+        _raise_policy_integrity_error("policy_payload_invalid")
+    if (
+        record.canonical_json() != payload
+        or record.identity != str(row["payload_checksum"])
+    ):
+        _raise_policy_integrity_error("policy_payload_checksum_mismatch")
+    _validate_policy_row_identity(row, record)
+    return record
+
+
+def _validate_policy_row_identity(
+    row: sqlite3.Row,
+    record: _PolicyRecord,
+) -> None:
+    keys = set(row.keys())
+    checks: tuple[tuple[str, object], ...]
+    if isinstance(record, PolicyArtifactManifest):
+        checks = (
+            ("policy_id", record.policy_id),
+            ("artifact_sha256", record.artifact_sha256),
+        )
+    elif isinstance(record, PolicyExecutionRef):
+        checks = (
+            ("request_fingerprint", record.request_fingerprint),
+            (
+                "policy_execution_fingerprint",
+                record.policy_execution_fingerprint,
+            ),
+        )
+    elif isinstance(record, PolicyObservation):
+        checks = (
+            *(
+                ()
+                if record.decision_id is None
+                else (("decision_id", record.decision_id),)
+            ),
+            ("request_fingerprint", record.request_fingerprint),
+            (
+                "policy_execution_fingerprint",
+                record.policy_execution_fingerprint,
+            ),
+        )
+    elif isinstance(record, PolicyRewardRecord):
+        checks = (
+            ("reward_identity", record.identity),
+            (
+                "policy_execution_fingerprint",
+                record.policy_execution_fingerprint,
+            ),
+            ("reward_version", record.reward_version),
+        )
+    else:
+        checks = (
+            ("evaluation_identity", record.identity),
+            ("policy_id", record.policy_id),
+            ("dataset_identity", record.dataset_identity),
+        )
+    if any(column in keys and row[column] != expected for column, expected in checks):
+        _raise_policy_integrity_error("policy_columns_payload_mismatch")
+
+
+def _raise_policy_integrity_error(reason: str) -> None:
+    raise DomainError(
+        code="TUTORING_POLICY_INTEGRITY_ERROR",
+        module="m6",
+        message="stored tutoring policy data is inconsistent",
+        details={"reason": reason},
+    )
 
 
 def _require_canonical_json(payload: str, entity: str) -> None:

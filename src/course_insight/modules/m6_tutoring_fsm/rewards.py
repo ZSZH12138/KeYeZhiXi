@@ -1,0 +1,109 @@
+"""Versioned, immutable reward association for M6 policy outcomes."""
+
+from __future__ import annotations
+
+import math
+from typing import Protocol
+
+from course_insight.modules.m6_tutoring_fsm.policy_types import (
+    PolicyOutcome,
+    PolicyRewardRecord,
+)
+
+
+REWARD_VERSION = "m6-reward-v1"
+
+
+class RewardRepository(Protocol):
+    """The existing M6-private reward persistence capability."""
+
+    def get_policy_reward(
+        self,
+        policy_execution_fingerprint: str,
+        reward_version: str = REWARD_VERSION,
+    ) -> PolicyRewardRecord | None:
+        """Load one reward version for an execution."""
+
+    def save_policy_reward(
+        self,
+        reward: PolicyRewardRecord,
+    ) -> PolicyRewardRecord:
+        """Insert or verify one immutable reward version."""
+
+
+def reward_from_outcome(outcome: PolicyOutcome) -> PolicyRewardRecord:
+    """Associate one outcome with v1 reward semantics without filling missing data."""
+
+    if not isinstance(outcome, PolicyOutcome):
+        raise TypeError("outcome must be a PolicyOutcome")
+    value: float | None = None
+    if outcome.status == "observed":
+        assert outcome.transfer_success is not None
+        try:
+            value = (
+                outcome.transfer_success
+                - 0.05 * outcome.hint_count
+                - 0.10 * outcome.loop_count
+            )
+        except OverflowError as error:
+            raise ValueError("computed reward must be finite") from error
+        if not math.isfinite(value):
+            raise ValueError("computed reward must be finite")
+    raw_outcome: dict[str, object] = {}
+    if outcome.status == "observed":
+        raw_outcome.update(
+            {
+                "transfer_success": outcome.transfer_success,
+                "additional_hint_count": outcome.hint_count,
+                "loop_count": outcome.loop_count,
+            }
+        )
+    if outcome.has_audit_details:
+        raw_outcome.update(
+            {
+                "transfer_success": outcome.transfer_success,
+                "independent_correction_success": (
+                    outcome.independent_correction_success
+                ),
+                "self_explanation_passed": outcome.self_explanation_passed,
+                "additional_hint_count": outcome.hint_count,
+                "additional_turn_count": outcome.additional_turn_count,
+                "loop_count": outcome.loop_count,
+                "teacher_review_escalated": (
+                    outcome.teacher_review_escalated
+                ),
+                "safety_flag": outcome.safety_flag,
+                "outcome_event_ids": outcome.outcome_event_ids,
+                "outcome_watermark": outcome.outcome_watermark,
+                "observed_at": outcome.observed_at,
+            }
+        )
+    return PolicyRewardRecord(
+        policy_execution_fingerprint=outcome.policy_execution_fingerprint,
+        outcome_identity=outcome.identity,
+        status=outcome.status,
+        reward=value,
+        reward_version=REWARD_VERSION,
+        **raw_outcome,
+    )
+
+
+def persist_reward(
+    repository: RewardRepository,
+    outcome: PolicyOutcome,
+) -> PolicyRewardRecord:
+    """Idempotently persist one outcome-derived reward, rejecting rewrites."""
+
+    candidate = reward_from_outcome(outcome)
+    existing = repository.get_policy_reward(
+        candidate.policy_execution_fingerprint,
+        candidate.reward_version,
+    )
+    if existing is not None:
+        if existing != candidate:
+            raise ValueError("policy reward outcome conflict")
+        return existing
+    stored = repository.save_policy_reward(candidate)
+    if stored != candidate:
+        raise ValueError("policy reward outcome conflict")
+    return stored

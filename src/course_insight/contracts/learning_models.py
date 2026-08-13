@@ -24,6 +24,8 @@ class LearningObservation(ContractModel):
     concept_ids: list[str] = Field(min_length=1)
     score: float = Field(ge=0.0, allow_inf_nan=False)
     max_score: float = Field(gt=0.0, allow_inf_nan=False)
+    response_outcome: Literal["correct", "incorrect"]
+    outcome_policy_version: str = Field(min_length=1)
     source_audit_id: str = Field(min_length=1)
     source_audit_version: int = Field(ge=1)
     occurred_at: datetime
@@ -65,6 +67,172 @@ class LearningObservationBatch(ContractModel):
             )
 
 
+class DinaItemParameters(ContractModel):
+    """DINA slip and guess estimates for one immutable item version."""
+
+    item_id: str = Field(min_length=1)
+    item_version: str = Field(min_length=1)
+    concept_ids: list[str] = Field(min_length=1)
+    slip: float = Field(ge=0.01, le=0.40, allow_inf_nan=False)
+    guess: float = Field(ge=0.01, le=0.40, allow_inf_nan=False)
+    sample_size: int = Field(ge=1)
+
+    def validate_business_rules(self) -> None:
+        """Require a unique, non-empty conjunctive concept set."""
+
+        if len(self.concept_ids) != len(set(self.concept_ids)):
+            raise DomainError(
+                code="DINA_ITEM_PARAMETERS_INVALID",
+                module="m5",
+                message="DINA item concepts must be unique",
+            )
+
+
+class DinaModelArtifact(ContractModel):
+    """Versioned fitted DINA model for one course and class scope."""
+
+    model_id: str = Field(min_length=1)
+    course_id: str = Field(min_length=1)
+    class_id: str = Field(min_length=1)
+    model_version: str = Field(min_length=1)
+    concept_ids: list[str] = Field(min_length=1)
+    item_parameters: list[DinaItemParameters] = Field(min_length=1)
+    attribute_priors: dict[str, float]
+    learner_count: int = Field(ge=1)
+    observation_count: int = Field(ge=1)
+    inference_mode: Literal["exact", "variational"]
+    log_likelihood: float = Field(allow_inf_nan=False)
+    elbo: float | None = Field(default=None, allow_inf_nan=False)
+    objective_history: list[float] = Field(default_factory=list)
+    iteration_count: int = Field(ge=1)
+    converged: bool
+    created_at: datetime
+
+    def validate_business_rules(self) -> None:
+        """Keep concept, item, and inference metadata internally aligned."""
+
+        concept_set = set(self.concept_ids)
+        item_keys = [
+            (item.item_id, item.item_version) for item in self.item_parameters
+        ]
+        invalid_priors = (
+            set(self.attribute_priors) != concept_set
+            or any(not 0.0 <= value <= 1.0 for value in self.attribute_priors.values())
+        )
+        invalid_items = any(
+            not set(item.concept_ids) <= concept_set for item in self.item_parameters
+        )
+        invalid_mode = self.inference_mode == "variational" and (
+            self.elbo is None
+            or not self.objective_history
+            or any(
+                later + 1e-9 < earlier
+                for earlier, later in zip(
+                    self.objective_history,
+                    self.objective_history[1:],
+                    strict=False,
+                )
+            )
+        )
+        if (
+            len(self.concept_ids) != len(concept_set)
+            or len(item_keys) != len(set(item_keys))
+            or invalid_priors
+            or invalid_items
+            or invalid_mode
+        ):
+            raise DomainError(
+                code="DINA_MODEL_INVALID",
+                module="m5",
+                message="DINA model concepts, items, or inference metadata are invalid",
+            )
+
+
+class ConceptResponse(ContractModel):
+    """One immutable binary response projected onto a governed concept."""
+
+    observation_id: str = Field(min_length=1)
+    learner_id: str = Field(min_length=1)
+    course_id: str = Field(min_length=1)
+    class_id: str = Field(min_length=1)
+    attempt_id: str = Field(min_length=1)
+    concept_id: str = Field(min_length=1)
+    is_correct: bool
+    source_audit_id: str = Field(min_length=1)
+    source_audit_version: int = Field(ge=1)
+    occurred_at: datetime
+
+
+class ConceptResponseSequence(ContractModel):
+    """Time-ordered BKT input for one learner and concept."""
+
+    sequence_id: str = Field(min_length=1)
+    learner_id: str = Field(min_length=1)
+    course_id: str = Field(min_length=1)
+    class_id: str = Field(min_length=1)
+    concept_id: str = Field(min_length=1)
+    responses: list[ConceptResponse]
+    watermark: str = Field(min_length=1)
+    created_at: datetime
+
+    def validate_business_rules(self) -> None:
+        """Require every response to remain in the sequence scope."""
+
+        observation_ids = [item.observation_id for item in self.responses]
+        scope_mismatch = any(
+            item.learner_id != self.learner_id
+            or item.course_id != self.course_id
+            or item.class_id != self.class_id
+            or item.concept_id != self.concept_id
+            for item in self.responses
+        )
+        if len(observation_ids) != len(set(observation_ids)) or scope_mismatch:
+            raise DomainError(
+                code="BKT_SEQUENCE_INVALID",
+                module="m5",
+                message="BKT response identities and scope must be consistent",
+            )
+
+
+class BktConceptParameters(ContractModel):
+    """Four fitted BKT probabilities for one course concept."""
+
+    concept_id: str = Field(min_length=1)
+    prior: float = Field(ge=0.01, le=0.99, allow_inf_nan=False)
+    learn: float = Field(ge=0.01, le=0.40, allow_inf_nan=False)
+    guess: float = Field(ge=0.01, le=0.40, allow_inf_nan=False)
+    slip: float = Field(ge=0.01, le=0.40, allow_inf_nan=False)
+    learner_count: int = Field(ge=1)
+    observation_count: int = Field(ge=1)
+
+
+class BktModelArtifact(ContractModel):
+    """Versioned four-parameter BKT model for one teaching scope."""
+
+    model_id: str = Field(min_length=1)
+    course_id: str = Field(min_length=1)
+    class_id: str = Field(min_length=1)
+    model_version: str = Field(min_length=1)
+    concept_parameters: list[BktConceptParameters] = Field(min_length=1)
+    learner_count: int = Field(ge=1)
+    observation_count: int = Field(ge=1)
+    log_likelihood: float = Field(allow_inf_nan=False)
+    iteration_count: int = Field(ge=1)
+    converged: bool
+    created_at: datetime
+
+    def validate_business_rules(self) -> None:
+        """Require one parameter record for every concept."""
+
+        concept_ids = [item.concept_id for item in self.concept_parameters]
+        if len(concept_ids) != len(set(concept_ids)):
+            raise DomainError(
+                code="BKT_MODEL_INVALID",
+                module="m5",
+                message="BKT concept parameters must be unique",
+            )
+
+
 class CognitiveDiagnosisResult(ContractModel):
     """Versioned DINA-family output; empty until the engine is configured."""
 
@@ -94,11 +262,14 @@ class KnowledgeTraceSnapshot(ContractModel):
 
     trace_id: str = Field(min_length=1)
     learner_id: str = Field(min_length=1)
+    course_id: str | None = Field(default=None, min_length=1)
+    class_id: str | None = Field(default=None, min_length=1)
     model_type: Literal["BKT", "BKT_FORGETTING", "DKT"]
     model_version: str = Field(min_length=1)
     concept_probabilities: dict[str, float]
     observation_watermark: str = Field(min_length=1)
     observation_count: int = Field(ge=0)
+    processed_audit_keys: list[str] = Field(default_factory=list)
     status: Literal["empty", "estimated", "failed"]
     updated_at: datetime
 
@@ -109,7 +280,16 @@ class KnowledgeTraceSnapshot(ContractModel):
             not 0.0 <= value <= 1.0
             for value in self.concept_probabilities.values()
         )
-        if invalid or (self.status == "empty" and self.concept_probabilities):
+        scope_is_partial = (self.course_id is None) != (self.class_id is None)
+        duplicate_audits = len(self.processed_audit_keys) != len(
+            set(self.processed_audit_keys)
+        )
+        if (
+            invalid
+            or scope_is_partial
+            or duplicate_audits
+            or (self.status == "empty" and self.concept_probabilities)
+        ):
             raise DomainError(
                 code="KNOWLEDGE_TRACE_INVALID",
                 module="m5",
@@ -225,37 +405,63 @@ class CalibrationRunResult(ContractModel):
     converged: bool
     metrics: dict[str, float]
     status: Literal["empty", "shadow", "failed"]
+    failure_code: str | None = Field(default=None, min_length=1)
     generated_at: datetime
 
     def validate_business_rules(self) -> None:
         """Prevent an empty run from claiming convergence or metrics."""
 
-        if self.status == "empty" and (
-            self.converged or self.metrics or self.parameter_set.status != "empty"
-        ):
+        invalid_empty = self.status == "empty" and (
+            self.converged
+            or self.metrics
+            or self.failure_code is not None
+            or self.parameter_set.status != "empty"
+        )
+        invalid_failed = self.status == "failed" and (
+            self.converged
+            or self.parameter_set.status != "empty"
+            or self.failure_code is None
+        )
+        invalid_shadow = self.status == "shadow" and (
+            not self.converged
+            or self.parameter_set.status != "shadow"
+            or self.failure_code is not None
+        )
+        if invalid_empty or invalid_failed or invalid_shadow:
             raise DomainError(
                 code="CALIBRATION_RUN_INVALID",
                 module="m8",
-                message="empty calibration runs cannot contain estimates",
+                message="calibration status, parameters, and failure evidence conflict",
             )
 
 
 class AdaptiveSelectionPolicy(ContractModel):
-    """M8 constraints for future IRT-information item selection."""
+    """M8 constraints for governed IRT-information item selection."""
 
     policy_id: str = Field(min_length=1)
     version: str = Field(min_length=1)
     parameter_set_id: str | None = None
     max_items: int = Field(ge=1)
     concept_quotas: dict[str, int]
+    max_item_exposure_rate: float = Field(default=0.20, gt=0.0, le=1.0)
+    difficulty_range: tuple[float, float] = (-4.0, 4.0)
     status: Literal["empty", "configured"]
 
     def validate_business_rules(self) -> None:
         """Require non-negative quotas and no parameter set for empty policy."""
 
-        if any(value < 0 for value in self.concept_quotas.values()) or (
+        invalid_status = (
             self.status == "empty" and self.parameter_set_id is not None
-        ):
+        ) or (self.status == "configured" and self.parameter_set_id is None)
+        invalid_difficulty = (
+            len(self.difficulty_range) != 2
+            or self.difficulty_range[0] > self.difficulty_range[1]
+        )
+        invalid_quotas = any(
+            not concept_id or value < 0
+            for concept_id, value in self.concept_quotas.items()
+        )
+        if invalid_status or invalid_difficulty or invalid_quotas:
             raise DomainError(
                 code="ADAPTIVE_POLICY_INVALID",
                 module="m8",
@@ -263,8 +469,30 @@ class AdaptiveSelectionPolicy(ContractModel):
             )
 
 
+class ItemExposureSnapshot(ContractModel):
+    """Historical item administration counts for one IRT parameter set."""
+
+    parameter_set_id: str = Field(min_length=1)
+    total_sessions: int = Field(ge=0)
+    item_administered_counts: dict[str, int]
+
+    def validate_business_rules(self) -> None:
+        """Reject impossible or ambiguous exposure counters."""
+
+        invalid = any(
+            not item_id or count < 0 or count > self.total_sessions
+            for item_id, count in self.item_administered_counts.items()
+        )
+        if invalid:
+            raise DomainError(
+                code="ITEM_EXPOSURE_INVALID",
+                module="m8",
+                message="item exposure counts must fit the session total",
+            )
+
+
 class AdaptiveSelectionResult(ContractModel):
-    """M8 item selection output; empty until IRT is configured."""
+    """M8 constrained item-selection output."""
 
     selection_id: str = Field(min_length=1)
     policy_id: str = Field(min_length=1)
@@ -272,15 +500,28 @@ class AdaptiveSelectionResult(ContractModel):
     item_ids: list[str]
     ability_estimate: AbilityEstimate | None = None
     status: Literal["empty", "selected", "failed"]
+    failure_code: str | None = Field(default=None, min_length=1)
     selected_at: datetime
 
     def validate_business_rules(self) -> None:
         """Keep item identities unique and empty status empty."""
 
-        if len(self.item_ids) != len(set(self.item_ids)) or (
-            self.status == "empty"
-            and (self.item_ids or self.ability_estimate is not None)
-        ):
+        duplicate_items = len(self.item_ids) != len(set(self.item_ids))
+        invalid_empty = self.status == "empty" and (
+            self.item_ids
+            or self.ability_estimate is not None
+            or self.failure_code is not None
+        )
+        invalid_selected = self.status == "selected" and (
+            not self.item_ids
+            or self.ability_estimate is None
+            or self.ability_estimate.status != "estimated"
+            or self.failure_code is not None
+        )
+        invalid_failed = self.status == "failed" and (
+            self.item_ids or self.failure_code is None
+        )
+        if duplicate_items or invalid_empty or invalid_selected or invalid_failed:
             raise DomainError(
                 code="ADAPTIVE_SELECTION_INVALID",
                 module="m8",

@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from course_insight.contracts.assessment import (
@@ -20,25 +19,54 @@ from course_insight.contracts.knowledge import (
 )
 from course_insight.contracts.state import DiagnosisResult, LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
+from course_insight.modules.m8_assessment_scoring.clock import Clock, SystemUTCClock
 
 
-FIXED_TIME = datetime(2026, 7, 15, 9, 0, tzinfo=timezone(timedelta(hours=8)))
 _SCORE_TOLERANCE = 1e-9
+
+
+def allocate_concept_targets(
+    concept_weights: dict[str, float],
+    item_count: int,
+) -> dict[str, int]:
+    """Allocate integer quotas with the stable largest-remainder method."""
+
+    if item_count < 0 or not concept_weights:
+        if item_count < 0:
+            raise ValueError("item count must not be negative")
+        return {}
+    total = math.fsum(concept_weights.values())
+    if any(
+        not math.isfinite(weight) or weight < 0.0
+        for weight in concept_weights.values()
+    ) or not math.isclose(total, 1.0, rel_tol=0.0, abs_tol=1e-9):
+        raise ValueError("concept weights must be finite and sum to one")
+    raw = {
+        concept_id: weight * item_count
+        for concept_id, weight in concept_weights.items()
+    }
+    targets = {
+        concept_id: math.floor(value)
+        for concept_id, value in raw.items()
+    }
+    remaining = item_count - sum(targets.values())
+    order = sorted(
+        raw,
+        key=lambda concept_id: (
+            -(raw[concept_id] - targets[concept_id]),
+            concept_id,
+        ),
+    )
+    for concept_id in order[:remaining]:
+        targets = {**targets, concept_id: targets[concept_id] + 1}
+    return targets
 
 
 class PaperGenerator:
     """Select and freeze approved items without random or model behavior."""
 
-    def __init__(self, clock: Any = None) -> None:
-        # M8-09: use injectable clock instead of hardcoded FIXED_TIME
-        self._clock = clock
-
-    def _now(self) -> datetime:
-        """Return current time from injected clock, or FIXED_TIME as default."""
-
-        if self._clock is not None and callable(getattr(self._clock, "now", None)):
-            return self._clock.now()
-        return FIXED_TIME
+    def __init__(self, clock: Clock | None = None) -> None:
+        self._clock = SystemUTCClock() if clock is None else clock
 
     def generate(
         self,
@@ -73,6 +101,7 @@ class PaperGenerator:
                 knowledge_bundle,
                 used_item_ids,
                 learner_state_snapshot,
+                diagnosis_result,
             )
             for section in blueprint.sections
         ]
@@ -83,7 +112,7 @@ class PaperGenerator:
             "blueprint_version": blueprint.version,
             "learner_id": task_plan.learner_id,
             "sections": sections,
-            "generated_at": self._now(),
+            "generated_at": self._clock.now(),
             "immutable_checksum": "pending",
         }
         paper = AssessmentPaper(**paper_payload)
@@ -114,8 +143,6 @@ class PaperGenerator:
             or task_plan.knowledge_bundle_id
             != knowledge_bundle.knowledge_bundle_id
             or task_plan.course_id != knowledge_bundle.course_id
-            or task_plan.course_package_id
-            != knowledge_bundle.course_package_id
             or "M8" not in task_plan.workflow
         ):
             PaperGenerator._raise_unsatisfiable(
@@ -144,7 +171,8 @@ class PaperGenerator:
         section: BlueprintSection,
         knowledge_bundle: KnowledgeBundle,
         used_item_ids: set[str],
-        learner_state: LearnerStateSnapshot | None = None,
+        learner_state_snapshot: LearnerStateSnapshot | None,
+        diagnosis_result: DiagnosisResult | None,
     ) -> PaperSection:
         approved = [
             item
@@ -163,43 +191,41 @@ class PaperGenerator:
             )
         anchored_ids = {item.item_id for item in anchors}
         remaining = [item for item in approved if item.item_id not in anchored_ids]
-
-        # M8-02: when learner state is available, prioritise items testing weak concepts
-        weak_concepts: set[str] = set()
-        if learner_state is not None:
-            for cs in learner_state.concept_states:
-                if cs.mastery_probability < 0.5:
-                    weak_concepts.add(cs.concept_id)
-
-        # M8-03: track concept coverage for quota enforcement
-        concept_quota = dict(section.concept_weights) if section.concept_weights else {}
-        concept_coverage: dict[str, int] = {c: 0 for c in concept_quota}
-
-        # Count concepts already covered by anchors
-        for item in anchors:
-            for cid in item.concept_ids:
-                if cid in concept_coverage:
-                    concept_coverage[cid] += 1
-
-        # Build a priority key for each remaining item:
-        # 1. Items covering weak concepts come first (M8-02)
-        # 2. Items covering underrepresented concepts come next (M8-03)
-        # 3. Objective items before subjective (existing behavior)
-        def _priority_key(item: ItemCard) -> tuple[int, int, int]:
-            covers_weak = any(cid in weak_concepts for cid in item.concept_ids)
-            underrepresented = min(
-                (concept_coverage.get(cid, 0) for cid in item.concept_ids if cid in concept_coverage),
-                default=0,
-            ) if concept_quota else 0
-            is_objective = 0 if item.is_objective() else 1
-            return (
-                0 if covers_weak else 1,
-                underrepresented,
-                is_objective,
+        ordered_candidates = [
+            *self._personalize_candidates(
+                [item for item in remaining if item.is_objective()],
+                learner_state_snapshot,
+                diagnosis_result,
+            ),
+            *self._personalize_candidates(
+                [item for item in remaining if not item.is_objective()],
+                learner_state_snapshot,
+                diagnosis_result,
+            ),
+        ]
+        if (
+            not section.concept_weights
+            and len(anchors) + len(ordered_candidates) < section.item_count
+        ):
+            self._raise_section_unsatisfiable(
+                section,
+                "not enough approved items",
             )
-
-        ordered_candidates = sorted(remaining, key=_priority_key)
-        selected = [*anchors, *ordered_candidates][0 : section.item_count]
+        selected = (
+            self._select_weighted_items(
+                section,
+                knowledge_bundle,
+                anchors,
+                ordered_candidates,
+            )
+            if section.concept_weights
+            else self._select_unweighted_items(
+                section,
+                knowledge_bundle,
+                anchors,
+                ordered_candidates,
+            )
+        )
         if len(selected) != section.item_count:
             self._raise_section_unsatisfiable(section, "not enough approved items")
 
@@ -217,23 +243,6 @@ class PaperGenerator:
                 "selected item maxima do not match the section score",
             )
 
-        # M8-03: verify concept quota is satisfied when concept_weights are defined
-        if concept_quota:
-            final_coverage: dict[str, int] = {c: 0 for c in concept_quota}
-            for item in selected:
-                for cid in item.concept_ids:
-                    if cid in final_coverage:
-                        final_coverage[cid] += 1
-            # Every concept in the quota should have at least one item covering it
-            uncovered = [
-                cid for cid, count in final_coverage.items() if count == 0
-            ]
-            if uncovered:
-                self._raise_section_unsatisfiable(
-                    section,
-                    "concept quota not satisfied: concepts without any items",
-                )
-
         used_item_ids.update(item.item_id for item in selected)
         instances = [
             self._freeze_item(item, knowledge_bundle) for item in selected
@@ -244,6 +253,199 @@ class PaperGenerator:
             items=instances,
             score=section.score,
         )
+
+    @staticmethod
+    def _personalize_candidates(
+        candidates: list[ItemCard],
+        learner_state_snapshot: LearnerStateSnapshot | None,
+        diagnosis_result: DiagnosisResult | None,
+    ) -> list[ItemCard]:
+        """Rank interchangeable items by current diagnosis and weakest mastery."""
+
+        if learner_state_snapshot is None and diagnosis_result is None:
+            return list(candidates)
+        priority_ranks = {
+            concept_id: rank
+            for rank, concept_id in enumerate(
+                diagnosis_result.priority_concept_ids
+                if diagnosis_result is not None
+                else []
+            )
+        }
+        mastery = {
+            state.concept_id: state.mastery_probability
+            for state in (
+                learner_state_snapshot.concept_states
+                if learner_state_snapshot is not None
+                else []
+            )
+        }
+        if not priority_ranks and not mastery:
+            return list(candidates)
+        no_priority_rank = len(priority_ranks)
+
+        def personalization_key(item: ItemCard) -> tuple[int, float]:
+            item_priority_ranks = [
+                priority_ranks[concept_id]
+                for concept_id in item.concept_ids
+                if concept_id in priority_ranks
+            ]
+            item_mastery = [
+                mastery[concept_id]
+                for concept_id in item.concept_ids
+                if concept_id in mastery
+            ]
+            return (
+                min(item_priority_ranks, default=no_priority_rank),
+                min(item_mastery, default=1.0),
+            )
+
+        return sorted(candidates, key=personalization_key)
+
+    def _select_unweighted_items(
+        self,
+        section: BlueprintSection,
+        knowledge_bundle: KnowledgeBundle,
+        anchors: list[ItemCard],
+        candidates: list[ItemCard],
+    ) -> list[ItemCard]:
+        ordered = [*anchors, *candidates]
+        scores = [item.max_score(knowledge_bundle) for item in ordered]
+        failed: set[tuple[int, int, float]] = set()
+
+        def search(
+            index: int,
+            slots: int,
+            score: float,
+        ) -> list[ItemCard] | None:
+            key = (index, slots, round(score, 9))
+            if key in failed:
+                return None
+            if slots == 0:
+                if math.isclose(
+                    score,
+                    section.score,
+                    rel_tol=0.0,
+                    abs_tol=_SCORE_TOLERANCE,
+                ):
+                    return []
+                failed.add(key)
+                return None
+            if (
+                index >= len(ordered)
+                or len(ordered) - index < slots
+                or score > section.score + _SCORE_TOLERANCE
+            ):
+                failed.add(key)
+                return None
+
+            item = ordered[index]
+            tail = search(
+                index + 1,
+                slots - 1,
+                score + scores[index],
+            )
+            if tail is not None:
+                return [item, *tail]
+            if index >= len(anchors):
+                tail = search(index + 1, slots, score)
+                if tail is not None:
+                    return tail
+            failed.add(key)
+            return None
+
+        selected = search(0, section.item_count, 0.0)
+        if selected is None:
+            self._raise_section_unsatisfiable(
+                section,
+                "no item combination has maxima matching the section score",
+            )
+        return selected
+
+    def _select_weighted_items(
+        self,
+        section: BlueprintSection,
+        knowledge_bundle: KnowledgeBundle,
+        anchors: list[ItemCard],
+        candidates: list[ItemCard],
+    ) -> list[ItemCard]:
+        concept_ids = tuple(sorted(section.concept_weights))
+        initial_targets = allocate_concept_targets(
+            section.concept_weights,
+            section.item_count,
+        )
+        ordered = [*anchors, *candidates]
+        scores = [item.max_score(knowledge_bundle) for item in ordered]
+        failed: set[tuple[int, int, float, tuple[int, ...]]] = set()
+
+        def search(
+            index: int,
+            slots: int,
+            score: float,
+            remaining: dict[str, int],
+        ) -> list[ItemCard] | None:
+            key = (
+                index,
+                slots,
+                round(score, 9),
+                tuple(remaining[concept_id] for concept_id in concept_ids),
+            )
+            if key in failed:
+                return None
+            if slots == 0:
+                if all(value == 0 for value in remaining.values()) and math.isclose(
+                    score,
+                    section.score,
+                    rel_tol=0.0,
+                    abs_tol=_SCORE_TOLERANCE,
+                ):
+                    return []
+                failed.add(key)
+                return None
+            if (
+                index >= len(ordered)
+                or len(ordered) - index < slots
+                or score > section.score + _SCORE_TOLERANCE
+            ):
+                failed.add(key)
+                return None
+
+            item = ordered[index]
+            options = sorted(
+                (
+                    concept_id
+                    for concept_id in item.concept_ids
+                    if remaining.get(concept_id, 0) > 0
+                ),
+                key=lambda concept_id: (-remaining[concept_id], concept_id),
+            )
+            for concept_id in options:
+                next_remaining = {
+                    **remaining,
+                    concept_id: remaining[concept_id] - 1,
+                }
+                tail = search(
+                    index + 1,
+                    slots - 1,
+                    score + scores[index],
+                    next_remaining,
+                )
+                if tail is not None:
+                    return [item, *tail]
+            if index >= len(anchors):
+                tail = search(index + 1, slots, score, remaining)
+                if tail is not None:
+                    return tail
+            failed.add(key)
+            return None
+
+        selected = search(0, section.item_count, 0.0, initial_targets)
+        if selected is None:
+            self._raise_section_unsatisfiable(
+                section,
+                "no item combination satisfies the concept quotas",
+            )
+        return selected
 
     @staticmethod
     def _freeze_item(
@@ -315,3 +517,6 @@ class PaperGenerator:
             details={"task_id": task_plan.task_id},
             recoverable=True,
         )
+
+
+__all__ = ["PaperGenerator", "allocate_concept_targets"]
