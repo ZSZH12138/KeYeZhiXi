@@ -232,6 +232,9 @@ python -m pytest -q
 `COURSE_INSIGHT_TEST_DATABASE_NAME`。若任一变量缺失，则
 `tests/integration/test_postgres_foundation_live.py` 等 destructive live tests
 会显式 `skip`，表示 “real PostgreSQL integration was not run”。
+GitHub Actions CI 使用一次性的 PostgreSQL 16 服务并注入这两个变量，
+因此 CI 的完整测试会实际执行 M0、M4、M5、M6、M8 相关的 PostgreSQL live tests；
+这不替代生产数据库验收。
 若确认变量与 DSN 的数据库名不一致，或数据库名属于 `postgres`、
 `template0`、`template1`，或没有以 `_`/`-`/边界分隔的 `test`、`ci`、`tmp`
 一次性标记，
@@ -289,7 +292,7 @@ Conda 初始化与当前 shell，不要把依赖装入 base。
 命令：
 
 ```shell
-python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
+python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev,intent]"
 python -m pip check
 ```
 

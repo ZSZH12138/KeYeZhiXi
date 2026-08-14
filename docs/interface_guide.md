@@ -59,7 +59,7 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 |---|---|---|---|
 | `ActorContext` | M0 Django 鉴权边界 | `AppCoordinator`、所有受授权用例 | 可构造伪匿名上下文 |
 | `AssessmentSubmission` | M0 Django 学生表单 | `M8.prepare_scoring` | `answers` 是题目实例 ID 到字符串/布尔/整数/有限浮点答案的映射 |
-| `TeacherReviewSubmission` | M0 Django 教师表单 | `M9.record_teacher_review` | 使用 `confirm/override/reject`，并完整携带总分、分项覆盖和教师意见 |
+| `TeacherReviewSubmission` | M0 Django 教师表单 | `M9.record_teacher_review` | 使用 `confirm/override/reject`，并完整携带 `expected_audit_version`、`expected_audit_checksum`、总分、分项覆盖和教师意见；版本与 checksum 必须同时匹配当前评分审计 |
 | `AsyncJobStatus` | M0 作业边界 | legacy intelligence scaffold | Django 作业固定 `skipped`；不代表真实 Web 未实现 |
 | `EmbeddingModelRef` | M2 检索配置 | M2 索引器 | `empty` |
 | `RetrievalPolicy` | M2 检索配置 | M2 检索器 | 允许词法/向量/混合策略 |

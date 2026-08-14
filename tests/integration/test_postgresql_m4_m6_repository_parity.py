@@ -436,7 +436,11 @@ def test_real_postgres_v10_to_v11_status_migration_preserves_rows(
     repository = PostgresM4Repository(postgres_pool)
     try:
         repository.insert_or_get_intent_decision(accepted)
-        migration = load_migrations()[-1]
+        migration = next(
+            migration
+            for migration in load_migrations()
+            if migration.version == 11
+        )
         with postgres_pool.connection() as connection:
             with connection.transaction():
                 connection.execute(

@@ -49,7 +49,7 @@
 ```shell
 conda create --name course-insight-framework python=3.12 -y
 conda activate course-insight-framework
-python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
+python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev,intent]"
 python -m pytest -q
 ```
 
@@ -232,7 +232,7 @@ python -m course_insight.cli export-schemas
 | `TeachingSuggestion` | `suggestion_id:str; action_type:str; concept_ids:list[str]; content:str; trigger_metrics:dict[str,float]; affected_count:int; affected_rate:float; coverage_rate:float; confidence:float; evidence_ids:list[str]; status:str` | `is_actionable` |
 | `CriterionOverride` | `criterion_id:str; previous_score:float; new_score:float; reason:str` | `delta` |
 | `TeacherAnalyticsBundle` | `report_id:str; class_report:ClassReport; individual_reports:list[IndividualReport]; review_queue:list[ReviewQueueItem]; teaching_suggestions:list[TeachingSuggestion]; generated_at:datetime` | `open_review_count; actionable_suggestions; report_for_learner` |
-| `TeacherReviewDecision` | `decision_id:str; audit_id:str; expected_audit_version:int; decision:Literal[confirm,override,reject]; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; reviewer_id:str; reviewed_at:datetime` | `is_override; override_score_sum; assert_matches` |
+| `TeacherReviewDecision` | `decision_id:str; audit_id:str; expected_audit_version:int; expected_audit_checksum:str; decision:Literal[confirm,override,reject]; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; reviewer_id:str; reviewed_at:datetime` | `is_override; override_score_sum; assert_matches` |
 
 ### 事件契约（[events.py](src/course_insight/contracts/events.py)）
 
@@ -247,7 +247,7 @@ python -m course_insight.cli export-schemas
 |---|---|---|
 | `ActorContext` | `actor_id:str; role:student\|teacher\|course_admin\|system_admin; course_ids:list[str]; class_ids:list[str]; issued_at:datetime` | 鉴权范围不可重复；只用伪匿名身份 |
 | `AssessmentSubmission` | `submission_id:str; attempt_id:str; paper_id:str; learner_id:str; answers:dict[str,str\|bool\|int\|float]; submitted_at:datetime` | Django 学生表单到 M8 的无路径输入；答案键为题目实例 ID |
-| `TeacherReviewSubmission` | `submission_id:str; audit_id:str; expected_audit_version:int; reviewer_id:str; decision:confirm\|override\|reject; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; submitted_at:datetime` | Django 教师表单到 M9 的无路径输入；M9 转成同词汇的 `TeacherReviewDecision` |
+| `TeacherReviewSubmission` | `submission_id:str; audit_id:str; expected_audit_version:int; expected_audit_checksum:str; reviewer_id:str; decision:confirm\|override\|reject; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; submitted_at:datetime` | Django 教师表单到 M9 的无路径输入；版本与 checksum 必须同时匹配当前评分审计；M9 转成同词汇的 `TeacherReviewDecision` |
 | `AsyncJobStatus` | `job_id:str; job_type:django_frontend\|vector_index\|llm_generation\|learning_model\|calibration; status:queued\|running\|succeeded\|failed\|skipped; progress:float; result_ref/error_code; created_at/finished_at` | 终态必须有完成时间；legacy Django scaffold 作业保持 `skipped` |
 
 ### M2/M7/M9 智能边界契约（[intelligence.py](src/course_insight/contracts/intelligence.py)）
@@ -580,6 +580,7 @@ actor+IP、actor 与 IP 三个 HMAC 桶，成功登录保留共享 IP 历史。
   "decision_id": "decision_example",
   "audit_id": "audit_example",
   "expected_audit_version": 1,
+  "expected_audit_checksum": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "decision": "override",
   "final_total_score": 5.0,
   "criterion_overrides": [
@@ -594,6 +595,8 @@ actor+IP、actor 与 IP 三个 HMAC 桶，成功登录保留共享 IP 历史。
 
 `override` 必须完整覆盖当前量规分项，旧分和版本必须与当前 v1 一致，新分之和
 等于 `final_total_score` 且不超过题目上限。
+
+复核请求必须同时携带 `expected_audit_version` 和 `expected_audit_checksum`；checksum 必须匹配当前评分审计内容，版本或 checksum 任一不一致都必须拒绝复核。
 
 ## PostgreSQL 目标、SQLite 基线、JSON 与 runtime 边界
 
