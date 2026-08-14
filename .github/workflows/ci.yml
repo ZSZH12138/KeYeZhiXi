@@ -121,7 +121,21 @@ jobs:
           -e ".[dev,intent]"
 
       - name: Run live M1-M3 PostgreSQL/pgvector acceptance
-        run: python -m pytest -q tests/integration/test_postgres_m1_m2_m3_live.py
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -vv --tb=long tests/integration/test_postgres_m1_m2_m3_live.py 2>&1 | tee live-m1-m3.log
+
+      - name: Publish live acceptance diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          {
+            echo "## Live M1-M3 acceptance diagnostics"
+            echo '```text'
+            cat live-m1-m3.log
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
       - name: Check whitespace
         run: git diff --check
