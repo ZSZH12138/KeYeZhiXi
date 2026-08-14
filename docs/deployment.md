@@ -5,9 +5,12 @@
 本文件描述截至 `2026-08-12` 已实现的 M0 部署面、M1—M3 S1-S6 能力、M6 私有策略
 配置与进程角色。它不把未实测的 PostgreSQL+pgvector 联调写成“已通过”，也不把开发
 服务器当成生产 WSGI/ASGI 部署。SQLite 仅用于离线、测试和迁移演练；生产必须使用
-PostgreSQL+pgvector。
+PostgreSQL+pgvector。仓库已提供真实 HTTP embedding + PostgreSQL/pgvector + M1—M3
+恢复链路的 live 用例；本机没有受保护测试数据库时仍会明确 skip，只有 CI job 通过
+后才能记录为联调验收通过。
 M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M7/M9 的 DeepSeek 网络调用仍是
-空实现；M2 的 embedding/pgvector 代码已经实现，但当前尚未完成真实 live 联调。
+空实现；M2 的 embedding/pgvector 代码和真实 live 验收用例已经实现，但当前开发机
+未提供可执行的 PostgreSQL 测试环境。
 
 M6 已实现 rules/shadow/active runtime、artifact 校验、奖励/OPE 与私有持久化，
 但默认是 `rules`、零 rollout、零探索。本阶段没有真实教学训练、线上 rollout 或
@@ -189,11 +192,10 @@ cross-check。部署备份和恢复必须覆盖所选后端的权威数据、man
 - 校验 `runtime/artifacts/` 中 M1 完整课程导入、M2 完整 lexical snapshot，以及
   M3 bundle + seed snapshot + validation report；
 
-SQLite/离线启动时会：
-
-- 由 `FileM1Repository.get_course_package`、
-  `FileM2Repository.load_index_artifact`、`FileM3Repository.load_bundle_artifact`
-  读取完整 immutable artifacts；
+SQLite/离线启动时默认由共享 `SQLiteM1M2M3Repository` 读取完整制品；显式文件后端或
+导出恢复场景才由 `FileM1Repository.get_course_package`、
+`FileM2Repository.load_index_artifact`、`FileM3Repository.load_bundle_artifact`
+读取 `runtime/artifacts/` 中的 immutable artifacts；
 - 校验课程/包/索引身份、package checksum 与发布/ready 状态，并将必需的 snapshots
   仅作身份 cross-check；
 - 直接恢复完整 M2 lexical snapshot，不重新 `build_index`；
@@ -203,7 +205,8 @@ SQLite/离线启动时会：
 - 通过 v15（0014/0015）schema 和 `PostgresM1M2M3Repository` 校验 M1—M3 制品、审计与 review；
 - 为 vector/hybrid 检索显式提供并校验 `EvidenceIndexRef`，调用
   `restore_vector_index`；自动发现 ready 向量索引已通过 durable metadata 恢复路径实现，
-  但当前尚未完成真实 PostgreSQL+pgvector live 联调；
+  但本机未提供可执行的 PostgreSQL+pgvector 测试环境；CI `live-m1-m3` job 会执行
+  真实 HTTP embedding、M1 导入、M2 检索审计、M3 审批发布和重启恢复；
 - 用真实 `StatePolicy.from_path()` 和 `TeacherThresholdPolicy.from_path()` 解析两份
   policy，而不只是检查文件存在。
 
@@ -729,6 +732,20 @@ outbox 投递和外部日志保留策略都可能不可逆；执行前必须解�
 - `COURSE_INSIGHT_EMBEDDING__MODEL_VERSION`
 - `COURSE_INSIGHT_EMBEDDING__DIMENSION`
 
+应用检索策略由同一份受治理配置选择，不能在业务调用点临时拼接：
+
+- `COURSE_INSIGHT_RETRIEVAL__POLICY_ID`
+- `COURSE_INSIGHT_RETRIEVAL__STRATEGY=lexical|vector|hybrid`
+- `COURSE_INSIGHT_RETRIEVAL__TOP_K`
+- `COURSE_INSIGHT_RETRIEVAL__LEXICAL_WEIGHT`
+- `COURSE_INSIGHT_RETRIEVAL__VECTOR_WEIGHT`
+- `COURSE_INSIGHT_RETRIEVAL__RERANK`
+
+`AppCoordinator` 和 `assessment_workflow` 将这一版本化策略传入
+`retrieve_for_application -> retrieve_with_policy`；因此审计中的 `policy_id` 与实际
+业务策略一致。vector/hybrid 缺少 ready pgvector、embedding 或审计仓储时必须 readiness
+失败，不能降级成伪造的 `empty` 成功。
+
 密钥只从环境变量读取，不写入 settings、审计、数据库 payload 或日志。embedding 模型
 身份和维度属于索引身份；替换模型必须新建 index version，完成 staging 校验后发布。
 
@@ -740,14 +757,33 @@ M1 导入保存 parser id/version 和完整输入快照；M2 使用 lexical、ve
 `build_knowledge_bundle_after_approval`。重启时从所选后端恢复 M1/M2/M3 制品、审计和
 review，并显式校验 lexical 或 ready pgvector 引用；向量恢复调用
 `restore_vector_index`，不会重新请求 embedding。自动发现 ready 向量索引已通过 durable
-metadata 恢复路径实现，但真实 PostgreSQL+pgvector live 联调尚未完成。当前 `AppCoordinator` 和
-`assessment_workflow` 已通过 `retrieve_for_application -> retrieve_with_policy` 进入
-正式 M2 边界；旧 `retrieve` 仅作兼容。完整 vector/hybrid 生产链仍须完成真实
-PostgreSQL+pgvector live 联调后才能写成生产验收事实。
+metadata 恢复路径实现。当前 `AppCoordinator` 和 `assessment_workflow` 已通过
+`retrieve_for_application -> retrieve_with_policy` 进入正式 M2 边界；旧 `retrieve` 仅作
+兼容。完整 vector/hybrid 生产链须以 CI `live-m1-m3` job 的实际结果作为生产验收依据。
 `AppCoordinator.initialize_course` 生产调用必须同时提供已批准的
 `teacher_review_id`/`teacher_review_version`；现有 M0 教师 Web 的
 `TeacherReviewSubmission` 仍属于 M8/M9 评分复核；M3 S4 已提供应用层 CAS 门面，
 专用 Django 操作页仍需在上层产品界面中接入。
+
+### 向量性能验收与 ANN 索引
+
+`0014` 默认保留精确余弦搜索，保证结果召回率；它不会在未知 embedding 维度时盲目
+创建全表 ANN 索引。上线前必须用目标课程规模定义 chunk 数、P95 检索耗时和召回率，
+先运行 `EXPLAIN (ANALYZE, BUFFERS)` 与重复请求基准，再决定是否为每个 ready index
+创建按维度绑定的表达式索引。例如配置维度为 1536 时：
+
+```sql
+CREATE INDEX CONCURRENTLY m2_vec_hnsw_<safe_suffix>
+ON m2_vector_documents
+USING hnsw ((embedding::vector(1536)) vector_cosine_ops)
+WITH (m = 16, ef_construction = 64)
+WHERE index_id = '<index_id>' AND index_version = '<index_version>';
+```
+
+索引名和 `WHERE` 值必须由受治理的 index identity 生成，不能把用户输入直接拼接进 SQL。
+M2 PostgreSQL adapter 的查询也使用同一维度表达式，使该 partial index 可被规划器使用；
+创建后必须在目标规模上同时记录 P50/P95、索引构建时间、索引大小和召回率。没有这些
+实测数据时只能标记“功能可用、性能未验收”，不能把精确搜索或 ANN 参数写成生产 SLA。
 
 迁移使用 `export_manifest` / `import_manifest`：目标端会先验证每条记录、每个 payload
 checksum 和 manifest checksum，再在一个事务中发布；同身份同内容幂等，冲突或任一失败

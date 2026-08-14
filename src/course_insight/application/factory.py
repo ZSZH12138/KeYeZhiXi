@@ -16,6 +16,7 @@ from course_insight.contracts.course import CoursePackage
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef
 from course_insight.contracts.knowledge import KnowledgeBundle
+from course_insight.contracts.intelligence import RetrievalPolicy
 from course_insight.infrastructure.config import PlatformSettings
 from course_insight.infrastructure.m1_file_repository import FileM1Repository
 from course_insight.infrastructure.m2_file_repository import FileM2Repository
@@ -451,6 +452,14 @@ def _assemble_application(
         if service_overrides.m2 is None
         else service_overrides.m2
     )
+    retrieval_policy = RetrievalPolicy(
+        policy_id=settings.retrieval.policy_id,
+        strategy=settings.retrieval.strategy,
+        top_k=settings.retrieval.top_k,
+        lexical_weight=settings.retrieval.lexical_weight,
+        vector_weight=settings.retrieval.vector_weight,
+        rerank=settings.retrieval.rerank,
+    )
     teacher_review_workflow = _build_teacher_review_workflow(m3_repository)
     m3 = (
         M3KnowledgeBundleService(
@@ -515,7 +524,19 @@ def _assemble_application(
         if service_overrides.m9 is None
         else service_overrides.m9
     )
-    coordinator = AppCoordinator(m0, m1, m2, m3, m4, m5, m6, m7, m8, m9)
+    coordinator = AppCoordinator(
+        m0,
+        m1,
+        m2,
+        m3,
+        m4,
+        m5,
+        m6,
+        m7,
+        m8,
+        m9,
+        retrieval_policy=retrieval_policy,
+    )
     runtime_registry = CourseRuntimeRegistry(
         m0,
         m2,

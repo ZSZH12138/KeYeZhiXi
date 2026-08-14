@@ -1454,12 +1454,12 @@ class PostgresPgVectorStore:
         def operation() -> tuple[VectorMatch, ...]:
             with self._pool.connection() as connection:  # type: ignore[attr-defined]
                 rows = connection.execute(
-                    """
+                    f"""
                     SELECT evidence_id, chunk_id, text_checksum,
-                           1 - (embedding <=> %s::vector) AS score
+                           1 - (embedding::vector({dimension}) <=> %s::vector) AS score
                     FROM m2_vector_documents
                     WHERE index_id = %s AND index_version = %s
-                    ORDER BY embedding <=> %s::vector, evidence_id
+                    ORDER BY embedding::vector({dimension}) <=> %s::vector, evidence_id
                     LIMIT %s
                     """,
                     (vector, index_id, index_version, vector, top_k),

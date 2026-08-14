@@ -125,6 +125,67 @@ def _service(repository: _MemoryArtifactRepository) -> M2EvidenceRetrievalServic
     return M2EvidenceRetrievalService(Path("runtime/test-index"), "lexical", repository)
 
 
+class _FixedEmbeddingProvider:
+    model_ref = EmbeddingModelIdentity(
+        provider="test",
+        model_name="fixed-retrieval",
+        model_version="v1",
+        dimension=2,
+    )
+    _vectors = {
+        "alpha rule": (1.0, 0.0),
+        "beta rule": (0.8, 0.6),
+        "gamma rule": (0.1, 0.9949874371),
+    }
+
+    def embed_documents(self, texts: object) -> tuple[tuple[float, ...], ...]:
+        return tuple(self._vectors[str(text)] for text in texts)  # type: ignore[union-attr]
+
+    def embed_query(self, text: str) -> tuple[float, ...]:
+        del text
+        return (1.0, 0.0)
+
+
+def _vector_service(
+    repository: _MemoryArtifactRepository,
+    audits: InMemoryRetrievalAuditStore,
+    *,
+    clock: object | None = None,
+) -> M2EvidenceRetrievalService:
+    kwargs = {} if clock is None else {"clock": clock}
+    return M2EvidenceRetrievalService(
+        Path("runtime/test-vector-index"),
+        "lexical",
+        repository,
+        embedding_provider=_FixedEmbeddingProvider(),
+        vector_store=InMemoryVectorStore(),
+        audit_store=audits,
+        production=True,
+        **kwargs,
+    )
+
+
+def _policy(strategy: str) -> RetrievalPolicy:
+    return RetrievalPolicy(
+        policy_id=f"test-{strategy}",
+        strategy=strategy,
+        top_k=1,
+        lexical_weight=1.0 if strategy == "lexical" else 0.5,
+        vector_weight=1.0 if strategy == "vector" else 0.5,
+        rerank=False,
+    )
+
+
+class _FailingAuditStore:
+    def get(self, audit_id: str) -> object:
+        del audit_id
+        raise RuntimeError("audit backend credentials must not escape")
+
+    def save(self, envelope: object) -> None:
+        del envelope
+        raise RuntimeError("audit backend credentials must not escape")
+
+
 def test_required_evidence_is_complete_and_top_k_limits_only_supplements() -> None:
     repository = _MemoryArtifactRepository()
     package = _package()
@@ -140,6 +201,106 @@ def test_required_evidence_is_complete_and_top_k_limits_only_supplements() -> No
     assert bundle.course_package_id == package.course_package_id
     assert bundle.course_package_checksum == package.checksum
     assert bundle.index_checksum == index.checksum
+
+
+@pytest.mark.parametrize("strategy", ["vector", "hybrid"])
+def test_vector_and_hybrid_apply_required_and_min_relevance_contract(
+    strategy: str,
+) -> None:
+    repository = _MemoryArtifactRepository()
+    audits = InMemoryRetrievalAuditStore()
+    package = _package()
+    service = _vector_service(repository, audits)
+    index = service.build_vector_index(package)
+
+    bundle = service.retrieve_with_policy(
+        _query(
+            package,
+            query_text="unmatched",
+            required_evidence_ids=["evidence_chunk_c", "evidence_chunk_a", "evidence_chunk_c"],
+            top_k=1,
+            min_relevance=1.0,
+        ),
+        index,
+        _policy(strategy),
+        request_id=f"request-{strategy}",
+    )
+
+    assert bundle.citation_ids() == ["evidence_chunk_a", "evidence_chunk_c"]
+
+
+@pytest.mark.parametrize("strategy", ["lexical", "vector", "hybrid"])
+def test_binding_failure_is_audited_for_all_strategies(
+    strategy: str,
+) -> None:
+    repository = _MemoryArtifactRepository()
+    audits = InMemoryRetrievalAuditStore()
+    package = _package()
+    service = _vector_service(repository, audits)
+    index = service.build_vector_index(package)
+
+    with pytest.raises(DomainError) as captured:
+        service.retrieve_with_policy(
+            _query(package, course_package_checksum="f" * 64),
+            index,
+            _policy(strategy),
+            request_id=f"binding-{strategy}",
+        )
+
+    assert captured.value.code == "INDEX_NOT_READY"
+    assert len(audits._audits) == 1  # noqa: SLF001
+    audit = next(iter(audits._audits.values()))  # noqa: SLF001
+    assert audit.audit.status == "failed"
+    assert audit.audit.retrieved_evidence_ids == []
+
+
+def test_success_audit_records_injected_monotonic_latency() -> None:
+    repository = _MemoryArtifactRepository()
+    audits = InMemoryRetrievalAuditStore()
+    ticks = iter((1_000_000_000, 1_006_000_000))
+    service = _vector_service(repository, audits, clock=lambda: next(ticks))
+    package = _package()
+    index = service.build_index(package)
+
+    service.retrieve_with_policy(
+        _query(package),
+        index,
+        RetrievalPolicy(
+            policy_id="latency-lexical",
+            strategy="lexical",
+            top_k=1,
+            lexical_weight=1.0,
+            vector_weight=0.0,
+            rerank=False,
+        ),
+        request_id="latency-request",
+    )
+
+    audit = next(iter(audits._audits.values()))  # noqa: SLF001
+    assert audit.metadata.latency_ms == 6
+
+
+def test_audit_persistence_failure_preserves_original_business_error() -> None:
+    repository = _MemoryArtifactRepository()
+    package = _package()
+    service = M2EvidenceRetrievalService(
+        Path("runtime/audit-failure"),
+        "lexical",
+        repository,
+        audit_store=_FailingAuditStore(),  # type: ignore[arg-type]
+        production=True,
+    )
+    index = service.build_index(package)
+
+    with pytest.raises(DomainError) as captured:
+        service.retrieve_with_policy(
+            _query(package, course_package_checksum="f" * 64),
+            index,
+            _policy("lexical"),
+        )
+
+    assert captured.value.code == "INDEX_NOT_READY"
+    assert "credentials" not in str(captured.value)
 
 
 def test_fresh_service_needs_explicit_restore_and_never_rebuilds() -> None:

@@ -47,6 +47,7 @@ from course_insight.infrastructure.config import (
     IntentSettings,
     LoggingSettings,
     PlatformSettings,
+    RetrievalSettings,
 )
 from course_insight.infrastructure.config.models import M6PolicySettings
 from course_insight.infrastructure.m1_file_repository import FileM1Repository
@@ -576,6 +577,30 @@ def test_factory_default_m1_uses_sqlite_s1_s6_repository(tmp_path: Path) -> None
     assert isinstance(repository, SQLiteM1M2M3Repository)
     assert repository.is_ready()
     assert repository.database_path == settings.database.sqlite_path
+
+
+def test_factory_wires_configured_retrieval_policy_to_coordinator(
+    tmp_path: Path,
+) -> None:
+    settings = _settings(tmp_path).model_copy(
+        update={
+            "retrieval": RetrievalSettings(
+                policy_id="production-vector-v2",
+                strategy="vector",
+                top_k=5,
+                lexical_weight=0.0,
+                vector_weight=1.0,
+            )
+        }
+    )
+
+    container = build_application(settings)
+
+    policy = container.coordinator._retrieval_policy  # noqa: SLF001
+    assert policy is not None
+    assert policy.policy_id == "production-vector-v2"
+    assert policy.strategy == "vector"
+    assert policy.top_k == 5
 
 
 def test_factory_default_m2_uses_shared_sqlite_s1_s6_repository(tmp_path: Path) -> None:

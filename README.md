@@ -342,7 +342,10 @@ repository: M2Repository)`。
   closed，不能伪造成功的空索引或空审计。
 - `retrieve_with_policy(evidence_query, evidence_index_ref, policy, ...) -> EvidenceBundle`：
   M6/M8 业务检索的正式入口，支持 lexical、vector、hybrid，并写入脱敏
-  `RetrievalAudit`。
+  `RetrievalAudit`；三种策略共用必选证据、最低相关度和补充 `top_k` 规则。
+- 应用层默认从 `COURSE_INSIGHT_RETRIEVAL__*` 配置构造版本化 `RetrievalPolicy`，经
+  `retrieve_for_application(...)` 原样传给 M2；生产切换 vector/hybrid 时必须同时提供
+  ready pgvector 索引、embedding provider 和审计仓储，缺失依赖会 fail closed。
 - `retrieve(evidence_query, evidence_index_ref) -> EvidenceBundle`：仅为已有 lexical
   调用保留的兼容入口；新业务不得用它替代 `retrieve_with_policy`。
 
@@ -608,7 +611,8 @@ actor+IP、actor 与 IP 三个 HMAC 桶，成功登录保留共享 IP 历史。
 ## PostgreSQL 目标、SQLite 基线、JSON 与 runtime 边界
 
 SQLite 适配器用于离线、测试和迁移演练；生产环境必须使用 PostgreSQL+pgvector。
-离线/测试模式下，`FileM1Repository`、`FileM2Repository`、`FileM3Repository` 将完整的
+离线/测试组合根默认使用共享的 `SQLiteM1M2M3Repository`；显式文件导出/文件后端时，
+`FileM1Repository`、`FileM2Repository`、`FileM3Repository` 将完整的
 不可变、内容寻址运行时制品写入 `runtime/artifacts/`。生产模式下，M1—M3 使用共享的
 `PostgresM1M2M3Repository`，并由 0014/0015 migrations 持久化完整制品、pgvector 索引/文档、
 检索审计和教师复核 CAS 记录。
@@ -617,7 +621,9 @@ SQLite 适配器用于离线、测试和迁移演练；生产环境必须使用 
 PostgreSQL Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整可运行
 基线；两个后端必须保持模块前缀、幂等身份、追加式版本与现有 Pydantic 契约一致。
 
-本文档不声称真实 PostgreSQL 联调已在当前机器跑通。live tests 必须同时提供
+本文档不声称真实 PostgreSQL 联调已在当前机器跑通。仓库已提供
+`tests/integration/test_postgres_m1_m2_m3_live.py`，并由 CI `live-m1-m3` job 执行；
+live tests 必须同时提供
 `COURSE_INSIGHT_TEST_DATABASE_URL` 和与 DSN 库名完全一致的
 `COURSE_INSIGHT_TEST_DATABASE_NAME`；库名还必须带分隔的 `test`、`ci` 或 `tmp`
 标记。缺少变量会明确 `skip`，保留库或危险命名会 fail closed。
@@ -730,7 +736,7 @@ M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、Deep
 |---|---|---|
 | M0 | 配置、日志、SQLite/PostgreSQL、真实 Django/权限/表单、流程恢复、leased Worker | 在目标环境完成生产容量、备份与真实 PostgreSQL 验收 |
 | M1 | 仅固定本地文本解析与段落切分 | 在 parser registry 后增加可替换解析器 |
-| M2 | SQLite/离线 lexical 基线；生产 PostgreSQL+pgvector 支持 embedding、vector/hybrid、审计 | 完成真实 PostgreSQL+pgvector live 联调与生产运行验收 |
+| M2 | SQLite/离线 lexical 基线；生产 PostgreSQL+pgvector 支持 embedding、vector/hybrid、审计 | 以 CI `live-m1-m3` job 的真实 PostgreSQL+pgvector 结果完成生产运行验收 |
 | M3 | 教师种子校验与 CAS 复核门；`initialize_course` 可携带审批 ID/version，生产发布必须走 `build_knowledge_bundle_after_approval` | 将 M3 S4 审批接入现有 M0 教师 UI 操作流 |
 | M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 84 个公开契约、`TaskPlan` 和八字段业务身份 |
 | M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |

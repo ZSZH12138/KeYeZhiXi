@@ -369,7 +369,9 @@ def test_pgvector_adapter_publishes_complete_batch_and_uses_parameterized_search
     matches = store.search("index_1", "v1", (1.0, 0.0), top_k=1)
     assert matches[0].evidence_id == "e1"
     assert any(
-        "%s::vector" in statement and "ORDER BY" in statement
+        "%s::vector" in statement
+        and "embedding::vector(2)" in statement
+        and "ORDER BY" in statement
         for statement, _ in connection.executions
     )
 

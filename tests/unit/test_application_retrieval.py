@@ -8,6 +8,7 @@ import pytest
 from course_insight.application.coordinator import AppCoordinator
 from course_insight.application.retrieval import retrieve_for_application
 from course_insight.contracts.errors import DomainError
+from course_insight.contracts.intelligence import RetrievalPolicy
 
 
 def _query() -> SimpleNamespace:
@@ -36,6 +37,29 @@ def test_application_retrieval_uses_formal_policy_entrypoint() -> None:
     assert policy.strategy == "lexical"
     assert policy.top_k == 3
     assert request_id == "request-1"
+
+
+def test_application_retrieval_forwards_governed_strategy_policy() -> None:
+    calls: list[object] = []
+    policy = RetrievalPolicy(
+        policy_id="production-hybrid-v2",
+        strategy="hybrid",
+        top_k=3,
+        lexical_weight=0.4,
+        vector_weight=0.6,
+        rerank=False,
+    )
+
+    class FormalM2:
+        def retrieve_with_policy(self, query, index, forwarded_policy, *, request_id=None):
+            del query, index, request_id
+            calls.append(forwarded_policy)
+            return "formal-result"
+
+    assert retrieve_for_application(
+        FormalM2(), _query(), "index-1", policy=policy
+    ) == "formal-result"
+    assert calls == [policy]
 
 
 def test_application_retrieval_keeps_legacy_test_double_compatibility() -> None:

@@ -51,6 +51,14 @@ def safe_defaults() -> dict[str, Any]:
             "pool_max_size": 10,
             "connect_timeout_seconds": 10.0,
         },
+        "retrieval": {
+            "policy_id": "application-lexical-v1",
+            "strategy": "lexical",
+            "top_k": 3,
+            "lexical_weight": 1.0,
+            "vector_weight": 0.0,
+            "rerank": False,
+        },
         "logging": {
             "level": "INFO",
             "mode": "rotating_file",

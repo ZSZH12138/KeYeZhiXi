@@ -9,8 +9,9 @@
 当前 v2 中仍返回空结果的只是尚未启用的算法/外部调用：DeepSeek 不发起 API 请求，
 DINA/BKT/IRT 不运行估计。M2 的 PostgreSQL+pgvector、embedding、策略检索和审计
 端口已经实现；SQLite 仅用于离线、测试和迁移演练，生产必须使用 PostgreSQL+pgvector。
-真实 PostgreSQL+pgvector live 联调尚未完成，缺少生产依赖时必须 fail closed，不能把
-逻辑 `empty` 当成生产成功。
+仓库已提供真实 PostgreSQL+pgvector live 用例；当前机器缺少生产依赖时必须 fail
+closed，live 用例会明确 skip，不能把逻辑 `empty` 或 skip 当成生产成功，最终以 CI
+`live-m1-m3` job 的实际通过结果为准。
 
 M2 正式业务检索入口是 `retrieve_with_policy`；旧 `retrieve` 仅为已有 lexical 调用
 保留的兼容入口。M3 生产发布必须使用 `build_knowledge_bundle_after_approval`，
@@ -108,8 +109,8 @@ M3 生产发布必须先通过 `TeacherReviewWorkflow` 的 CAS 状态
 
 应用层现在通过 `retrieve_for_application(...)` 委托到
 `M2.retrieve_with_policy(...)`，并由该入口统一策略校验和审计；旧 `retrieve` 仅为已有
-lexical 调用保留兼容。完整 vector/hybrid 生产链仍需真实 PostgreSQL+pgvector live
-联调验收，不能把模块级代码可用写成 live 通过。
+lexical 调用保留兼容。完整 vector/hybrid 生产链仍需 CI `live-m1-m3` job 的真实
+PostgreSQL+pgvector 结果验收，不能把模块级代码可用写成 live 通过。
 
 M4 幂等身份只由课程、班级、学习者、会话、任务类型、知识包、课程包和蓝图
 八项冻结引用组成。SQLite 唯一约束保证重复、并发和进程重启后的调用复用首次

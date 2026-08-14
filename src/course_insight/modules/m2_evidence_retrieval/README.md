@@ -9,8 +9,9 @@
 从 `CoursePackage` 建立可定位证据索引，按 `EvidenceQuery` 执行 RAG
 检索，返回带来源的证据与检索审计。SQLite 提供离线/测试 lexical 基线；生产
 PostgreSQL+pgvector 已支持 embedding、lexical/vector/hybrid 检索、两阶段索引发布
-和审计。当前仓库尚未完成真实 PostgreSQL+pgvector live 联调，不能把测试 skip 写成
-生产验收通过。
+和审计。仓库已提供真实 HTTP embedding + PostgreSQL/pgvector + M1—M3 恢复链路的
+live 用例；本机缺少受保护测试数据库时仍会明确 skip，只有 CI live job 实际通过后
+才能记录为生产验收通过。
 
 ## 输入来源
 
@@ -36,7 +37,8 @@ PostgreSQL+pgvector 已支持 embedding、lexical/vector/hybrid 检索、两阶�
 
 ## 持久化与 D3 边界
 
-离线/测试模式下，`FileM2Repository` 将完整、不可变、带 checksum 的 lexical 制品写入
+离线/测试模式下默认使用共享 `SQLiteM1M2M3Repository`；需要文件导出或显式文件后端时，
+`FileM2Repository` 将完整、不可变、带 checksum 的 lexical 制品写入
 `runtime/artifacts/`，制品必须包含 `EvidenceIndexRef` 和完整 lexical snapshot，即
 `documents` 与 `postings`。生产模式下，`PostgresM1M2M3Repository` 使用 0014/0015 migrations
 持久化 M2 制品、`m2_vector_indexes`、`m2_vector_documents` 和
@@ -58,8 +60,15 @@ deterministic provider 仅允许测试构造器。向量索引按 staging -> rea
 
 `RetrievalPolicy.strategy` 支持 lexical、vector、hybrid。hybrid 使用固定权重和稳定
 evidence-id tie-break；vector/hybrid 必须有已 ready 的 provider 与 vector store。正式
-检索通过 `retrieve_with_policy`，成功和无结果都会写入脱敏审计（查询 checksum、索引/
-策略/模型身份、分数和耗时），持久化失败会使调用失败。重新进程可用 `restore_index`
+检索通过 `retrieve_with_policy`，三种策略统一执行必选证据、最低相关度和补充 `top_k`
+规则；成功、无结果和已取得合法索引身份的失败都会写入脱敏审计（查询 checksum、索引/
+策略/模型身份、分数和单调时钟耗时），持久化失败会使成功调用失败，但不会覆盖原始失败
+业务错误。重新进程可用 `restore_index`
 或在提供并校验 `EvidenceIndexRef` 后调用 `restore_vector_index`，不重建已有向量；
-自动发现 ready 向量索引已通过 durable metadata 恢复路径实现，但当前尚未完成真实
-PostgreSQL+pgvector live 联调。
+自动发现 ready 向量索引已通过 durable metadata 恢复路径实现。真实 PostgreSQL+pgvector
+联调用例位于 `tests/integration/test_postgres_m1_m2_m3_live.py`，由 CI 的
+`live-m1-m3` job 执行；本机没有测试数据库时不把 skip 记为通过。
+
+应用组合根通过 `COURSE_INSIGHT_RETRIEVAL__POLICY_ID`、`__STRATEGY`、`__TOP_K`、
+`__LEXICAL_WEIGHT`、`__VECTOR_WEIGHT` 和 `__RERANK` 注入同一个受治理策略；
+`retrieve_for_application(...)` 会把该策略原样传给 M2 和审计，不再把业务入口写死为 lexical。

@@ -23,8 +23,10 @@ Django 作业”，不是“Django 尚未实现”。
 “空实现”现在只描述尚未启用的智能算法和外部调用：M5 不执行 DINA/BKT 参数估计，
 M8 不执行 IRT 标定或自适应选择，M7/M9 不调用 DeepSeek。M2 的生产
 PostgreSQL+pgvector、embedding、策略检索和审计适配器已经实现；SQLite 仅用于
-离线/测试/迁移演练。若验收环境没有提供受保护的临时 PostgreSQL，相关 live tests
-会明确跳过，不能据此声称已完成真实 PostgreSQL+pgvector 联调。
+离线/测试/迁移演练。仓库已提供 `tests/integration/test_postgres_m1_m2_m3_live.py`，
+覆盖真实 HTTP embedding、M1—M3 PostgreSQL/pgvector 链路和恢复；若验收环境没有提供
+受保护的临时 PostgreSQL，相关 live tests 会明确跳过，必须以 CI `live-m1-m3` job
+的实际通过结果为准，不能把 skip 写成真实联调通过。
 
 M2 正式业务检索入口是 `retrieve_with_policy`；旧 `retrieve` 仅为已有 lexical 调用
 保留的兼容入口。M3 生产发布必须经过教师复核 CAS，并使用
@@ -33,8 +35,8 @@ M2 正式业务检索入口是 `retrieve_with_policy`；旧 `retrieve` 仅为已
 
 应用层的 `AppCoordinator` 与 `assessment_workflow` 通过
 `retrieve_for_application -> retrieve_with_policy` 进入 M2，旧 `retrieve` 不再作为
-业务编排入口。完整 vector/hybrid 生产链仍以真实 PostgreSQL+pgvector live 联调为
-验收条件。
+业务编排入口。完整 vector/hybrid 生产链仍以 CI `live-m1-m3` job 的真实
+PostgreSQL+pgvector live 结果为验收条件。
 
 M6 已实现私有、版本化的策略运行时和离线评估代码，但默认仍为
 `rules`、零 rollout、零探索。`shadow` 只记录模型建议，`active` 还必须通过

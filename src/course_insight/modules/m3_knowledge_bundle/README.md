@@ -23,7 +23,8 @@ M3 冻结题目和知识版本，为 M5 DINA 认知诊断、M8 IRT 标定与自�
 
 ## 持久化与 D3 边界
 
-离线/测试模式下，`FileM3Repository` 将完整、不可变、带 checksum 的知识制品写入
+离线/测试模式下默认使用共享 `SQLiteM1M2M3Repository`；需要文件导出或显式文件后端时，
+`FileM3Repository` 将完整、不可变、带 checksum 的知识制品写入
 `runtime/artifacts/`；已发布制品必须同时包含 bundle、seed snapshot 和 validation
 report，被拒绝的 validation 也要保留对应的 seed snapshot/report。生产模式下，
 `PostgresM1M2M3Repository` 使用 0014/0015 migrations 持久化 M3 artifact 和
@@ -44,7 +45,9 @@ report，被拒绝的 validation 也要保留对应的 seed snapshot/report。�
 PostgreSQL CAS 仓储；SQLite CAS 仅用于离线/测试。生产调用旧的无审批发布入口会返回
 `M3_REVIEW_REQUIRED`。正式发布必须使用 `build_knowledge_bundle_after_approval`，
 并重新捕获 seed snapshot、校验 checksum、验证报告和 bundle 后才提交完整制品。
-真实 PostgreSQL+pgvector live 联调尚未完成，不能把生产后端代码可用写成 live 验收通过。
+M1—M3 的真实 PostgreSQL+pgvector live 用例已纳入
+`tests/integration/test_postgres_m1_m2_m3_live.py` 和 CI `live-m1-m3` job；本机缺少
+受保护测试数据库时仍会明确 skip，不能把 skip 记为 live 验收通过。
 M3 service 暴露 `create_teacher_review_draft`、`submit_teacher_review`、
 `approve_teacher_review`、`reject_teacher_review` 和 `recall_teacher_review` CAS wrappers；
 `AppCoordinator.initialize_course` 可选接收 `teacher_review_id` 与

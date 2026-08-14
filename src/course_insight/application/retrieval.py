@@ -14,18 +14,19 @@ def retrieve_for_application(
     evidence_index_ref: EvidenceIndexRef,
     *,
     request_id: str | None = None,
+    policy: RetrievalPolicy | None = None,
 ) -> Any:
     """Use the formal M2 policy boundary while keeping legacy test doubles usable.
 
-    The application baseline is deliberately lexical until a caller supplies a
-    vector-backed index.  The M2 service still owns all strategy validation and
-    audit persistence; this helper only prevents application code from bypassing
-    that boundary.
+    The default remains lexical for backwards compatibility, while the
+    composition root may inject a governed vector/hybrid policy. M2 still owns
+    strategy validation and audit persistence; this helper only forwards the
+    selected policy without bypassing that boundary.
     """
 
     retrieve_with_policy = getattr(m2_service, "retrieve_with_policy", None)
     if callable(retrieve_with_policy):
-        policy = RetrievalPolicy(
+        selected_policy = policy or RetrievalPolicy(
             policy_id="application-lexical-v1",
             strategy="lexical",
             top_k=evidence_query.top_k,
@@ -33,10 +34,11 @@ def retrieve_for_application(
             vector_weight=0.0,
             rerank=False,
         )
+        selected_policy.validate_business_rules()
         return retrieve_with_policy(
             evidence_query,
             evidence_index_ref,
-            policy,
+            selected_policy,
             request_id=request_id or evidence_query.query_id,
         )
     legacy_retrieve = getattr(m2_service, "retrieve", None)

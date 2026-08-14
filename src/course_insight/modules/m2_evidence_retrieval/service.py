@@ -4,9 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
+import time
 from datetime import datetime
 from datetime import timezone
 from decimal import Decimal
+from collections.abc import Callable, Sequence
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -47,6 +51,9 @@ from course_insight.modules.m2_evidence_retrieval.vector_store import (
 )
 
 
+_LOGGER = logging.getLogger(__name__)
+
+
 def _error(code: str, message: str, *, recoverable: bool = False) -> DomainError:
     """Create one safe public M2 error without caller or filesystem details."""
 
@@ -68,6 +75,7 @@ class M2EvidenceRetrievalService:
         vector_store: VectorStore | None = None,
         audit_store: RetrievalAuditStore | None = None,
         production: bool = False,
+        clock: Callable[[], int] | None = None,
     ) -> None:
         self._index_dir = index_dir
         self._tokenizer_or_embedding_adapter = tokenizer_or_embedding_adapter
@@ -76,6 +84,7 @@ class M2EvidenceRetrievalService:
         self._vector_store = vector_store
         self._audit_store = audit_store
         self._production = production
+        self._clock = clock or time.monotonic_ns
         self._indexed_packages: dict[tuple[str, str], CoursePackage] = {}
         self._index_refs: dict[tuple[str, str], EvidenceIndexRef] = {}
         self._snapshots: dict[tuple[str, str], LexicalIndexSnapshot] = {}
@@ -556,6 +565,56 @@ class M2EvidenceRetrievalService:
         )
 
     @staticmethod
+    def _select_ranked_results(
+        *,
+        query: EvidenceQuery,
+        package: CoursePackage,
+        ranked: Sequence[tuple[str, float]],
+    ) -> tuple[tuple[str, float], ...]:
+        """Apply the shared required/min-relevance/top-k retrieval contract."""
+
+        chunks = {
+            evidence_id_for_chunk(chunk.chunk_id): chunk
+            for chunk in package.content_chunks
+        }
+        scores = dict(ranked)
+        required: list[tuple[str, float]] = []
+        try:
+            for evidence_id in sorted(set(query.required_evidence_ids)):
+                chunk_id_for_evidence_id(evidence_id)
+                if evidence_id not in chunks:
+                    raise ValueError
+                required.append(
+                    (
+                        evidence_id,
+                        max(0.0, min(1.0, float(scores.get(evidence_id, 0.0)))),
+                    )
+                )
+        except (DomainError, TypeError, ValueError):
+            raise _error(
+                "REQUIRED_EVIDENCE_INVALID",
+                "required evidence is unavailable",
+            ) from None
+
+        required_ids = {evidence_id for evidence_id, _ in required}
+        minimum = Decimal(str(query.min_relevance))
+        supplements: list[tuple[str, float]] = []
+        seen: set[str] = set(required_ids)
+        for evidence_id, raw_score in ranked:
+            if evidence_id in seen or evidence_id not in chunks:
+                continue
+            relevance = max(0.0, min(1.0, float(raw_score)))
+            if raw_score > 0 and Decimal(str(relevance)) >= minimum:
+                supplements.append((evidence_id, relevance))
+                seen.add(evidence_id)
+                if len(supplements) >= query.top_k:
+                    break
+        return tuple([*required, *supplements])
+
+    def _latency_ms(self, started_ns: int) -> int:
+        return max(0, int((self._clock() - started_ns) // 1_000_000))
+
+    @staticmethod
     def _audit_bundle(
         *,
         audit_store: RetrievalAuditStore | None,
@@ -565,6 +624,7 @@ class M2EvidenceRetrievalService:
         bundle: EvidenceBundle,
         request_id: str | None,
         created_at: datetime,
+        latency_ms: int,
     ) -> None:
         if audit_store is None:
             return
@@ -575,7 +635,7 @@ class M2EvidenceRetrievalService:
             status="succeeded" if bundle.evidence_chunks else "empty",
             evidence_ids=[chunk.evidence_id for chunk in bundle.evidence_chunks],
             scores=[chunk.relevance for chunk in bundle.evidence_chunks],
-            latency_ms=0,
+            latency_ms=latency_ms,
             request_id=request_id or query.query_id,
             created_at=created_at,
         )
@@ -590,6 +650,7 @@ class M2EvidenceRetrievalService:
         policy: RetrievalPolicy,
         request_id: str | None,
         created_at: datetime,
+        latency_ms: int,
     ) -> None:
         """Record a failed formal retrieval when a ready index identity exists."""
 
@@ -602,11 +663,19 @@ class M2EvidenceRetrievalService:
             status="failed",
             evidence_ids=[],
             scores=[],
-            latency_ms=0,
+            latency_ms=latency_ms,
             request_id=request_id or query.query_id,
             created_at=created_at,
         )
-        persist_retrieval_audit(audit_store, envelope)
+        try:
+            persist_retrieval_audit(audit_store, envelope)
+        except Exception as error:
+            # Preserve the original business failure; expose only the safe
+            # exception type so secrets or provider payloads cannot be logged.
+            _LOGGER.error(
+                "retrieval failure audit persistence failed (%s)",
+                type(error).__name__,
+            )
 
     def retrieve_with_policy(
         self,
@@ -620,6 +689,13 @@ class M2EvidenceRetrievalService:
         """Execute lexical/vector/hybrid retrieval through configured ports."""
 
         policy.validate_business_rules()
+        started_ns = self._clock()
+        if self._production and self._audit_store is None:
+            raise _error(
+                "RETRIEVAL_AUDIT_UNAVAILABLE",
+                "retrieval audit is unavailable",
+                recoverable=True,
+            )
         try:
             evidence_query = EvidenceQuery.model_validate(
                 evidence_query.model_dump(mode="python", warnings="error")
@@ -634,13 +710,24 @@ class M2EvidenceRetrievalService:
         ref = self._index_refs.get(key)
         snapshot = self._snapshots.get(key)
         lexical_available = package is not None and snapshot is not None
-        vector_available = (
+        vector_available = False
+        if (
             self._embedding_provider is not None
             and self._vector_store is not None
             and ref is not None
             and ref.backend == "pgvector"
-            and self._vector_store.ready(ref.index_id, ref.index_version)
-        )
+        ):
+            try:
+                vector_available = self._vector_store.ready(
+                    ref.index_id, ref.index_version
+                )
+            except Exception:
+                # Dependency health is evaluated before the governed failure
+                # boundary. Treat a health-check error as unavailable so the
+                # dependency failure is still audited without leaking adapter
+                # details.
+                vector_available = False
+        audit_index = ref or evidence_index_ref
         try:
             validate_strategy_dependencies(
                 policy.strategy,
@@ -651,132 +738,148 @@ class M2EvidenceRetrievalService:
             self._audit_failure(
                 audit_store=self._audit_store,
                 query=evidence_query,
-                index=ref,
+                index=audit_index,
                 policy=policy,
                 request_id=request_id,
                 created_at=retrieved_at or datetime.now(timezone.utc),
+                latency_ms=self._latency_ms(started_ns),
             )
             raise
-        if policy.strategy == "lexical":
-            bundle = self.retrieve(evidence_query, evidence_index_ref)
-            self._audit_bundle(
-                audit_store=self._audit_store,
-                query=evidence_query,
-                index=ref or evidence_index_ref,
-                policy=policy,
-                bundle=bundle,
-                request_id=request_id,
-                created_at=retrieved_at or bundle.retrieved_at,
-            )
-            return bundle
-        if package is None or ref is None or self._embedding_provider is None or self._vector_store is None:
-            raise _error("INDEX_NOT_READY", "evidence index is not loaded", recoverable=True)
-        if (
-            evidence_query.course_package_id != package.course_package_id
-            or (
-                evidence_query.course_package_checksum is not None
-                and evidence_query.course_package_checksum != package.checksum
-            )
-        ):
-            raise _error("INDEX_NOT_READY", "evidence index is not loaded", recoverable=True)
         try:
-            query_vector = self._embedding_provider.embed_query(evidence_query.query_text)
-        except Exception:
-            self._audit_failure(
-                audit_store=self._audit_store,
-                query=evidence_query,
-                index=ref,
-                policy=policy,
-                request_id=request_id,
-                created_at=retrieved_at or datetime.now(timezone.utc),
-            )
-            raise _error(
-                "EMBEDDING_PROVIDER_UNAVAILABLE",
-                "embedding provider is unavailable",
-                recoverable=True,
-            ) from None
-        try:
-            vector_matches = self._vector_store.search(
-                ref.index_id,
-                ref.index_version,
-                query_vector,
-                top_k=max(policy.top_k, len(package.content_chunks)),
-            )
+            if policy.strategy == "lexical":
+                bundle = self.retrieve(evidence_query, evidence_index_ref)
+            else:
+                if (
+                    package is None
+                    or ref is None
+                    or self._embedding_provider is None
+                    or self._vector_store is None
+                ):
+                    raise _error("INDEX_NOT_READY", "evidence index is not loaded", recoverable=True)
+                if (
+                    evidence_query.course_package_id != package.course_package_id
+                    or (
+                        evidence_query.course_package_checksum is not None
+                        and evidence_query.course_package_checksum != package.checksum
+                    )
+                ):
+                    raise _error("INDEX_NOT_READY", "evidence index is not loaded", recoverable=True)
+                try:
+                    query_vector = self._embedding_provider.embed_query(
+                        evidence_query.query_text
+                    )
+                except Exception:
+                    raise _error(
+                        "EMBEDDING_PROVIDER_UNAVAILABLE",
+                        "embedding provider is unavailable",
+                        recoverable=True,
+                    ) from None
+                try:
+                    vector_matches = self._vector_store.search(
+                        ref.index_id,
+                        ref.index_version,
+                        query_vector,
+                        top_k=len(package.content_chunks),
+                    )
+                except DomainError:
+                    raise
+                except Exception:
+                    raise _error(
+                        "VECTOR_SEARCH_FAILED",
+                        "vector search failed",
+                        recoverable=True,
+                    ) from None
+                vector_scores = {match.evidence_id: match.score for match in vector_matches}
+                lexical_scores = {
+                    row.evidence_id: row.relevance
+                    for row in rank_snapshot(
+                        snapshot,
+                        query_text=evidence_query.query_text,
+                        concept_ids=evidence_query.concept_ids,
+                    )
+                } if snapshot is not None else {}
+                if policy.strategy == "vector":
+                    ranked = tuple(
+                        sorted(vector_scores.items(), key=lambda item: (-item[1], item[0]))
+                    )
+                else:
+                    ranked_candidates = rank_hybrid(
+                        lexical_scores,
+                        vector_scores,
+                        lexical_weight=policy.lexical_weight,
+                        vector_weight=policy.vector_weight,
+                    )
+                    ranked = tuple(
+                        (candidate.evidence_id, candidate.final_score)
+                        for candidate in ranked_candidates
+                    )
+                selected = self._select_ranked_results(
+                    query=evidence_query,
+                    package=package,
+                    ranked=ranked,
+                )
+                now = retrieved_at or datetime.now(timezone.utc)
+                chunks = {
+                    evidence_id_for_chunk(chunk.chunk_id): chunk
+                    for chunk in package.content_chunks
+                }
+                bundle = EvidenceBundle(
+                    query_id=evidence_query.query_id,
+                    index_id=ref.index_id,
+                    course_id=package.course_id,
+                    course_package_id=package.course_package_id,
+                    course_package_checksum=package.checksum,
+                    index_checksum=ref.checksum,
+                    evidence_chunks=[
+                        EvidenceChunk(
+                            evidence_id=evidence_id,
+                            source_id=chunks[evidence_id].source_id,
+                            chunk_id=chunks[evidence_id].chunk_id,
+                            text=chunks[evidence_id].text,
+                            locator=chunks[evidence_id].locator,
+                            concept_ids=list(chunks[evidence_id].concept_hints),
+                            relevance=relevance,
+                            checksum=chunks[evidence_id].sha256,
+                        )
+                        for evidence_id, relevance in selected
+                    ],
+                    retrieved_at=now,
+                )
         except DomainError:
             self._audit_failure(
                 audit_store=self._audit_store,
                 query=evidence_query,
-                index=ref,
+                index=audit_index,
                 policy=policy,
                 request_id=request_id,
                 created_at=retrieved_at or datetime.now(timezone.utc),
+                latency_ms=self._latency_ms(started_ns),
             )
             raise
-        vector_scores = {match.evidence_id: match.score for match in vector_matches}
-        lexical_scores = {}
-        if snapshot is not None:
-            lexical_scores = {
-                row.evidence_id: row.relevance
-                for row in rank_snapshot(
-                    snapshot,
-                    query_text=evidence_query.query_text,
-                    concept_ids=evidence_query.concept_ids,
-                )
-            }
-        if policy.strategy == "vector":
-            ranked = tuple(
-                sorted(
-                    vector_scores.items(),
-                    key=lambda item: (-item[1], item[0]),
-                )[: policy.top_k]
+        except Exception:
+            self._audit_failure(
+                audit_store=self._audit_store,
+                query=evidence_query,
+                index=audit_index,
+                policy=policy,
+                request_id=request_id,
+                created_at=retrieved_at or datetime.now(timezone.utc),
+                latency_ms=self._latency_ms(started_ns),
             )
-            score_map = vector_scores
-        else:
-            ranked_candidates = rank_hybrid(
-                lexical_scores,
-                vector_scores,
-                lexical_weight=policy.lexical_weight,
-                vector_weight=policy.vector_weight,
-                top_k=policy.top_k,
-            )
-            ranked = tuple(
-                (candidate.evidence_id, candidate.final_score)
-                for candidate in ranked_candidates
-            )
-            score_map = {candidate.evidence_id: candidate.final_score for candidate in ranked_candidates}
-        chunks = {evidence_id_for_chunk(chunk.chunk_id): chunk for chunk in package.content_chunks}
-        selected = [chunks[evidence_id] for evidence_id, _ in ranked if evidence_id in chunks]
-        now = retrieved_at or datetime.now(timezone.utc)
-        bundle = EvidenceBundle(
-            query_id=evidence_query.query_id,
-            index_id=ref.index_id,
-            course_id=package.course_id,
-            course_package_id=package.course_package_id,
-            course_package_checksum=package.checksum,
-            index_checksum=ref.checksum,
-            evidence_chunks=[
-                EvidenceChunk(
-                    evidence_id=evidence_id_for_chunk(chunk.chunk_id),
-                    source_id=chunk.source_id,
-                    chunk_id=chunk.chunk_id,
-                    text=chunk.text,
-                    locator=chunk.locator,
-                    concept_ids=list(chunk.concept_hints),
-                    relevance=max(0.0, min(1.0, float(score_map[evidence_id_for_chunk(chunk.chunk_id)]))),
-                    checksum=chunk.sha256,
-                )
-                for chunk in selected
-            ],
-            retrieved_at=now,
-        )
+            raise _error(
+                "RETRIEVAL_FAILED",
+                "retrieval failed",
+                recoverable=True,
+            ) from None
         self._audit_bundle(
             audit_store=self._audit_store,
             query=evidence_query,
-            index=ref,
+            index=audit_index,
             policy=policy,
             bundle=bundle,
             request_id=request_id,
-            created_at=now,
+            created_at=bundle.retrieved_at,
+            latency_ms=self._latency_ms(started_ns),
         )
         return bundle
 
@@ -856,27 +959,15 @@ class M2EvidenceRetrievalService:
             )
         except Exception:
             raise _error("EVIDENCE_QUERY_INVALID", "evidence query is invalid") from None
-        by_evidence_id = {row.evidence_id: row for row in ranked}
-        required_rows: list[Any] = []
-        try:
-            for evidence_id in sorted(set(query.required_evidence_ids)):
-                # Reverse parse first so forged prefixes never fall through to lookup.
-                chunk_id_for_evidence_id(evidence_id)
-                row = by_evidence_id.get(evidence_id)
-                if row is None:
-                    raise ValueError
-                required_rows.append(row)
-        except Exception:
-            raise _error("REQUIRED_EVIDENCE_INVALID", "required evidence is unavailable") from None
-        required_ids = {row.evidence_id for row in required_rows}
-        minimum = Decimal(str(query.min_relevance))
-        supplements = [
-            row
+        selected = self._select_ranked_results(
+            query=query,
+            package=package,
+            ranked=tuple((row.evidence_id, row.relevance) for row in ranked),
+        )
+        rows = {
+            row.evidence_id: row
             for row in ranked
-            if row.evidence_id not in required_ids
-            and row.score_points > 0
-            and Decimal(str(row.relevance)) >= minimum
-        ][: query.top_k]
+        }
         return EvidenceBundle(
             query_id=query.query_id,
             index_id=stored_ref.index_id,
@@ -885,8 +976,10 @@ class M2EvidenceRetrievalService:
             course_package_checksum=package.checksum,
             index_checksum=stored_ref.checksum,
             evidence_chunks=[
-                *(self._evidence_chunk(row) for row in required_rows),
-                *(self._evidence_chunk(row) for row in supplements),
+                self._evidence_chunk(
+                    replace(rows[evidence_id], relevance=relevance)
+                )
+                for evidence_id, relevance in selected
             ],
             retrieved_at=stored_ref.built_at,
         )

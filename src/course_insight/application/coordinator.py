@@ -13,6 +13,7 @@ from course_insight.contracts.intelligence import (
     ArchitectureScaffoldResult,
     LLMGenerationRequest,
     LLMModelRef,
+    RetrievalPolicy,
 )
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.learning_models import (
@@ -57,6 +58,7 @@ class AppCoordinator:
         m7_service: M7LocalModelService,
         m8_service: M8AssessmentService,
         m9_service: M9TeacherAnalyticsService,
+        retrieval_policy: RetrievalPolicy | None = None,
     ) -> None:
         self._m0 = m0_service
         self._m1 = m1_service
@@ -68,6 +70,7 @@ class AppCoordinator:
         self._m7 = m7_service
         self._m8 = m8_service
         self._m9 = m9_service
+        self._retrieval_policy = retrieval_policy
         self._assessment_workflow = AssessmentWorkflow(
             m0=m0_service,
             m2=m2_service,
@@ -77,6 +80,7 @@ class AppCoordinator:
             m7=m7_service,
             m8=m8_service,
             m9=m9_service,
+            retrieval_policy=retrieval_policy,
         )
 
     def start_assessment(
@@ -386,6 +390,7 @@ class AppCoordinator:
             scoring_query,
             index_ref,
             request_id=f"assessment:{scoring_query.query_id}:grading",
+            policy=self._retrieval_policy,
         )
         rubric_result = self._m7.score_subjective_answer(
             rubric_scoring_task=scoring_task,
@@ -414,6 +419,7 @@ class AppCoordinator:
             tutoring.evidence_query,
             index_ref,
             request_id=f"assessment:{tutoring.evidence_query.query_id}:feedback",
+            policy=self._retrieval_policy,
         )
         feedback = self._m7.generate_student_feedback(
             feedback_generation_task=tutoring.feedback_generation_task,

@@ -37,6 +37,7 @@ from course_insight.contracts.platform import (
     AssessmentSubmission,
     TeacherReviewSubmission,
 )
+from course_insight.contracts.intelligence import RetrievalPolicy
 from course_insight.modules.m0_platform.workflow import AssessmentRun
 
 
@@ -55,6 +56,9 @@ class AssessmentWorkflow:
         self._m7 = services["m7"]
         self._m8 = services["m8"]
         self._m9 = services["m9"]
+        self._retrieval_policy: RetrievalPolicy | None = services.get(
+            "retrieval_policy"
+        )
         self._recovery = AssessmentRecovery(
             m0=self._m0,
             m5=self._m5,
@@ -246,6 +250,7 @@ class AssessmentWorkflow:
                             query,
                             index_ref,
                             request_id=f"{run.operation_id}:grading:{query.query_id}",
+                            policy=self._retrieval_policy,
                         ),
                     )
                     rubric_results.append(
@@ -378,6 +383,7 @@ class AssessmentWorkflow:
                         tutoring.evidence_query,
                         index_ref,
                         request_id=f"{run.operation_id}:feedback:{tutoring.evidence_query.query_id}",
+                        policy=self._retrieval_policy,
                     ),
                 )
                 feedback = self._execute(

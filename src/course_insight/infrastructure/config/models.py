@@ -137,6 +137,32 @@ class EmbeddingSettings(_FrozenModel):
         return self
 
 
+class RetrievalSettings(_FrozenModel):
+    """Governed application-level M2 retrieval policy selection."""
+
+    policy_id: str = Field(default="application-lexical-v1", min_length=1)
+    strategy: Literal["lexical", "vector", "hybrid"] = "lexical"
+    top_k: int = Field(default=3, ge=1, le=1000)
+    lexical_weight: Annotated[FiniteFloat, Field(ge=0.0, le=1.0)] = 1.0
+    vector_weight: Annotated[FiniteFloat, Field(ge=0.0, le=1.0)] = 0.0
+    rerank: bool = False
+
+    @model_validator(mode="after")
+    def _validate_retrieval_policy(self) -> Self:
+        required_weights = {
+            "lexical": (self.lexical_weight,),
+            "vector": (self.vector_weight,),
+            "hybrid": (self.lexical_weight, self.vector_weight),
+        }[self.strategy]
+        if any(weight <= 0.0 for weight in required_weights):
+            raise ConfigurationError(
+                code="INVALID_RETRIEVAL_POLICY",
+                fields=("retrieval.lexical_weight", "retrieval.vector_weight"),
+                reason="strategy_signal_missing",
+            )
+        return self
+
+
 class LoggingSettings(_FrozenModel):
     level: LogLevel = "INFO"
     mode: LogMode = "rotating_file"
@@ -448,6 +474,7 @@ class PlatformSettings(BaseSettings):
     config_dir: Path
     database: DatabaseSettings
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     logging: LoggingSettings
     outbox: OutboxSettings = Field(default_factory=OutboxSettings)
     web: WebSettings = Field(default_factory=WebSettings)
