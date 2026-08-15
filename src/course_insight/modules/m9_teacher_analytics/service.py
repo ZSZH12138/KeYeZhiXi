@@ -358,16 +358,45 @@ class M9TeacherAnalyticsService:
         state_update_result: StateUpdateResult,
         policy: TeacherThresholdPolicy,
     ) -> TeacherAnalyticsBundle:
+        rejected = scoring_result_bundle.has_rejected_score()
         class_report = build_class_report(
             scoring_result_bundle,
             state_update_result,
         )
-        individual = build_individual_report(
-            scoring_result_bundle,
-            state_update_result,
-            weak_mastery_threshold=policy.weak_mastery_threshold,
-            misconception_threshold=policy.misconception_threshold,
-        )
+        if rejected:
+            # The supplied M5 snapshot may already contain the provisional
+            # score because the current application orchestrator writes it
+            # before review.  M9 must not copy that contaminated state into a
+            # new authoritative-looking report.
+            class_report = class_report.model_copy(
+                update={
+                    "coverage_rate": 0.0,
+                    "concept_summaries": [],
+                    "misconception_summaries": [],
+                    # A rejection invalidates the attempt-level report.  Do
+                    # not retain apparently authoritative statistics from
+                    # other provisional audits in the same bundle.
+                    "score_statistics": {
+                        "audit_count": 0.0,
+                        "score_total": 0.0,
+                        "score_mean": 0.0,
+                        "score_min": 0.0,
+                        "score_max": 0.0,
+                    },
+                    "evidence_status": "pending_rescore",
+                },
+                deep=True,
+            )
+            individual_reports = []
+        else:
+            individual_reports = [
+                build_individual_report(
+                    scoring_result_bundle,
+                    state_update_result,
+                    weak_mastery_threshold=policy.weak_mastery_threshold,
+                    misconception_threshold=policy.misconception_threshold,
+                )
+            ]
         queue = [
             ReviewQueueItem(
                 audit_id=record.audit_id,
@@ -392,7 +421,7 @@ class M9TeacherAnalyticsService:
                 state_update_result.class_state_snapshot.snapshot_id
             ),
         )
-        if scoring_result_bundle.has_rejected_score():
+        if rejected:
             report_id = (
                 f"{report_id}_rejected_"
                 f"{scoring_result_bundle.content_checksum()}"
@@ -400,11 +429,12 @@ class M9TeacherAnalyticsService:
         bundle = TeacherAnalyticsBundle(
             report_id=report_id,
             class_report=class_report,
-            individual_reports=[individual],
+            individual_reports=individual_reports,
             review_queue=queue,
-            teaching_suggestions=build_teaching_suggestions(
-                state_update_result,
-                policy,
+            teaching_suggestions=(
+                []
+                if rejected
+                else build_teaching_suggestions(state_update_result, policy)
             ),
             generated_at=max(
                 state_update_result.updated_at,
@@ -420,10 +450,18 @@ class M9TeacherAnalyticsService:
             authoritative = insert_or_get(
                 bundle.model_copy(deep=True),
                 course_id=knowledge_bundle.course_id,
+                learner_scope_ids=[scoring_result_bundle.learner_id],
             )
             if authoritative != bundle:
                 raise RuntimeError("M9 persisted analytics conflicts with result")
             return authoritative.model_copy(deep=True)
+        if rejected:
+            # The legacy save-only repository API cannot persist the private
+            # learner-scope tombstone.  Saving here would allow a later
+            # learner-scoped read to fall back to an older provisional score.
+            raise RuntimeError(
+                "rejected analytics require learner-scope tombstone persistence"
+            )
         saver = getattr(self._repository, "save_analytics", None)
         if callable(saver):
             saver(bundle.model_copy(deep=True))

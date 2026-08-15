@@ -9,6 +9,7 @@ from course_insight.contracts.assessment import (
     ScoreAuditRecord,
     ScoringResultBundle,
 )
+from course_insight.contracts.errors import DomainError
 from course_insight.contracts.state import StateUpdateResult
 
 
@@ -66,6 +67,14 @@ def build_individual_report(
 ) -> IndividualReport:
     """Copy learner mastery and derive display filters without recomputation."""
 
+    if scoring.has_rejected_score():
+        raise DomainError(
+            code="SCORE_REJECTED_PENDING_RESCORE",
+            module="m9",
+            message="a rejected score cannot produce an individual report",
+            recoverable=True,
+        )
+
     learner = state.learner_state_snapshot
     weak_ids = [
         concept.concept_id
@@ -86,6 +95,6 @@ def build_individual_report(
         overall_mastery=learner.overall_mastery,
         weak_concept_ids=weak_ids,
         active_misconception_ids=misconception_ids,
-        recent_score=(None if scoring.has_rejected_score() else scoring.total_score),
+        recent_score=scoring.total_score,
         review_required_count=sum(record.needs_review() for record in audits),
     )

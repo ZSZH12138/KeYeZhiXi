@@ -38,6 +38,10 @@ from course_insight.modules.m7_local_model.privacy import (
     M7OutboundPrivacyPolicy,
     OutboundPrivacyResult,
 )
+from course_insight.modules.m7_local_model.privacy_reviewer import (
+    DenyAllPrivacyReviewer,
+    PrivacyReviewer,
+)
 
 
 @dataclass(frozen=True)
@@ -125,6 +129,7 @@ class DeepSeekM7Adapter:
         privacy_policy: M7OutboundPrivacyPolicy = (
             DEFAULT_M7_OUTBOUND_PRIVACY_POLICY
         ),
+        privacy_reviewer: PrivacyReviewer | None = None,
     ) -> None:
         client_policy = client.policy
         if (
@@ -140,6 +145,14 @@ class DeepSeekM7Adapter:
         self._client = client
         self._policy = policy
         self._privacy_policy = privacy_policy
+        self._privacy_reviewer = (
+            privacy_reviewer
+            if privacy_reviewer is not None
+            else DenyAllPrivacyReviewer(
+                reason_code="privacy_reviewer_unconfigured",
+                reviewer_id="privacy-unconfigured",
+            )
+        )
 
     def score_governed(
         self,
@@ -153,6 +166,7 @@ class DeepSeekM7Adapter:
             evidence_bundle,
             self._policy,
             self._privacy_policy,
+            privacy_reviewer=self._privacy_reviewer,
         )
         if prepared.prompt is None or prepared.governed_task is None:
             self._privacy_blocked(task, prepared.privacy)

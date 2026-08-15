@@ -20,6 +20,7 @@ from course_insight.contracts.intelligence import (
 from course_insight.contracts.tutoring import (
     EvidenceCitation,
     FeedbackGenerationTask,
+    STUDENT_CITATION_QUOTE_PLACEHOLDER,
     StudentFeedbackPackage,
 )
 from course_insight.infrastructure.deepseek import EmptyDeepSeekAdapter
@@ -209,6 +210,7 @@ class M7LocalModelService:
                 evidence_id=chunk.evidence_id,
                 source_id=chunk.source_id,
                 locator=chunk.locator,
+                quote=STUDENT_CITATION_QUOTE_PLACEHOLDER,
             )
             for chunk in evidence_bundle.evidence_chunks
         ]

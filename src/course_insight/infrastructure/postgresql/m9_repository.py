@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 import hashlib
 import hmac
@@ -25,6 +25,7 @@ from course_insight.infrastructure.postgresql.pool import PostgresPool
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
     M9ReviewDecisionConflict,
+    analytics_learner_scope,
 )
 
 
@@ -189,14 +190,16 @@ class PostgresM9Repository:
         bundle: TeacherAnalyticsBundle,
         *,
         course_id: str,
+        learner_scope_ids: Sequence[str] | None = None,
     ) -> TeacherAnalyticsBundle:
         """Persist a report in its M9-owned course/class scope."""
 
         if not _nonblank(course_id):
             raise ValueError("M9 analytics course scope must not be blank")
         candidate = _isolated_contract(bundle, TeacherAnalyticsBundle)
-        learner_ids = sorted(
-            report.learner_id for report in candidate.individual_reports
+        learner_ids = analytics_learner_scope(
+            candidate,
+            learner_scope_ids,
         )
         try:
             with self._pool.connection() as connection:
@@ -220,7 +223,7 @@ class PostgresM9Repository:
                             course_id,
                             candidate.class_report.class_id,
                             candidate.generated_at,
-                            Jsonb(learner_ids),
+                            Jsonb(list(learner_ids)),
                             Jsonb(candidate.to_dict()),
                             candidate.content_checksum(),
                             candidate.schema_version,
@@ -238,6 +241,8 @@ class PostgresM9Repository:
                     if (
                         stored != candidate
                         or _required_text(row, "course_id") != course_id
+                        or _analytics_learner_scope_from_row(row, stored)
+                        != learner_ids
                     ):
                         raise PostgresOperationError(_CONFLICT_ERROR)
                     return stored
@@ -316,25 +321,26 @@ class PostgresM9Repository:
     ) -> TeacherAnalyticsBundle | None:
         """Load the newest report by real TIMESTAMPTZ within exact scope."""
 
-        learner_filter = ""
-        parameters: tuple[Any, ...] = (course_id, class_id)
-        if learner_id is not None:
-            learner_filter = "AND learner_ids @> %s"
-            parameters = (*parameters, Jsonb([learner_id]))
         try:
             with self._pool.connection() as connection:
-                row = connection.execute(
+                rows = connection.execute(
                     f"""
                     SELECT {_ANALYTICS_COLUMNS}
                     FROM m9_teacher_analytics
                     WHERE course_id = %s AND class_id = %s
-                    {learner_filter}
                     ORDER BY generated_at DESC, report_id DESC
-                    LIMIT 1
                     """,
-                    parameters,
-                ).fetchone()
-                return None if row is None else _analytics_from_row(row)
+                    (course_id, class_id),
+                ).fetchall()
+                for row in rows:
+                    bundle = _analytics_from_row(row)
+                    learner_scope = _analytics_learner_scope_from_row(
+                        row,
+                        bundle,
+                    )
+                    if learner_id is None or learner_id in learner_scope:
+                        return bundle
+                return None
         except PostgresError:
             raise
         except psycopg.Error:
@@ -513,6 +519,16 @@ def _model_audit_checksum(payload: dict[str, Any]) -> str:
     return hashlib.sha256(encoded).hexdigest()
 
 
+def _analytics_learner_scope_from_row(
+    row: Mapping[str, Any],
+    bundle: TeacherAnalyticsBundle,
+) -> tuple[str, ...]:
+    raw_scope = row.get("learner_ids")
+    if type(raw_scope) is not list:
+        raise ValueError("M9 analytics learner scope is invalid")
+    return analytics_learner_scope(bundle, raw_scope)
+
+
 def _analytics_from_row(
     row: Mapping[str, Any] | None,
 ) -> TeacherAnalyticsBundle:
@@ -522,17 +538,14 @@ def _analytics_from_row(
         label="analytics",
     )
     try:
-        expected_learner_ids = sorted(
-            report.learner_id for report in bundle.individual_reports
-        )
         if (
             bundle.report_id != _required_text(row, "report_id")
             or bundle.class_report.class_id
             != _required_text(row, "class_id")
             or bundle.generated_at != _required_datetime(row, "generated_at")
-            or row["learner_ids"] != expected_learner_ids
         ):
             raise ValueError
+        _analytics_learner_scope_from_row(row, bundle)
         _required_text(row, "course_id")
         return bundle
     except PostgresError:

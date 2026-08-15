@@ -20,6 +20,7 @@ from course_insight.modules.m7_local_model.privacy import (
     OutboundPrivacyResult,
     govern_student_answer,
 )
+from course_insight.modules.m7_local_model.privacy_reviewer import PrivacyReviewer
 
 
 SCORING_PROMPT_ID = "m7-rubric-scoring-json"
@@ -66,10 +67,16 @@ def scoring_prompt(
     task: RubricScoringTask,
     evidence_bundle: EvidenceBundle,
     policy: M7ExecutionPolicy = DEFAULT_M7_EXECUTION_POLICY,
+    privacy_reviewer: PrivacyReviewer | None = None,
 ) -> PromptEnvelope:
     """Build a JSON-only prompt after fail-closed outbound governance."""
 
-    prepared = prepare_scoring_prompt(task, evidence_bundle, policy)
+    prepared = prepare_scoring_prompt(
+        task,
+        evidence_bundle,
+        policy,
+        privacy_reviewer=privacy_reviewer,
+    )
     if prepared.prompt is None:
         _privacy_blocked(prepared.privacy)
     assert prepared.prompt is not None
@@ -83,12 +90,17 @@ def prepare_scoring_prompt(
     privacy_policy: M7OutboundPrivacyPolicy = (
         DEFAULT_M7_OUTBOUND_PRIVACY_POLICY
     ),
+    privacy_reviewer: PrivacyReviewer | None = None,
 ) -> PreparedScoringPrompt:
     """Apply privacy policy before constructing any provider-bound message."""
 
     if len(task.student_answer) > policy.max_student_answer_characters:
         _input_too_large("student_answer")
-    privacy = govern_student_answer(task.student_answer, privacy_policy)
+    privacy = govern_student_answer(
+        task.student_answer,
+        privacy_policy,
+        reviewer=privacy_reviewer,
+    )
     if privacy.decision == "blocked":
         return PreparedScoringPrompt(
             prompt=None,

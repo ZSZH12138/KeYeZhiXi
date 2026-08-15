@@ -28,12 +28,16 @@ from course_insight.modules.m8_assessment_scoring.stubs import (
 from course_insight.modules.m9_teacher_analytics.stubs import (
     M9TeacherAnalyticsServiceStub,
 )
+from course_insight.modules.m9_teacher_analytics.service import (
+    M9TeacherAnalyticsService,
+)
 from tests.integration.test_web_workflow_persistence import (
     NOW,
     _feedback,
     _paper,
     _scoring_bundle,
     _state_result,
+    _vector_scoring_bundle,
 )
 from tests.unit import test_application_web_workflow as workflow_support
 
@@ -238,7 +242,8 @@ def test_m5_blocks_rejected_score_and_m9_excludes_it_from_reports(
         ),
         encoding="utf-8",
     )
-    analytics = M9TeacherAnalyticsServiceStub().build_rejected_score_analytics(
+    m9 = M9TeacherAnalyticsServiceStub()
+    analytics = m9.build_rejected_score_analytics(
         knowledge_bundle=knowledge,
         scoring_result_bundle=rejected,
         state_update_result=state,
@@ -247,10 +252,137 @@ def test_m5_blocks_rejected_score_and_m9_excludes_it_from_reports(
 
     assert analytics.class_report.score_statistics["audit_count"] == 0.0
     assert analytics.class_report.score_statistics["score_total"] == 0.0
-    assert analytics.individual_reports[0].recent_score is None
+    assert analytics.class_report.coverage_rate == 0.0
+    assert analytics.class_report.concept_summaries == []
+    assert analytics.class_report.misconception_summaries == []
+    assert analytics.class_report.evidence_status == "pending_rescore"
+    assert analytics.individual_reports == []
     assert analytics.review_queue == []
+    assert analytics.teaching_suggestions == []
     assert "_rejected_" in analytics.report_id
     assert analytics.generated_at == rejected.finalized_at
+    assert m9.get_latest_analytics(
+        course_id="course_1",
+        class_id="class_1",
+        learner_id="learner_1",
+    ) == analytics
+
+
+def test_any_rejected_audit_tombstones_all_attempt_level_score_statistics(
+    tmp_path,
+) -> None:
+    mixed = _vector_scoring_bundle(
+        first_version=1,
+        second_version=1,
+        finalized_at=NOW,
+    )
+    rejected_audit = mixed.get_audit_record("audit_a").model_copy(
+        update={
+            "audit_version": 2,
+            "scoring_method": "teacher_override",
+            "review_status": "rejected_pending_rescore",
+            "review_reason": ["teacher_rejected_score"],
+            "created_at": NOW + timedelta(minutes=1),
+        },
+        deep=True,
+    )
+    rejected = ScoringResultBundle(
+        **{
+            **mixed.model_dump(mode="python"),
+            "score_audit_records": [
+                *mixed.score_audit_records,
+                rejected_audit,
+            ],
+            "finalized_at": NOW + timedelta(minutes=1),
+        }
+    )
+    policy_path = tmp_path / "teacher.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "minimum_coverage": 1.0,
+                "minimum_assessed_count": 1,
+                "minimum_confidence": 0.5,
+                "weak_mastery_threshold": 0.8,
+                "misconception_threshold": 0.5,
+                "priority_support_threshold": 0.5,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    analytics = M9TeacherAnalyticsServiceStub().build_rejected_score_analytics(
+        knowledge_bundle=_knowledge_bundle(),
+        scoring_result_bundle=rejected,
+        state_update_result=_state_result(
+            attempt_id="attempt_vector",
+            course_id="course_1",
+            class_id="class_1",
+            state_version=1,
+        ),
+        teacher_threshold_policy_path=policy_path,
+    )
+
+    assert analytics.class_report.score_statistics == {
+        "audit_count": 0.0,
+        "score_total": 0.0,
+        "score_mean": 0.0,
+        "score_min": 0.0,
+        "score_max": 0.0,
+    }
+    assert analytics.class_report.evidence_status == "pending_rescore"
+
+
+def test_rejected_analytics_refuses_legacy_save_only_repository(tmp_path) -> None:
+    class SaveOnlyRepository:
+        def __init__(self) -> None:
+            self.saved: list[TeacherAnalyticsBundle] = []
+
+        def save_analytics(self, bundle: TeacherAnalyticsBundle) -> None:
+            self.saved.append(bundle)
+
+    rejected = M8AssessmentServiceStub().apply_teacher_review(
+        current_scoring_result_bundle=_scoring_with_event(),
+        teacher_review_decision=_decision("reject"),
+    )
+    policy_path = tmp_path / "teacher.json"
+    policy_path.write_text(
+        json.dumps(
+            {
+                "minimum_coverage": 1.0,
+                "minimum_assessed_count": 1,
+                "minimum_confidence": 0.5,
+                "weak_mastery_threshold": 0.8,
+                "misconception_threshold": 0.5,
+                "priority_support_threshold": 0.5,
+            }
+        ),
+        encoding="utf-8",
+    )
+    repository = SaveOnlyRepository()
+    service = M9TeacherAnalyticsService(  # type: ignore[arg-type]
+        repository,
+        object(),
+        object(),
+    )
+
+    with pytest.raises(
+        RuntimeError,
+        match="learner-scope tombstone persistence",
+    ):
+        service.build_rejected_score_analytics(
+            knowledge_bundle=_knowledge_bundle(),
+            scoring_result_bundle=rejected,
+            state_update_result=_state_result(
+                attempt_id="attempt_1",
+                course_id="course_1",
+                class_id="class_1",
+                state_version=1,
+            ),
+            teacher_threshold_policy_path=policy_path,
+        )
+
+    assert repository.saved == []
 
 
 def test_rejected_score_is_hidden_from_student_view_and_requires_override() -> None:
@@ -319,10 +451,6 @@ def test_review_workflow_skips_an_additional_m5_write_and_hides_score_fields(
             ),
             generated_at=state_update_result.updated_at,
         )
-        individual = base.individual_reports[0].model_copy(
-            update={"recent_score": None, "review_required_count": 1},
-            deep=True,
-        )
         safe = TeacherAnalyticsBundle(
             **{
                 **base.model_dump(mode="python"),
@@ -331,11 +459,17 @@ def test_review_workflow_skips_an_additional_m5_write_and_hides_score_fields(
                         "score_statistics": {
                             "audit_count": 0.0,
                             "score_total": 0.0,
-                        }
+                        },
+                        "coverage_rate": 0.0,
+                        "concept_summaries": [],
+                        "misconception_summaries": [],
+                        "evidence_status": "pending_rescore",
                     },
                     deep=True,
                 ),
-                "individual_reports": [individual],
+                "individual_reports": [],
+                "review_queue": [],
+                "teaching_suggestions": [],
             }
         )
         self.store.analytics = safe
@@ -400,7 +534,16 @@ def test_review_workflow_skips_an_additional_m5_write_and_hides_score_fields(
         "audit_count": 0.0,
         "score_total": 0.0,
     }
-    assert result["refreshed_analytics"].individual_reports[0].recent_score is None
+    assert result["refreshed_analytics"].class_report.coverage_rate == 0.0
+    assert result["refreshed_analytics"].class_report.concept_summaries == []
+    assert result["refreshed_analytics"].class_report.misconception_summaries == []
+    assert (
+        result["refreshed_analytics"].class_report.evidence_status
+        == "pending_rescore"
+    )
+    assert result["refreshed_analytics"].individual_reports == []
+    assert result["refreshed_analytics"].review_queue == []
+    assert result["refreshed_analytics"].teaching_suggestions == []
     completed = coordinator._m0.get_assessment_run("review:decision_reject_1")
     assert completed.status == "completed"
     assert completed.state_version == submitted[

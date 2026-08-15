@@ -1,6 +1,6 @@
 {
   "additionalProperties": false,
-  "description": "Locator-only course citation safe for current learner display.",
+  "description": "Frozen-v1 course citation with a governed learner-safe label.",
   "properties": {
     "evidence_id": {
       "minLength": 1,
@@ -10,6 +10,11 @@
     "locator": {
       "minLength": 1,
       "title": "Locator",
+      "type": "string"
+    },
+    "quote": {
+      "minLength": 1,
+      "title": "Quote",
       "type": "string"
     },
     "schema_version": {
@@ -26,7 +31,8 @@
   "required": [
     "evidence_id",
     "source_id",
-    "locator"
+    "locator",
+    "quote"
   ],
   "title": "EvidenceCitation",
   "type": "object"

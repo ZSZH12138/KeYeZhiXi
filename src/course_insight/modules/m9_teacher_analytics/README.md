@@ -20,12 +20,18 @@ DeepSeek 是教师辅助解读器，不是评分器、统计引擎、学生画�
 
 `reject` 表示当前评分失效并等待重评，不表示零分。M9 保存教师决定、意见、
 审核人和审计版本；随后生成的替代报表会排除被驳回审计，`audit_count` 不包含
-它，个体 `recent_score` 为 `null`，也不把其历史数字放入复核推荐分。只有新评分
-或覆盖全部分项且总分守恒的 `override` 才能恢复下游成绩消费。
+它。公共 v1 的 `IndividualReport.recent_score` 始终为 `float`，所以替代报表会完全
+省略个人报告，并清空来自已污染 M5 快照的 mastery 摘要和教学建议，不以 `null`
+或零分伪装结果。M9 私有 learner-scope tombstone 仍记录受影响学习者，使“最新报告”
+查询命中 `pending_rescore` 报告，而不是回退暴露更早的 provisional score。当前只有
+覆盖全部分项且总分守恒的教师 `override` 能恢复下游成绩消费；自动模型 rescore
+尚不可达。
 
 当前替代报表仍接收复核前已经生成的 M5 mastery/class snapshot；在 M5 补偿或
-延迟入账协议落地前，只能保证分数字段和审计统计排除 rejected score，不能声称
-既有 mastery 影响已经回滚。详见 `docs/m7_m9_cross_module_change_request.md`。
+延迟入账协议落地前，只能保证 M9 不再展示这些派生字段，不能声称既有 mastery
+影响已经回滚。曾允许 `recent_score=null` 的代码只存在于未合并草稿，项目没有对应
+生产数据；这类草稿库必须隔离并重建，repository/import 会失败关闭。详见
+`docs/MUST_READ_M7_M9_REVIEW_RESCORE_CONTRACT_GAPS.md`。
 
 ## 两条严格分离的模型路径
 

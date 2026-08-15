@@ -13,6 +13,7 @@ from typing import Any
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.events import LearningEvent
 from course_insight.contracts.tutoring import (
+    STUDENT_CITATION_QUOTE_PLACEHOLDER,
     StudentFeedbackPackage,
     TutoringControlResult,
 )
@@ -42,6 +43,7 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
 from course_insight.modules.m7_local_model.repository import M7ModelAuditRecord
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
+    analytics_learner_scope,
 )
 
 from course_insight.infrastructure.postgresql.sqlite_import import (
@@ -204,7 +206,7 @@ def _prepare_row(table: str, row: sqlite3.Row) -> PreparedImportRow:
 
 
 def _prepare_m7_student_feedback(row: sqlite3.Row) -> PreparedImportRow:
-    """Normalize the one supported legacy citation field during import."""
+    """Normalize pre-branch and branch-era frozen-v1 citation shapes."""
 
     payload = _canonical_json_object(row["payload"])
     citations = payload.get("evidence_citations")
@@ -216,12 +218,13 @@ def _prepare_m7_student_feedback(row: sqlite3.Row) -> PreparedImportRow:
         if any(quote_presence) and not all(quote_presence):
             raise ValueError("legacy feedback citation shape is mixed")
         for citation in citations:
-            if type(citation) is not dict or "quote" not in citation:
-                continue
-            quote = citation["quote"]
-            if type(quote) is not str or not quote.strip():
-                raise ValueError("legacy feedback quote is invalid")
-            citation.pop("quote")
+            if type(citation) is not dict:
+                raise ValueError("legacy feedback citation is invalid")
+            if "quote" in citation:
+                quote = citation["quote"]
+                if type(quote) is not str or not quote.strip():
+                    raise ValueError("legacy feedback quote is invalid")
+            citation["quote"] = STUDENT_CITATION_QUOTE_PLACEHOLDER
     contract = StudentFeedbackPackage.model_validate(payload)
     _require_current_schema(contract)
     _validate_contract_identity("m7_student_feedback", row, contract)
@@ -880,20 +883,24 @@ def _validate_contract_identity(
             )
         )
     elif table == "m9_teacher_analytics":
+        raw_learner_scope = row["learner_ids"]
+        if type(raw_learner_scope) is not str:
+            raise ValueError("persisted learner scope must be text")
+        learner_scope = json.loads(
+            raw_learner_scope,
+            parse_constant=_reject_constant,
+        )
+        if (
+            type(learner_scope) is not list
+            or dumps_json(learner_scope) != raw_learner_scope
+        ):
+            raise ValueError("persisted learner scope must be canonical")
+        analytics_learner_scope(contract, learner_scope)
         checks = (
             ("report_id", contract.report_id),
             ("course_id", _required_text(row, "course_id")),
             ("class_id", contract.class_report.class_id),
             ("generated_at", contract.generated_at.isoformat()),
-            (
-                "learner_ids",
-                dumps_json(
-                    sorted(
-                        report.learner_id
-                        for report in contract.individual_reports
-                    )
-                ),
-            ),
         )
     else:
         raise ValueError("unsupported contract table")

@@ -1,0 +1,24 @@
+{
+  "schema_version": "1",
+  "dataset_id": "replace-with-stable-dataset-id",
+  "immutable_revision": "replace-with-immutable-revision",
+  "locale": "zh-CN",
+  "source_url": "https://example.invalid/replace-with-approved-source",
+  "license_spdx": "NOASSERTION",
+  "license_url": "https://example.invalid/replace-with-license",
+  "redistribution_allowed": false,
+  "commercial_use_allowed": false,
+  "synthetic": true,
+  "sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "label_mapping_version": "m7-privacy-labels-v1",
+  "labels": [
+    "SAFE",
+    "SELF_ADDRESS",
+    "SELF_FAMILY",
+    "SELF_HEALTH",
+    "SELF_IDENTITY"
+  ],
+  "record_count": 0,
+  "provenance": "replace-with-generation-or-collection-description",
+  "approval_status": "unapproved"
+}

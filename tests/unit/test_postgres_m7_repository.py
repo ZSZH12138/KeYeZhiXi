@@ -9,6 +9,9 @@ import psycopg
 import pytest
 from psycopg.types.json import Jsonb
 
+from course_insight.contracts.tutoring import (
+    STUDENT_CITATION_QUOTE_PLACEHOLDER,
+)
 from course_insight.infrastructure.postgresql.base import (
     PostgresConnectionError,
     PostgresOperationError,
@@ -44,6 +47,17 @@ def _feedback_row(package: Any) -> dict[str, Any]:
         "payload_checksum": package.content_checksum(),
         "schema_version": package.schema_version,
     }
+
+
+def _feedback_payload_checksum(payload: dict[str, Any]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            payload,
+            ensure_ascii=False,
+            allow_nan=False,
+            sort_keys=True,
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _model_audit() -> M7ModelAuditRecord:
@@ -323,22 +337,14 @@ def test_postgres_m7_model_audit_revalidates_checksum() -> None:
         repository.get_execution_audit(audit.invocation_id)
 
 
-def test_postgres_m7_strips_checksum_valid_legacy_feedback_quotes() -> None:
+def test_postgres_m7_normalizes_checksum_valid_legacy_feedback_quotes() -> None:
     feedback = _feedback()
     payload = feedback.to_dict()
     payload["evidence_citations"][0]["quote"] = "legacy answer text"
-    checksum = hashlib.sha256(
-        json.dumps(
-            payload,
-            ensure_ascii=False,
-            allow_nan=False,
-            sort_keys=True,
-        ).encode("utf-8")
-    ).hexdigest()
     row = {
         **_feedback_row(feedback),
         "payload": payload,
-        "payload_checksum": checksum,
+        "payload_checksum": _feedback_payload_checksum(payload),
     }
     repository = PostgresM7Repository(
         FakePool(
@@ -352,4 +358,65 @@ def test_postgres_m7_strips_checksum_valid_legacy_feedback_quotes() -> None:
 
     loaded = repository.get_feedback(feedback.feedback_id)
     assert loaded == feedback
+    assert (
+        loaded.evidence_citations[0].quote
+        == STUDENT_CITATION_QUOTE_PLACEHOLDER
+    )
     assert "legacy answer text" not in loaded.to_json()
+
+
+def test_postgres_m7_normalizes_checksum_valid_pre_quote_feedback() -> None:
+    feedback = _feedback()
+    payload = feedback.to_dict()
+    for citation in payload["evidence_citations"]:
+        citation.pop("quote")
+    row = {
+        **_feedback_row(feedback),
+        "payload": payload,
+        "payload_checksum": _feedback_payload_checksum(payload),
+    }
+    repository = PostgresM7Repository(
+        FakePool(
+            FakeConnection(
+                lambda statement, _parameters: (
+                    row if "FROM m7_student_feedback" in statement else None
+                )
+            )
+        )
+    )
+
+    loaded = repository.get_feedback(feedback.feedback_id)
+    assert loaded == feedback
+    assert (
+        loaded.evidence_citations[0].quote
+        == STUDENT_CITATION_QUOTE_PLACEHOLDER
+    )
+
+
+def test_postgres_m7_rejects_checksum_valid_mixed_feedback_quote_shape() -> None:
+    feedback = _feedback()
+    payload = feedback.to_dict()
+    payload["evidence_citations"].append(
+        {
+            "evidence_id": "evidence_2",
+            "source_id": "source_2",
+            "locator": "p.2",
+        }
+    )
+    row = {
+        **_feedback_row(feedback),
+        "payload": payload,
+        "payload_checksum": _feedback_payload_checksum(payload),
+    }
+    repository = PostgresM7Repository(
+        FakePool(
+            FakeConnection(
+                lambda statement, _parameters: (
+                    row if "FROM m7_student_feedback" in statement else None
+                )
+            )
+        )
+    )
+
+    with pytest.raises(PostgresOperationError, match="integrity check failed"):
+        repository.get_feedback(feedback.feedback_id)

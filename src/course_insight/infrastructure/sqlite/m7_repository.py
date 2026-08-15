@@ -16,7 +16,10 @@ from course_insight.contracts.intelligence import (
     ModelInvocationAudit,
     SafetyCheckResult,
 )
-from course_insight.contracts.tutoring import StudentFeedbackPackage
+from course_insight.contracts.tutoring import (
+    STUDENT_CITATION_QUOTE_PLACEHOLDER,
+    StudentFeedbackPackage,
+)
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import migrate
@@ -314,7 +317,7 @@ class SQLiteM7Repository:
             payload = json.loads(str(row["payload"]))
             if type(payload) is not dict:
                 raise ValueError
-            _strip_legacy_quotes(payload)
+            _migrate_legacy_quotes(payload)
             package = StudentFeedbackPackage.model_validate(payload)
         except Exception:
             raise RuntimeError("M7 feedback payload is invalid") from None
@@ -359,13 +362,26 @@ class SQLiteM7Repository:
             raise RuntimeError("M7 model audit integrity check failed") from None
 
 
-def _strip_legacy_quotes(payload: dict[str, Any]) -> None:
+def _migrate_legacy_quotes(payload: dict[str, Any]) -> None:
+    """Normalize pre-branch and branch-era frozen-v1 citation shapes."""
+
     citations = payload.get("evidence_citations")
     if type(citations) is not list:
         return
+    quote_presence = tuple(
+        type(citation) is dict and "quote" in citation
+        for citation in citations
+    )
+    if any(quote_presence) and not all(quote_presence):
+        raise ValueError("feedback citation quote shape is mixed")
     for citation in citations:
-        if type(citation) is dict:
-            citation.pop("quote", None)
+        if type(citation) is not dict:
+            raise ValueError("feedback citation is invalid")
+        if "quote" in citation:
+            quote = citation["quote"]
+            if type(quote) is not str or not quote.strip():
+                raise ValueError("feedback citation quote is invalid")
+        citation["quote"] = STUDENT_CITATION_QUOTE_PLACEHOLDER
 
 
 __all__ = ["SQLiteM7Repository"]

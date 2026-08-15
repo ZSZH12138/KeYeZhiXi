@@ -28,6 +28,7 @@ from course_insight.contracts.platform import (
 )
 from course_insight.contracts.tutoring import (
     EvidenceCitation,
+    STUDENT_CITATION_QUOTE_PLACEHOLDER,
     StudentFeedbackPackage,
 )
 from course_insight.modules.m0_platform.django_app.models import (
@@ -209,6 +210,7 @@ def feedback_for(actor_id: str) -> StudentFeedbackPackage:
                 evidence_id="evidence_1",
                 source_id="source_1",
                 locator="p.1",
+                quote=STUDENT_CITATION_QUOTE_PLACEHOLDER,
             )
         ],
         next_practice_item_ids=["item_2"],
