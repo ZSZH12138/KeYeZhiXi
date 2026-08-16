@@ -1,9 +1,9 @@
-"""Process-local course runtime restoration from validated snapshots."""
+"""Process-local course runtime restoration from immutable M1-M3 artifacts."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from threading import RLock
 from types import MappingProxyType
 from typing import Mapping
@@ -13,25 +13,12 @@ from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.modules.m0_platform.service import M0PlatformService
+from course_insight.modules.m1_course_governance.repository import M1Repository
 from course_insight.modules.m2_evidence_retrieval.service import (
     M2EvidenceRetrievalService,
 )
-
-
-@dataclass(frozen=True, slots=True)
-class _DiscardingM2Repository:
-    """No-op repository used to validate deterministic rebuild metadata."""
-
-    def save_index(self, index: EvidenceIndexRef) -> None:
-        del index
-
-    def get_index(
-        self,
-        index_id: str,
-        index_version: str,
-    ) -> EvidenceIndexRef | None:
-        del index_id, index_version
-        return None
+from course_insight.modules.m2_evidence_retrieval.repository import M2Repository
+from course_insight.modules.m3_knowledge_bundle.repository import M3Repository
 
 
 @dataclass(frozen=True, slots=True)
@@ -61,11 +48,14 @@ class CourseRuntimeContext:
 
 @dataclass(frozen=True, slots=True)
 class CourseRuntimeRegistry:
-    """Restore snapshots through M0 and rebuild M2's process-local index."""
+    """Restore M1-M3 immutable artifacts and publish one isolated context."""
 
     m0_service: M0PlatformService
     m2_service: M2EvidenceRetrievalService
     runtime_dir: Path
+    m1_repository: M1Repository | None = None
+    m2_repository: M2Repository | None = None
+    m3_repository: M3Repository | None = None
     _contexts: Mapping[str, CourseRuntimeContext] = field(
         default_factory=lambda: MappingProxyType({}),
         init=False,
@@ -84,21 +74,21 @@ class CourseRuntimeRegistry:
         course_id: str,
         refs: RuntimeSnapshotRefs,
     ) -> CourseRuntimeContext:
-        """Load, cross-check, rebuild, and atomically publish one context."""
+        """Load, cross-check, and atomically publish one artifact-backed context."""
 
         if not course_id.strip():
             self._raise_invalid("identity_mismatch")
         paths = self._resolve_refs(refs)
         try:
-            package = self.m0_service.load_contract_snapshot(
+            package_snapshot = self.m0_service.load_contract_snapshot(
                 CoursePackage,
                 paths.course_package_ref,
             )
-            expected_index = self.m0_service.load_contract_snapshot(
+            index_snapshot = self.m0_service.load_contract_snapshot(
                 EvidenceIndexRef,
                 paths.evidence_index_ref,
             )
-            bundle = self.m0_service.load_contract_snapshot(
+            bundle_snapshot = self.m0_service.load_contract_snapshot(
                 KnowledgeBundle,
                 paths.knowledge_bundle_ref,
             )
@@ -110,31 +100,99 @@ class CourseRuntimeRegistry:
             )
             self._raise_invalid(reason, cause=error)
 
+        if (
+            self.m1_repository is None
+            or self.m2_repository is None
+            or self.m3_repository is None
+        ):
+            self._raise_invalid("repository_unavailable")
+
+        try:
+            package = self.m1_repository.get_course_package(
+                package_snapshot.course_package_id,
+                package_snapshot.package_version,
+            )
+        except DomainError as error:
+            self._raise_invalid("artifact_invalid", cause=error)
+        except Exception as error:
+            self._raise_invalid("artifact_invalid", cause=error)
+        if package is None:
+            self._raise_invalid("artifact_unavailable")
+
+        if index_snapshot.backend == "pgvector":
+            # pgvector rows are durable in the vector store, not in the
+            # lexical artifact codec.  The snapshot supplies identity while
+            # M2 proves the persisted metadata before publishing runtime state.
+            expected_index = index_snapshot
+        else:
+            try:
+                loaded_index = self.m2_repository.load_index_artifact(
+                    index_snapshot.index_id,
+                    index_snapshot.index_version,
+                )
+            except DomainError as error:
+                self._raise_invalid("artifact_invalid", cause=error)
+            except Exception as error:
+                self._raise_invalid("artifact_invalid", cause=error)
+            if loaded_index is None:
+                self._raise_invalid("artifact_unavailable")
+            try:
+                expected_index, _index_payload = loaded_index
+            except (TypeError, ValueError) as error:
+                self._raise_invalid("artifact_invalid", cause=error)
+
+        try:
+            loaded_bundle = self.m3_repository.load_bundle_artifact(
+                bundle_snapshot.knowledge_bundle_id,
+                bundle_snapshot.bundle_version,
+            )
+        except DomainError as error:
+            self._raise_invalid("artifact_invalid", cause=error)
+        except Exception as error:
+            self._raise_invalid("artifact_invalid", cause=error)
+        if loaded_bundle is None:
+            self._raise_invalid("artifact_unavailable")
+        try:
+            bundle, _validation_report, _seed_snapshot = loaded_bundle
+        except (TypeError, ValueError) as error:
+            self._raise_invalid("artifact_invalid", cause=error)
+
+        self._validate_snapshot_bindings(
+            package_snapshot=package_snapshot,
+            index_snapshot=index_snapshot,
+            bundle_snapshot=bundle_snapshot,
+            package=package,
+            expected_index=expected_index,
+            bundle=bundle,
+        )
         self._validate_contracts(
             course_id=course_id,
             package=package,
             expected_index=expected_index,
             bundle=bundle,
         )
-        preview_service = M2EvidenceRetrievalService(
-            self.runtime_dir / "indexes",
-            "lexical",
-            _DiscardingM2Repository(),
-        )
+
         try:
-            preview_index = preview_service.build_index(package)
+            if expected_index.backend == "pgvector":
+                loaded_index_ref = self.m2_service.restore_vector_index_from_store(
+                    course_package=package,
+                    index_id=expected_index.index_id,
+                    index_version=expected_index.index_version,
+                )
+            else:
+                loaded_index_ref = self.m2_service.restore_index(
+                    course_package=package,
+                    evidence_index_ref=expected_index,
+                )
+        except DomainError as error:
+            self._raise_invalid("artifact_invalid", cause=error)
         except Exception as error:
-            self._raise_invalid("index_rebuild_failed", cause=error)
-        self._validate_rebuilt_index(expected_index, preview_index)
-        try:
-            rebuilt_index = self.m2_service.build_index(package)
-        except Exception as error:
-            self._raise_invalid("index_rebuild_failed", cause=error)
-        self._validate_rebuilt_index(expected_index, rebuilt_index)
+            self._raise_invalid("artifact_invalid", cause=error)
+        self._validate_loaded_index(expected_index, loaded_index_ref)
 
         context = CourseRuntimeContext(
             course_package=package.model_copy(deep=True),
-            evidence_index_ref=rebuilt_index.model_copy(deep=True),
+            evidence_index_ref=loaded_index_ref.model_copy(deep=True),
             knowledge_bundle=bundle.model_copy(deep=True),
         )
         with self._lock:
@@ -180,9 +238,12 @@ class CourseRuntimeRegistry:
 
     def _resolve_ref(self, reference: Path) -> Path:
         path = Path(reference)
+        windows_path = PureWindowsPath(str(reference))
         if (
             path.is_absolute()
             or path.drive
+            or windows_path.is_absolute()
+            or windows_path.drive
             or not path.parts
             or any(part in {"", ".", ".."} for part in path.parts)
         ):
@@ -208,6 +269,7 @@ class CourseRuntimeRegistry:
             package.course_id != course_id
             or bundle.course_id != course_id
             or bundle.course_package_id != package.course_package_id
+            or bundle.course_package_checksum != package.checksum
             or expected_index.course_package_id != package.course_package_id
         ):
             cls._raise_invalid("identity_mismatch")
@@ -215,14 +277,51 @@ class CourseRuntimeRegistry:
             cls._raise_invalid("context_not_ready")
         if expected_index.status != "ready":
             cls._raise_invalid("index_not_ready")
-        if not expected_index.matches(package):
+        if (
+            expected_index.course_package_checksum != package.checksum
+            or not expected_index.matches(package)
+        ):
             cls._raise_invalid("identity_mismatch")
 
     @classmethod
-    def _validate_rebuilt_index(
+    def _validate_snapshot_bindings(
+        cls,
+        *,
+        package_snapshot: CoursePackage,
+        index_snapshot: EvidenceIndexRef,
+        bundle_snapshot: KnowledgeBundle,
+        package: CoursePackage,
+        expected_index: EvidenceIndexRef,
+        bundle: KnowledgeBundle,
+    ) -> None:
+        """Treat snapshots as identity cross-checks, never as runtime data."""
+
+        if (
+            package_snapshot.course_package_id != package.course_package_id
+            or package_snapshot.package_version != package.package_version
+            or package_snapshot.course_id != package.course_id
+            or package_snapshot.checksum != package.checksum
+            or index_snapshot.index_id != expected_index.index_id
+            or index_snapshot.index_version != expected_index.index_version
+            or index_snapshot.course_package_id != expected_index.course_package_id
+            or index_snapshot.course_package_checksum
+            != expected_index.course_package_checksum
+            or index_snapshot.checksum != expected_index.checksum
+            or bundle_snapshot.knowledge_bundle_id != bundle.knowledge_bundle_id
+            or bundle_snapshot.bundle_version != bundle.bundle_version
+            or bundle_snapshot.course_package_id != bundle.course_package_id
+            or bundle_snapshot.course_id != bundle.course_id
+            or bundle_snapshot.course_package_checksum
+            != bundle.course_package_checksum
+            or bundle_snapshot.content_checksum() != bundle.content_checksum()
+        ):
+            cls._raise_invalid("artifact_binding_mismatch")
+
+    @classmethod
+    def _validate_loaded_index(
         cls,
         expected: EvidenceIndexRef,
-        rebuilt: EvidenceIndexRef,
+        loaded: EvidenceIndexRef,
     ) -> None:
         comparable_fields = (
             "index_id",
@@ -236,7 +335,7 @@ class CourseRuntimeRegistry:
             "status",
         )
         if any(
-            getattr(expected, name) != getattr(rebuilt, name)
+            getattr(expected, name) != getattr(loaded, name)
             for name in comparable_fields
         ):
             cls._raise_invalid("index_mismatch")

@@ -20,10 +20,25 @@ outbox Worker、真实 Django Web/权限/表单、SQLite 与 PostgreSQL 仓储�
 `ArchitectureScaffoldResult` 语义，它仍固定返回 `skipped`；这只是“脚手架不启动
 Django 作业”，不是“Django 尚未实现”。
 
-“空实现”现在只描述尚未启用的外部调用：M2 pgvector 仍为逻辑空边界，
-M7/M9 不调用 DeepSeek。M5 已运行真实 DINA/BKT，M8 已运行真实 2PL IRT、
-能力估计和自适应选择。真实 PostgreSQL 适配器已经实现，但若验收环境没有提供受保护的临时
-PostgreSQL，相关 live tests 会明确跳过，不能据此声称已完成真实联调。
+“空实现”现在只描述尚未启用的外部调用：M7/M9 不调用 DeepSeek。M2 的生产
+PostgreSQL+pgvector、embedding、策略检索和审计适配器已经实现；SQLite 仅用于
+离线/测试/迁移演练。仓库已提供 `tests/integration/test_postgres_m1_m2_m3_live.py`，
+覆盖真实 HTTP embedding、M1—M3 PostgreSQL/pgvector 链路和恢复；若验收环境没有提供
+受保护的临时 PostgreSQL，相关 live tests 会明确跳过，必须以 CI `live-m1-m3` job
+的实际通过结果为准，不能把 skip 写成真实联调通过。
+
+M5 已运行真实 DINA/BKT，M8 已运行真实 2PL IRT、能力估计和自适应选择，M9
+已运行本地模型质量检查；这些能力仍受数据门槛、shadow 质量审核和教师批准约束。
+
+M2 正式业务检索入口是 `retrieve_with_policy`；旧 `retrieve` 仅为已有 lexical 调用
+保留的兼容入口。M3 生产发布必须经过教师复核 CAS，并使用
+`build_knowledge_bundle_after_approval`；无审批的 `build_knowledge_bundle` 不能作为
+生产发布入口。
+
+应用层的 `AppCoordinator` 与 `assessment_workflow` 通过
+`retrieve_for_application -> retrieve_with_policy` 进入 M2，旧 `retrieve` 不再作为
+业务编排入口。完整 vector/hybrid 生产链仍以 CI `live-m1-m3` job 的真实
+PostgreSQL+pgvector live 结果为验收条件。
 
 M6 已实现私有、版本化的策略运行时和离线评估代码，但默认仍为
 `rules`、零 rollout、零探索。`shadow` 只记录模型建议，`active` 还必须通过
@@ -36,7 +51,7 @@ M6 已实现私有、版本化的策略运行时和离线评估代码，但默�
 M0 Django 外层/鉴权/提交契约
            │
            ▼
-M1 课程版本与分块 ──► M2 RAG（词法 + pgvector 目标）──┐
+M1 课程版本与分块 ──► M2 RAG（词法 + PostgreSQL/pgvector）──┐
            │                                        │
            └──► M3 知识包/Q 矩阵/题目标定依据         ▼
                          │                       M7 DeepSeek
@@ -62,8 +77,8 @@ OPE/approval 尚未正式接入 M9。
 |---|---|---|---|
 | M0 | 配置、日志、事件/outbox、快照、Django 外层 | `ActorContext`、提交契约、`AsyncJobStatus` | 真实 Web/Worker；legacy scaffold 作业保持 `skipped` |
 | M1 | 授权课程、来源版本、确定性分块 | 不增新智能引擎 | 保持现有实现 |
-| M2 | 证据索引、RAG 检索与审计 | `EmbeddingModelRef`、`RetrievalPolicy`、`RetrievalAudit` | pgvector 引用为 `empty` |
-| M3 | 知识包、题库、量规、蓝图、Q 矩阵 | 为 DINA/IRT 提供版本化标定依据 | 保持教师确认 JSON 输入 |
+| M2 | 证据索引、RAG 检索与审计 | `EmbeddingModelRef`、`RetrievalPolicy`、`RetrievalAudit` | SQLite lexical 基线；生产 PostgreSQL+pgvector 的 lexical/vector/hybrid 与审计 |
+| M3 | 知识包、题库、量规、蓝图、Q 矩阵 | 为 DINA/IRT 提供版本化标定依据与教师复核 CAS | 生产发布必须走 `build_knowledge_bundle_after_approval` |
 | M4 | 任务识别、蓝图选择与工作流编排 | 冻结课程包、知识包、蓝图和路由引用 | 确定性路由与持久化幂等 |
 | M5 | 学习观测、认知诊断、知识追踪、状态 | DINA 系契约与 BKT 系契约 | 真实模型、完整历史与版本化状态 |
 | M6 | S0—S5 教学控制 | 消费 M4 任务、M8 评分、M5 状态和可选前版会话；私有 policy learning 不扩张公共契约 | 确定性 baseline；默认 rules；shadow 不改变公共动作；active 门禁失败回退 rules |
@@ -106,8 +121,11 @@ M6 没有训练、manifest 注册或 promotion 的公共 CLI/管理页。现有�
 
 `ApplicationContainer` 由 `build_application()` 一次组装配置、M0—M9 Service、
 所选持久化后端、`AppCoordinator`、`CourseRuntimeRegistry` 与 Worker。Django、
-CLI 和 Worker 复用同一组合方式。M1—M3 本里程碑仍从已校验的 runtime snapshots
-恢复；SQLite/PostgreSQL 后端切换覆盖本任务实际持久化的 M0、M4—M9。
+CLI 和 Worker 复用同一组合方式。SQLite 模式下 M1—M3 从已校验的 runtime
+snapshots/artifacts 离线恢复；生产 PostgreSQL 模式下由 0016/0017 migrations 和共享的
+`PostgresM1M2M3Repository` 恢复 M1—M3 制品、审计和教师复核记录，并由 M2 显式校验
+ready pgvector 引用。SQLite/PostgreSQL 后端切换覆盖本任务实际持久化的全部模块，
+但 SQLite 不作为生产后端。
 
 为支持 HTTP 多请求流程，`AppCoordinator` 在保留既有一站式用例的同时增加
 `start_assessment`、`submit_assessment`、`get_student_assessment`、
@@ -138,9 +156,10 @@ M6 自己的私有 execution JSON 另存当次探索率和 active gate 结论，
 `state_inputs_frozen` 行继续 fail closed。
 
 运行上下文由 `runtime/snapshots/course_runtime_manifest.json` 指向
-`CoursePackage`、`EvidenceIndexRef`、`KnowledgeBundle` 和两份 policy。所有引用
-必须是 runtime 内相对路径；加载时会重验契约、checksum、重建的词法索引身份以及
-`StatePolicy`/`TeacherThresholdPolicy` 内容，任一不一致即 fail closed。
+`CoursePackage`、`EvidenceIndexRef`、`KnowledgeBundle` 和两份 policy。SQLite/离线
+模式下所有引用必须是 runtime 内相对路径，加载时重验契约、checksum、重建的词法索引
+身份以及 policy 内容；生产 PostgreSQL 模式下 M1—M3 权威对象由共享仓储恢复，
+manifest/snapshot 只作为显式配置的引用和身份 cross-check。任一不一致即 fail closed。
 
 M6 learned policy 使用另一条私有制品链：Repository 按 `policy_id` 选择 immutable
 `PolicyArtifactManifest`，其 `artifact_reference` 再相对于
@@ -149,10 +168,14 @@ canonical UTF-8 JSON、lowercase SHA-256、有限 23 维 LinUCB 参数，以及�
 `m6-features-v1`/`m6-action-space-v1` 版本匹配。它不是 course runtime manifest
 的一部分。
 
-SQLite/PostgreSQL 当前 bundled schema 为 v15。M4 intent 使用已发布的 v10/0010
-与 v11/0011；M6 policy 位于 v12，M0 freeze 位于 v13；M5/M8 模型运行历史
+PostgreSQL core schema 当前为 v17；SQLite bundled platform schema 当前为 v15，SQLite 的
+M1—M3 S1-S6 仓储另有独立的 schema version 1。M4 intent 使用已发布的 v10/0010
+与 v11/0011；M6 五张私有 policy 表位于 v12/`0012_m6_policy_learning.sql`，M0
+七字段 freeze 安全追加在 v13/`0013_m0_policy_freeze.sql`；M5/M8 模型运行历史
 追加在 v14/`0014_m5_m8_model_runtime.sql`，学习观测审计身份补强追加在
-v15/`0015_m5_learning_observation_audit_identity.sql`。既有 migration 未被改写或重编号。
+v15/`0015_m5_learning_observation_audit_identity.sql`；PostgreSQL M1—M3 S1-S6 能力
+位于 v16/`0016_m1_m2_m3_capabilities.sql`，向量索引元数据绑定由
+v17/`0017_vector_index_metadata.sql` 补充。既有 migration 未被改写或重编号。
 
 ## 日志与投递
 
@@ -176,8 +199,9 @@ v15/`0015_m5_learning_observation_audit_identity.sql`。既有 migration 未被�
 - M6 active 必须同时满足 approved manifest、精确版本/SHA、作用域、至少两个
   候选、支持度、不确定性、离线评估、rollout 和 kill switch 门禁；任一缺失回退
   rules。
-- M2/M7/M9 的未启用外部适配器不读取 DeepSeek 密钥、不访问模型网络、不连接
-  pgvector；M5/M8/M9 的本地模型功能不伪造 DINA/BKT/IRT 或质量指标。
+- M7/M9 尚未启用的 DeepSeek 适配器不读取密钥、不访问模型网络；M5/M8/M9 的
+  本地模型功能不伪造 DINA/BKT/IRT 或质量指标；M2 生产检索按配置连接 PostgreSQL+pgvector，
+  缺少依赖时 fail closed。
 - 量规、试卷、审计和结果总分必须守恒；教师复核追加新版本，不覆盖旧版本。
 - 对外不传播主机路径；索引、作业和产物使用逻辑引用或相对路径。
 
@@ -185,8 +209,9 @@ v15/`0015_m5_learning_observation_audit_identity.sql`。既有 migration 未被�
 
 1. 保持 91 个公共契约、既有 Service 签名和模块责任稳定。
 2. 在目标环境实测 PostgreSQL、Web/Worker 多进程部署与备份恢复。
-3. 在 M2 实现 pgvector 建库、检索与审计，不把向量能力移入 M0。
-4. 在目标环境提供达到治理门槛的去标识化作答数据，运行 M5 DINA/BKT 和 M8
+3. 在目标环境完成 PostgreSQL+pgvector live 建库、检索、审计和恢复验收，不把向量
+   能力移入 M0。
+4. 在目标环境提供达到治理门槛的去标识化作答数据，验证 M5 DINA/BKT 和 M8
    IRT shadow 标定；只有 M9 质量 ready 且教师批准后才启用自适应选择。
 5. M7/M9 的安全、审计和量规约束完成后，才把 DeepSeek 空适配器替换为真实
    API 适配器。

@@ -57,6 +57,14 @@ def safe_defaults() -> dict[str, Any]:
             "pool_max_size": 10,
             "connect_timeout_seconds": 10.0,
         },
+        "retrieval": {
+            "policy_id": "application-lexical-v1",
+            "strategy": "lexical",
+            "top_k": 3,
+            "lexical_weight": 1.0,
+            "vector_weight": 0.0,
+            "rerank": False,
+        },
         "logging": {
             "level": "INFO",
             "mode": "rotating_file",
@@ -215,6 +223,9 @@ def environment_to_settings(
 ) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for raw_key, raw_value in environment.items():
+        # These are disposable integration-test guards.  They are consumed by
+        # the live-test helpers or by database.url_env, not by PlatformSettings
+        # itself; parsing them as top-level settings would violate extra=forbid.
         if raw_key in _TEST_HARNESS_ENVIRONMENT_KEYS:
             continue
         if raw_key in _LEGACY_ENV_PATHS:

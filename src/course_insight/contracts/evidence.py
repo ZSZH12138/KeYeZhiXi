@@ -4,14 +4,99 @@ from __future__ import annotations
 
 import hashlib
 import json
+from collections.abc import Mapping
 from datetime import datetime
-from typing import Literal
+from typing import Any, Literal
 
-from pydantic import Field
+from pydantic import Field, model_validator
 
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.course import CoursePackage
 from course_insight.contracts.errors import DomainError
+
+
+_EVIDENCE_ID_PREFIX = "evidence_"
+
+
+def _exclude_none(value: object) -> bool:
+    return value is None
+
+
+def _exclude_empty_list(value: object) -> bool:
+    return value == []
+
+
+def _has_lone_surrogate(value: str) -> bool:
+    return any(0xD800 <= ord(character) <= 0xDFFF for character in value)
+
+
+def _validate_evidence_query_cache_semantics(
+    *,
+    course_package_id: object,
+    course_package_checksum: object,
+    query_text: object,
+    concept_ids: object,
+    required_evidence_ids: object,
+    item_id: object,
+) -> None:
+    values = [
+        course_package_id,
+        course_package_checksum,
+        query_text,
+        item_id,
+    ]
+    for items in (concept_ids, required_evidence_ids):
+        if isinstance(items, str):
+            values.append(items)
+        elif isinstance(items, (list, tuple, set, frozenset)):
+            values.extend(items)
+    if any(
+        isinstance(item, str) and _has_lone_surrogate(item)
+        for item in values
+    ):
+        raise DomainError(
+            code="EVIDENCE_QUERY_INVALID",
+            module="m2",
+            message="evidence query contains invalid Unicode",
+        )
+
+
+def _raise_evidence_id_mismatch() -> None:
+    raise DomainError(
+        code="EVIDENCE_ID_MISMATCH",
+        module="m2",
+        message="evidence identity must match its chunk",
+    )
+
+
+def evidence_id_for_chunk(chunk_id: str) -> str:
+    """Return the canonical M2 evidence identifier for one chunk."""
+
+    if (
+        not isinstance(chunk_id, str)
+        or not chunk_id.strip()
+        or "\x00" in chunk_id
+    ):
+        _raise_evidence_id_mismatch()
+    return f"{_EVIDENCE_ID_PREFIX}{chunk_id}"
+
+
+def chunk_id_for_evidence_id(evidence_id: str) -> str:
+    """Return the exact chunk ID encoded by a canonical evidence ID."""
+
+    suffix = None
+    if isinstance(evidence_id, str) and evidence_id.startswith(
+        _EVIDENCE_ID_PREFIX
+    ):
+        suffix = evidence_id[len(_EVIDENCE_ID_PREFIX) :]
+    if (
+        suffix is None
+        or not suffix.strip()
+        or "\x00" in suffix
+        or evidence_id_for_chunk(suffix) != evidence_id
+    ):
+        _raise_evidence_id_mismatch()
+    return suffix
 
 
 class EvidenceIndexRef(ContractModel):
@@ -19,6 +104,10 @@ class EvidenceIndexRef(ContractModel):
 
     index_id: str = Field(min_length=1)
     course_package_id: str = Field(min_length=1)
+    course_package_checksum: str | None = Field(
+        default=None,
+        exclude_if=_exclude_none,
+    )
     index_version: str = Field(min_length=1)
     storage_ref: str = Field(min_length=1)
     backend: Literal["lexical", "pgvector"] = "lexical"
@@ -69,6 +158,10 @@ class EvidenceIndexRef(ContractModel):
 
         return (
             self.course_package_id == course_package.course_package_id
+            and (
+                self.course_package_checksum is None
+                or self.course_package_checksum == course_package.checksum
+            )
             and self.source_count == len(course_package.source_documents)
             and self.chunk_count == len(course_package.content_chunks)
         )
@@ -79,12 +172,37 @@ class EvidenceQuery(ContractModel):
 
     query_id: str = Field(min_length=1)
     course_package_id: str = Field(min_length=1)
+    course_package_checksum: str | None = Field(
+        default=None,
+        exclude_if=_exclude_none,
+    )
     query_text: str = Field(min_length=1)
     concept_ids: list[str]
+    required_evidence_ids: list[str] = Field(
+        default_factory=list,
+        exclude_if=_exclude_empty_list,
+    )
     item_id: str | None
     use_case: Literal["grading", "feedback", "qa"]
     top_k: int = Field(ge=1)
     min_relevance: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _reject_lone_surrogate_query_semantics(cls, value: Any) -> Any:
+        """Fail closed before JSON cache encoding can encounter surrogates."""
+
+        if not isinstance(value, Mapping):
+            return value
+        _validate_evidence_query_cache_semantics(
+            course_package_id=value.get("course_package_id"),
+            course_package_checksum=value.get("course_package_checksum"),
+            query_text=value.get("query_text"),
+            concept_ids=value.get("concept_ids"),
+            required_evidence_ids=value.get("required_evidence_ids"),
+            item_id=value.get("item_id"),
+        )
+        return value
 
     def normalized_text(self) -> str:
         """Fold whitespace and case without altering the stored query."""
@@ -94,12 +212,22 @@ class EvidenceQuery(ContractModel):
     def cache_key(self) -> str:
         """Hash query semantics while excluding the per-request query ID."""
 
+        _validate_evidence_query_cache_semantics(
+            course_package_id=self.course_package_id,
+            course_package_checksum=self.course_package_checksum,
+            query_text=self.query_text,
+            concept_ids=self.concept_ids,
+            required_evidence_ids=self.required_evidence_ids,
+            item_id=self.item_id,
+        )
         payload = {
-            "concept_ids": sorted(self.concept_ids),
+            "concept_ids": sorted(set(self.concept_ids)),
             "course_package_id": self.course_package_id,
+            "course_package_checksum": self.course_package_checksum,
             "item_id": self.item_id,
             "min_relevance": self.min_relevance,
             "query_text": self.normalized_text(),
+            "required_evidence_ids": sorted(set(self.required_evidence_ids)),
             "top_k": self.top_k,
             "use_case": self.use_case,
         }
@@ -119,6 +247,16 @@ class EvidenceChunk(ContractModel):
     relevance: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
     checksum: str = Field(min_length=1)
 
+    def validate_business_rules(self) -> None:
+        """Require the stable evidence identity derived from the chunk ID."""
+
+        if self.evidence_id != evidence_id_for_chunk(self.chunk_id):
+            raise DomainError(
+                code="EVIDENCE_ID_MISMATCH",
+                module="m2",
+                message="evidence identity must match its chunk",
+            )
+
     def citation_label(self) -> str:
         """Return a compact deterministic source-and-locator label."""
 
@@ -131,6 +269,18 @@ class EvidenceBundle(ContractModel):
     query_id: str = Field(min_length=1)
     index_id: str = Field(min_length=1)
     course_id: str = Field(min_length=1)
+    course_package_id: str | None = Field(
+        default=None,
+        exclude_if=_exclude_none,
+    )
+    course_package_checksum: str | None = Field(
+        default=None,
+        exclude_if=_exclude_none,
+    )
+    index_checksum: str | None = Field(
+        default=None,
+        exclude_if=_exclude_none,
+    )
     evidence_chunks: list[EvidenceChunk]
     retrieved_at: datetime
 

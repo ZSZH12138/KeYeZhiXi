@@ -11,6 +11,13 @@
           "title": "Anchor Item Ids",
           "type": "array"
         },
+        "anchor_item_versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Anchor Item Versions",
+          "type": "object"
+        },
         "concept_weights": {
           "additionalProperties": {
             "type": "number"

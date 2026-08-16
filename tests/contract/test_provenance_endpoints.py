@@ -1,9 +1,23 @@
 from __future__ import annotations
 
+import json
 from inspect import signature
 from pathlib import Path
 
+from course_insight.contracts.assessment import ScoringPreparationResult
+from course_insight.contracts.evidence import (
+    EvidenceBundle,
+    EvidenceIndexRef,
+    EvidenceQuery,
+)
+from course_insight.contracts.intelligence import ArchitectureScaffoldResult
+from course_insight.contracts.knowledge import (
+    AssessmentBlueprint,
+    BlueprintSection,
+    KnowledgeBundle,
+)
 from course_insight.contracts.provenance import load_contract_provenance
+from course_insight.contracts.tutoring import TutoringControlResult
 from course_insight.modules.m0_platform.service import M0PlatformService
 from course_insight.modules.m1_course_governance.service import M1CourseGovernanceService
 from course_insight.modules.m2_evidence_retrieval.service import (
@@ -97,3 +111,93 @@ def test_m6_public_signature_and_the_91_schema_surface_are_frozen() -> None:
         "DinaModelArtifact.schema.json",
         "ItemExposureSnapshot.schema.json",
     } <= schema_names
+
+
+def test_evidence_binding_schemas_match_models_and_keep_new_fields_optional() -> None:
+    """Keep additive M2 bindings schema-compatible through M6/M8 consumers."""
+
+    contract_types = (
+        EvidenceIndexRef,
+        EvidenceQuery,
+        EvidenceBundle,
+        ScoringPreparationResult,
+        TutoringControlResult,
+        ArchitectureScaffoldResult,
+    )
+    schemas: dict[str, dict[str, object]] = {}
+    for contract_type in contract_types:
+        path = SCHEMA_PATH / f"{contract_type.__name__}.schema.json"
+        schema = json.loads(path.read_text(encoding="utf-8"))
+        assert schema == contract_type.model_json_schema(mode="validation")
+        schemas[contract_type.__name__] = schema
+
+    direct_optional_fields = {
+        "EvidenceIndexRef": ("course_package_checksum",),
+        "EvidenceQuery": (
+            "course_package_checksum",
+            "required_evidence_ids",
+        ),
+        "EvidenceBundle": (
+            "course_package_id",
+            "course_package_checksum",
+            "index_checksum",
+        ),
+    }
+    for schema_name, field_names in direct_optional_fields.items():
+        required = schemas[schema_name].get("required", [])
+        assert isinstance(required, list)
+        assert not set(field_names) & set(required)
+
+    nested_definitions = {
+        "ScoringPreparationResult": (
+            "EvidenceQuery",
+            ("course_package_checksum", "required_evidence_ids"),
+        ),
+        "TutoringControlResult": (
+            "EvidenceQuery",
+            ("course_package_checksum", "required_evidence_ids"),
+        ),
+        "ArchitectureScaffoldResult": (
+            "EvidenceIndexRef",
+            ("course_package_checksum",),
+        ),
+    }
+    for schema_name, (definition_name, field_names) in nested_definitions.items():
+        definitions = schemas[schema_name].get("$defs", {})
+        assert isinstance(definitions, dict)
+        definition = definitions[definition_name]
+        assert isinstance(definition, dict)
+        required = definition.get("required", [])
+        assert isinstance(required, list)
+        assert not set(field_names) & set(required)
+
+
+def test_m3_binding_schemas_match_models_and_keep_new_fields_optional() -> None:
+    """Keep additive M3 bindings compatible with M4 and M8 consumers."""
+
+    contract_types = (KnowledgeBundle, BlueprintSection, AssessmentBlueprint)
+    schemas: dict[str, dict[str, object]] = {}
+    for contract_type in contract_types:
+        path = SCHEMA_PATH / f"{contract_type.__name__}.schema.json"
+        schema = json.loads(path.read_text(encoding="utf-8"))
+        assert schema == contract_type.model_json_schema(mode="validation")
+        schemas[contract_type.__name__] = schema
+
+    knowledge_required = schemas["KnowledgeBundle"].get("required", [])
+    assert isinstance(knowledge_required, list)
+    assert not {
+        "course_package_checksum",
+        "concept_evidence_ids",
+    } & set(knowledge_required)
+
+    blueprint_section_required = schemas["BlueprintSection"].get("required", [])
+    assert isinstance(blueprint_section_required, list)
+    assert "anchor_item_versions" not in blueprint_section_required
+
+    definitions = schemas["AssessmentBlueprint"].get("$defs", {})
+    assert isinstance(definitions, dict)
+    section_definition = definitions["BlueprintSection"]
+    assert isinstance(section_definition, dict)
+    nested_required = section_definition.get("required", [])
+    assert isinstance(nested_required, list)
+    assert "anchor_item_versions" not in nested_required

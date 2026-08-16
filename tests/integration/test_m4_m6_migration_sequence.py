@@ -19,7 +19,7 @@ def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
 ) -> None:
     """Keep published migrations while appending the M5/M8 runtime schema."""
 
-    expected_tail = (
+    expected_sqlite_tail = (
         "0010_m4_intent_decisions.sql",
         "0011_m4_intent_runtime_statuses.sql",
         "0012_m6_policy_learning.sql",
@@ -27,16 +27,20 @@ def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
         "0014_m5_m8_model_runtime.sql",
         "0015_m5_learning_observation_audit_identity.sql",
     )
+    expected_postgres_tail = expected_sqlite_tail + (
+        "0016_m1_m2_m3_capabilities.sql",
+        "0017_vector_index_metadata.sql",
+    )
 
     assert SQLITE_SCHEMA_VERSION == 15
-    assert POSTGRES_SCHEMA_VERSION == 15
+    assert POSTGRES_SCHEMA_VERSION == 17
     assert tuple(
         migration.path.name for migration in load_migrations()
-    )[-6:] == expected_tail
+    )[-8:] == expected_postgres_tail
     assert tuple(
         path.name
         for path in sorted(MIGRATIONS_DIRECTORY.glob("*.sql"))
-    )[-6:] == expected_tail
+    )[-8:] == expected_postgres_tail
 
     database_path = tmp_path / "runtime" / "course_insight.sqlite3"
     with connect_sqlite(database_path) as connection:

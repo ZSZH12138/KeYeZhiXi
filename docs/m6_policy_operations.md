@@ -267,12 +267,14 @@ OPE 是依赖 logging propensity、direct estimate 和数据覆盖假设的离�
 - v13/`0013_m0_policy_freeze.sql`：只为 `m0_assessment_runs` 安全追加七个 freeze
   字段与完整性约束。
 - v14/v15 继续追加 M5/M8 模型运行历史与学习观测审计身份，不修改 M6 表。
+- PostgreSQL v16/v17 继续追加 M1—M3 S1-S6 与向量 metadata，不修改 M6 表；
+  SQLite platform ledger 仍为 v15，M1—M3 SQLite 仓储使用独立 version 1 ledger。
 - 已发布的 M4 v10/v11 与 M6/M0 v12/v13 保持不变。
-- 当前 bundled PostgreSQL/SQLite schema version 为 15，SQLite→PostgreSQL
+- 当前 bundled PostgreSQL schema version 为 17、SQLite platform schema version 为 15，SQLite→PostgreSQL
   allowlist 同时包含 M4 intent、M6 policy、M0 freeze 和 M5/M8 新历史表。
 
-仓库的 live PostgreSQL tests 需要受保护的临时数据库。本阶段没有执行真实教学、
-线上 rollout 或 live PostgreSQL migration；跳过 live tests 不能记录为通过。
+仓库的 live PostgreSQL tests 需要受保护的临时数据库。本阶段没有执行真实教学或
+线上 rollout；live PostgreSQL migration 只能以当次未跳过的 CI/验收结果记录为通过。
 
 ## M9 非集成边界
 

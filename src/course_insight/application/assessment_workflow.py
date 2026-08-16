@@ -28,6 +28,7 @@ from course_insight.application.assessment_results import (
     require_results,
     validate_decision,
 )
+from course_insight.application.retrieval import retrieve_for_application
 from course_insight.contracts.assessment import ScoringResultBundle
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.errors import DomainError
@@ -38,6 +39,7 @@ from course_insight.contracts.platform import (
     AssessmentSubmission,
     TeacherReviewSubmission,
 )
+from course_insight.contracts.intelligence import RetrievalPolicy
 from course_insight.modules.m0_platform.workflow import AssessmentRun
 
 
@@ -56,6 +58,9 @@ class AssessmentWorkflow:
         self._m7 = services["m7"]
         self._m8 = services["m8"]
         self._m9 = services["m9"]
+        self._retrieval_policy: RetrievalPolicy | None = services.get(
+            "retrieval_policy"
+        )
         self._recovery = AssessmentRecovery(
             m0=self._m0,
             m5=self._m5,
@@ -242,9 +247,12 @@ class AssessmentWorkflow:
                     )
                     evidence = self._execute(
                         run,
-                        lambda query=query: self._m2.retrieve(
-                            evidence_query=query,
-                            evidence_index_ref=index_ref,
+                        lambda query=query: retrieve_for_application(
+                            self._m2,
+                            query,
+                            index_ref,
+                            request_id=f"{run.operation_id}:grading:{query.query_id}",
+                            policy=self._retrieval_policy,
                         ),
                     )
                     rubric_results.append(
@@ -375,9 +383,12 @@ class AssessmentWorkflow:
             if feedback is None:
                 evidence = self._execute(
                     run,
-                    lambda: self._m2.retrieve(
-                        evidence_query=tutoring.evidence_query,
-                        evidence_index_ref=index_ref,
+                    lambda: retrieve_for_application(
+                        self._m2,
+                        tutoring.evidence_query,
+                        index_ref,
+                        request_id=f"{run.operation_id}:feedback:{tutoring.evidence_query.query_id}",
+                        policy=self._retrieval_policy,
                     ),
                 )
                 feedback = self._execute(

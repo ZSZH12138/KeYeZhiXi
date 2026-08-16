@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 from datetime import datetime
 from typing import Any, Literal
 
@@ -50,13 +51,24 @@ class RetrievalPolicy(ContractModel):
     rerank: bool
 
     def validate_business_rules(self) -> None:
-        """Require at least one enabled retrieval signal."""
+        """Require strategy-compatible, normalized retrieval weights."""
 
         if self.lexical_weight + self.vector_weight <= 0.0:
             raise DomainError(
                 code="RETRIEVAL_POLICY_INVALID",
                 module="m2",
                 message="retrieval policy requires a positive signal weight",
+            )
+        if self.strategy == "hybrid" and not math.isclose(
+            self.lexical_weight + self.vector_weight,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise DomainError(
+                code="RETRIEVAL_POLICY_INVALID",
+                module="m2",
+                message="hybrid retrieval policy weights must sum to one",
             )
 
 
