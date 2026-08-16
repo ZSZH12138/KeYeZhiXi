@@ -52,5 +52,18 @@ M1 的默认解析器通过 `ParserRegistry` 绑定 `.md`、`.txt`、`.pdf`、`.
 
 PDF 先读取文本层。扫描 PDF 没有文本层时会明确返回
 `COURSE_PDF_OCR_REQUIRED`，不会把空文本当成导入成功；部署方可通过
-`ServiceOverrides.ocr_provider` 注入受治理的 OCR 适配器，OCR 结果仍受页数、
+`ServiceOverrides.ocr_provider` 注入受治理的 OCR 适配器，或启用内置的
+Tesseract 适配器。启用内置适配器前安装可选依赖和 Tesseract（含 `chi_sim`、
+`eng` 语言数据）：
+
+```powershell
+python -m pip install -e ".[ocr]"
+$env:COURSE_INSIGHT_OCR__BACKEND = "tesseract"
+$env:COURSE_INSIGHT_OCR__EXECUTABLE = "C:\Program Files\Tesseract-OCR\tesseract.exe"
+$env:COURSE_INSIGHT_OCR__LANGUAGE = "chi_sim+eng"
+```
+
+`COURSE_INSIGHT_OCR__DPI`（默认 200）、`COURSE_INSIGHT_OCR__TIMEOUT_SECONDS`
+（默认 30）和 `COURSE_INSIGHT_OCR__MAX_OUTPUT_BYTES` 可按部署资源调整。默认
+`backend=disabled`，未配置 OCR 时不会悄悄调用外部进程；OCR 结果仍受页数、
 单页和总文本字节上限约束。

@@ -175,6 +175,51 @@ class RetrievalSettings(_FrozenModel):
         return self
 
 
+class OCRSettings(_FrozenModel):
+    """Optional M1 scanned-document OCR runtime settings."""
+
+    backend: Literal["disabled", "tesseract"] = "disabled"
+    executable: str | None = None
+    language: str = "chi_sim+eng"
+    dpi: int = Field(default=200, ge=72, le=600)
+    timeout_seconds: Annotated[FiniteFloat, Field(gt=0, le=120)] = 30.0
+    max_output_bytes: int = Field(
+        default=2 * 1024 * 1024,
+        ge=1,
+        le=16 * 1024 * 1024,
+    )
+
+    @field_validator("executable")
+    @classmethod
+    def _validate_executable(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if (
+            not value.strip()
+            or len(value) > 512
+            or any(character in value for character in ("\r", "\n"))
+        ):
+            raise ValueError("ocr executable is invalid")
+        return value
+
+    @field_validator("language")
+    @classmethod
+    def _validate_language(cls, value: str) -> str:
+        if not re.fullmatch(r"[A-Za-z0-9_.+:-]{1,64}", value):
+            raise ValueError("ocr language is invalid")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_backend(self) -> Self:
+        if self.backend == "disabled" and self.executable is not None:
+            raise ConfigurationError(
+                code="INVALID_OCR_CONFIGURATION",
+                fields=("ocr.backend", "ocr.executable"),
+                reason="disabled_with_executable",
+            )
+        return self
+
+
 class LoggingSettings(_FrozenModel):
     level: LogLevel = "INFO"
     mode: LogMode = "rotating_file"
@@ -487,6 +532,7 @@ class PlatformSettings(BaseSettings):
     database: DatabaseSettings
     embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
     retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
+    ocr: OCRSettings = Field(default_factory=OCRSettings)
     logging: LoggingSettings
     outbox: OutboxSettings = Field(default_factory=OutboxSettings)
     web: WebSettings = Field(default_factory=WebSettings)

@@ -267,6 +267,9 @@ CSV；请求期间从 Django `User`、Group/Permission 与 `ActorGrant` 读取�
 python -m pytest -q
 ```
 
+pytest 配置只发现当前 `tests/` 目录，并排除 `runtime/`、历史工作树和临时目录；
+运行数据不会被当成测试源码。若需要只检查某个边界，可显式传入 `tests/...` 路径。
+
 真实 PostgreSQL 集成测试依赖环境变量
 `COURSE_INSIGHT_TEST_DATABASE_URL` 与
 `COURSE_INSIGHT_TEST_DATABASE_NAME`。若任一变量缺失，则
@@ -893,3 +896,7 @@ checksum 和 manifest checksum，再在一个事务中发布；同身份同内�
 前者在证据缺失或门禁不完整时返回 `blocked`，保持 M6 rules/零 rollout；后者检查
 生产环境、PostgreSQL+pgvector、迁移、主机和安全 cookie 等事实。两个命令都不修改
 数据库、不发布策略，也不实现 M7/M9。
+
+OCR 适配器、M5 DINA/BKT 真实数据、M6 shadow/OPE/批准记录和 M8 IRT 标定数据
+属于目标环境证据，不能用本地单元测试或合成数据替代。缺少这些条件时，应保留
+`COURSE_PDF_OCR_REQUIRED`、`INSUFFICIENT_MODEL_DATA` 或 `blocked` 状态，不能写成生产通过。

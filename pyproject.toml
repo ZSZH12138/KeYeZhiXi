@@ -32,9 +32,14 @@ intent = [
 performance = [
     "numpy>=2,<3",
 ]
+ocr = [
+    "PyMuPDF>=1.24,<2",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.pytest.ini_options]
 DJANGO_SETTINGS_MODULE = "course_insight.web_project.settings"
+testpaths = ["tests"]
+norecursedirs = ["runtime", ".tmp_*", "tmp_*", ".git", "build", "dist"]

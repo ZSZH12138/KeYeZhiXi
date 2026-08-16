@@ -56,6 +56,7 @@ from course_insight.infrastructure.sqlite.m6_repository import SQLiteM6Repositor
 from course_insight.infrastructure.sqlite.m7_repository import SQLiteM7Repository
 from course_insight.infrastructure.sqlite.m8_repository import SQLiteM8Repository
 from course_insight.infrastructure.sqlite.m9_repository import SQLiteM9Repository
+from course_insight.infrastructure.ocr import TesseractOCRProvider
 from course_insight.modules.m0_platform.repository import M0Repository
 from course_insight.modules.m0_platform.service import M0PlatformService
 from course_insight.modules.m0_platform.outbox import IdempotentJsonlSink
@@ -204,6 +205,25 @@ class ServiceOverrides:
     m7: M7LocalModelService | None = None
     m8: M8AssessmentService | None = None
     m9: M9TeacherAnalyticsService | None = None
+
+
+def _build_ocr_provider(
+    settings: PlatformSettings,
+    service_overrides: ServiceOverrides,
+) -> OCRTextProvider | None:
+    """Build the opt-in M1 OCR adapter while preserving test injection."""
+
+    if service_overrides.ocr_provider is not None:
+        return service_overrides.ocr_provider
+    if settings.ocr.backend == "disabled":
+        return None
+    return TesseractOCRProvider(
+        executable=settings.ocr.executable,
+        language=settings.ocr.language,
+        dpi=settings.ocr.dpi,
+        timeout_seconds=settings.ocr.timeout_seconds,
+        max_output_bytes=settings.ocr.max_output_bytes,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -418,11 +438,12 @@ def _assemble_application(
         if service_overrides.m0 is None
         else service_overrides.m0
     )
+    ocr_provider = _build_ocr_provider(settings, service_overrides)
     m1 = (
         M1CourseGovernanceService(
             (
-                default_parser_registry(ocr_provider=service_overrides.ocr_provider)
-                if service_overrides.ocr_provider is not None
+                default_parser_registry(ocr_provider=ocr_provider)
+                if ocr_provider is not None
                 else {
                     ".md": parse_source,
                     ".txt": parse_source,

@@ -10,6 +10,14 @@
     "pool_max_size": 10,
     "connect_timeout_seconds": 10.0
   },
+  "ocr": {
+    "backend": "disabled",
+    "executable": null,
+    "language": "chi_sim+eng",
+    "dpi": 200,
+    "timeout_seconds": 30.0,
+    "max_output_bytes": 2097152
+  },
   "logging": {
     "level": "INFO",
     "mode": "rotating_file",

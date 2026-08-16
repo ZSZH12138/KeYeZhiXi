@@ -14,6 +14,10 @@ __pycache__/
 htmlcov/
 .ruff_cache/
 .cache/
+.superpowers/
+.tmp_*/
+tmp_pytest_cache/
+docs/superpowers/
 *.pt
 *.pth
 *.ckpt

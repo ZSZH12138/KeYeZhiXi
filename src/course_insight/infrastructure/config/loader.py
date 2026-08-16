@@ -114,7 +114,7 @@ def _require_explicit_source(
 
 
 def _validate_group_structure(merged: Mapping[str, Any]) -> None:
-    for group in ("database", "logging", "outbox", "web", "security"):
+    for group in ("database", "ocr", "logging", "outbox", "web", "security"):
         if not isinstance(merged.get(group), Mapping):
             raise ConfigurationError(
                 code="INVALID_CONFIGURATION",

@@ -57,6 +57,14 @@ def safe_defaults() -> dict[str, Any]:
             "pool_max_size": 10,
             "connect_timeout_seconds": 10.0,
         },
+        "ocr": {
+            "backend": "disabled",
+            "executable": None,
+            "language": "chi_sim+eng",
+            "dpi": 200,
+            "timeout_seconds": 30.0,
+            "max_output_bytes": 2 * 1024 * 1024,
+        },
         "retrieval": {
             "policy_id": "application-lexical-v1",
             "strategy": "lexical",

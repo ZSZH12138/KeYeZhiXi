@@ -11,6 +11,10 @@ JSON-only LinUCB 制品校验、奖励关联、去标识离线数据、OPE、SQL
 治理批准、线上 rollout 或真实 PostgreSQL live migration 验证。本文不声称
 `active` 已具备生产启用条件，也不声称任何学习策略优于确定性 baseline。
 
+受控验证命令缺少证据时必须返回 `status=blocked`、`evidence_missing`，并保持
+`mode=rules`、`rollout_percentage=0.0`。只有同一 policy、dataset、OPE、审批和
+kill-switch 证据全部匹配时，才允许进入后续人工发布流程；不能用默认配置生成批准记录。
+
 M6 的策略制品、执行、观测、奖励和评估均为私有模型，不进入 91 个公共 Pydantic
 契约。`M6TutoringControlService.decide_next_action(...)` 仍保留四个公开输入，
 公共输出仍是 `TutoringControlResult`。
