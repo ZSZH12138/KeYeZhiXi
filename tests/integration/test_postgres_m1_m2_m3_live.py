@@ -334,7 +334,7 @@ def test_real_postgres_pgvector_http_embedding_retrieval_audit_and_restore(
         ),
         request_id="live-request-hybrid",
     )
-    assert hybrid.citation_ids() == first.citation_ids()
+    assert hybrid.citation_ids() == [required_evidence_id]
 
     seeds = _write_m3_seeds(tmp_path, package)
     review_workflow = TeacherReviewWorkflow(RepositoryTeacherReviewRepository(repository))
