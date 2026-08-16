@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 
 import django
 import pytest
@@ -276,6 +277,7 @@ def test_readiness_requires_fresh_valid_running_worker_status(
         "runtime": "ok",
         "logging": "ok",
         "outbox": "ok",
+        "capabilities": "ok",
     }
     serialized = ready.content.decode("utf-8")
     assert str(tmp_path) not in serialized
@@ -316,6 +318,41 @@ def test_readiness_fails_closed_when_logging_is_not_ready(
 
     assert response.status_code == 503
     assert response.json()["logging"] == "unavailable"
+
+
+def test_readiness_fails_closed_when_production_capability_ports_are_missing(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    web_runtime = FakeWebRuntime(
+        coordinator=FakeCoordinator("pseudonym_student_001"),
+        runtime_dir=tmp_path,
+    )
+    web_runtime.container.settings.environment = "production"
+    web_runtime.container.persistence_backend = SimpleNamespace(
+        backend_name="sqlite",
+        is_ready=lambda: True,
+    )
+    web_runtime.container.m1_service = SimpleNamespace(_parser_dispatch=None)
+    web_runtime.container.m2_service = SimpleNamespace(
+        _embedding_provider=None,
+        _vector_store=None,
+        _audit_store=None,
+    )
+    web_runtime.container.m3_service = SimpleNamespace(
+        _require_teacher_approval=True,
+        _review_workflow=None,
+    )
+    monkeypatch.setattr(runtime, "get_web_runtime", lambda: web_runtime)
+    write_json(
+        tmp_path / "outbox_worker" / "worker-safe.status.json",
+        _worker_status(datetime.now(timezone.utc)),
+    )
+
+    response = Client().get(reverse("health-ready"))
+
+    assert response.status_code == 503
+    assert response.json()["capabilities"] == "unavailable"
 
 
 def _worker_status(heartbeat: datetime) -> dict[str, object]:

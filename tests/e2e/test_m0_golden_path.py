@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import csv
 import hashlib
+import io
 import json
 import os
 import sqlite3
+import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -27,18 +30,14 @@ from course_insight.application.factory import (  # noqa: E402
     ApplicationContainer,
     build_application,
 )
+from course_insight.contracts.evidence import (  # noqa: E402
+    evidence_id_for_chunk,
+)
 from course_insight.contracts.course import (  # noqa: E402
     ContentChunk,
     CoursePackage,
+    SourceAuthorization,
     SourceDocument,
-)
-from course_insight.contracts.knowledge import (  # noqa: E402
-    AssessmentBlueprint,
-    BlueprintSection,
-    ItemCard,
-    KnowledgeBundle,
-    KnowledgeConcept,
-    QMatrixEntry,
 )
 from course_insight.infrastructure.config import (  # noqa: E402
     DatabaseSettings,
@@ -60,6 +59,10 @@ from course_insight.modules.m0_platform.django_app.runtime import (  # noqa: E40
     WebRuntime,
     restore_course_runtime_manifest,
 )
+from course_insight.modules.m1_course_governance.snapshots import (  # noqa: E402
+    CourseImportSnapshot,
+    SourcePayload,
+)
 
 
 pytestmark = pytest.mark.django_db
@@ -71,6 +74,10 @@ STUDENT_ID = "pseudonym_student_golden"
 TEACHER_ID = "pseudonym_teacher_golden"
 PASSWORD = "correct-horse-battery-staple"
 APP_LABEL = "m0_platform_web"
+GOVERNED_TEXT = (
+    "A governed rule states that the target proposition is true. "
+    "Use this governed explanation when supporting the target concept."
+)
 STUDENT_PERMISSIONS = (
     "start_assessment",
     "submit_assessment",
@@ -98,18 +105,19 @@ def _settings(tmp_path: Path) -> PlatformSettings:
     )
 
 
-def _course_package() -> CoursePackage:
-    governed_text = (
-        "A governed rule states that the target proposition is true. "
-        "Use this governed explanation when supporting the target concept."
-    )
+def _course_package(source_bytes: bytes) -> CoursePackage:
+    governed_text = source_bytes.decode("utf-8")
+    text_sha256 = hashlib.sha256(source_bytes).hexdigest()
+    chunk_id = "chunk_" + hashlib.sha256(
+        f"source_1\0section:1\0{text_sha256}".encode("utf-8")
+    ).hexdigest()
     chunk = ContentChunk(
-        chunk_id="chunk_1",
+        chunk_id=chunk_id,
         source_id="source_1",
         text=governed_text,
         locator="section:1",
         concept_hints=["concept_1"],
-        sha256=hashlib.sha256(governed_text.encode("utf-8")).hexdigest(),
+        sha256=text_sha256,
     )
     candidate = CoursePackage(
         course_package_id="package_1",
@@ -120,14 +128,21 @@ def _course_package() -> CoursePackage:
                 source_id="source_1",
                 file_name="course.md",
                 media_type="text/markdown",
-                sha256=hashlib.sha256(b"governed course").hexdigest(),
+                sha256=text_sha256,
                 page_count=None,
                 title="Governed course",
                 version="1.0.0",
             )
         ],
         content_chunks=[chunk],
-        source_authorizations=[],
+        source_authorizations=[
+            SourceAuthorization(
+                source_id="source_1",
+                authorized_by="Teacher",
+                license_note="course use",
+                authorized_at=NOW,
+            )
+        ],
         imported_at=NOW,
         status="ready",
         checksum="pending",
@@ -138,74 +153,262 @@ def _course_package() -> CoursePackage:
     )
 
 
-def _knowledge_bundle() -> KnowledgeBundle:
-    blueprint = AssessmentBlueprint(
-        blueprint_id="blueprint_1",
-        version="1.0.0",
-        course_id=COURSE_ID,
-        sections=[
-            BlueprintSection(
-                section_id="section_1",
-                name="Governed objective section",
-                item_count=1,
-                score=1.0,
-                item_types=["true_false"],
-                concept_weights={"concept_1": 1.0},
-                difficulty_range=(1, 1),
-                anchor_item_ids=["item_1"],
-            )
-        ],
-        total_score=1.0,
-        duration_minutes=30,
-        status="teacher_approved",
+def _course_import_snapshot(
+    package: CoursePackage,
+    source_bytes: bytes,
+) -> CourseImportSnapshot:
+    metadata_bytes = json.dumps(
+        {
+            "course_package_id": package.course_package_id,
+            "course_id": package.course_id,
+            "package_version": package.package_version,
+            "course_name": package.source_documents[0].title,
+            "imported_at": package.imported_at.isoformat(),
+        },
+        separators=(",", ":"),
+    ).encode("utf-8")
+    authorization_buffer = io.StringIO(newline="")
+    authorization_writer = csv.DictWriter(
+        authorization_buffer,
+        fieldnames=(
+            "file_name",
+            "source_id",
+            "expected_sha256",
+            "authorized_by",
+            "authorized_at",
+            "license_note",
+        ),
+        lineterminator="\n",
     )
-    return KnowledgeBundle(
-        knowledge_bundle_id="bundle_1",
-        course_package_id="package_1",
-        course_id=COURSE_ID,
-        bundle_version="1.0.0",
-        concepts=[
-            KnowledgeConcept(
-                concept_id="concept_1",
-                name="Governed concept",
-                chapter_id="chapter_1",
-                description="A deterministic golden-path concept.",
-                aliases=[],
-                status="published",
-            )
-        ],
-        prerequisite_relations=[],
-        misconception_tags=[],
-        items=[
-            ItemCard(
-                item_id="item_1",
-                version="1.0.0",
-                stem="The governed proposition is true.",
-                item_type="true_false",
-                concept_ids=["concept_1"],
-                misconception_ids=[],
-                difficulty_level=1,
-                cognitive_level="remember",
-                parameter_rules=[],
-                answer_key={"answer": True, "max_score": 1.0},
-                rubric_id=None,
-                source_evidence_ids=["evidence_chunk_1"],
-                status="teacher_approved",
-            )
-        ],
-        rubrics=[],
-        blueprints=[blueprint],
-        q_matrix=[
-            QMatrixEntry(
-                item_id="item_1",
-                item_version="1.0.0",
-                concept_id="concept_1",
-                weight=1.0,
-            )
-        ],
-        status="published",
-        published_at=NOW,
+    authorization_writer.writeheader()
+    documents_by_source_id = {
+        document.source_id: document for document in package.source_documents
+    }
+    for authorization in package.source_authorizations:
+        document = documents_by_source_id[authorization.source_id]
+        authorization_writer.writerow(
+            {
+                "file_name": document.file_name,
+                "source_id": authorization.source_id,
+                "expected_sha256": document.sha256,
+                "authorized_by": authorization.authorized_by,
+                "authorized_at": authorization.authorized_at.isoformat(),
+                "license_note": authorization.license_note,
+            }
+        )
+    authorization_bytes = authorization_buffer.getvalue().encode("utf-8")
+    source_documents = tuple(package.source_documents)
+    if len(source_documents) != 1:
+        raise AssertionError("golden fixture expects one source document")
+    source = source_documents[0]
+    return CourseImportSnapshot(
+        course_metadata_bytes=metadata_bytes,
+        source_authorization_bytes=authorization_bytes,
+        source_payloads=(
+            SourcePayload(
+                source_id=source.source_id,
+                file_name=source.file_name,
+                raw_bytes=source_bytes,
+            ),
+        ),
     )
+
+
+def test_course_import_snapshot_derives_authorization_rows_from_package() -> None:
+    source_bytes = GOVERNED_TEXT.encode("utf-8")
+    package = _course_package(source_bytes)
+    document = package.source_documents[0].model_copy(
+        update={
+            "source_id": "derived_source",
+            "file_name": "derived-course.txt",
+        }
+    )
+    authorization = package.source_authorizations[0].model_copy(
+        update={
+            "source_id": "derived_source",
+            "authorized_by": "Derived teacher",
+            "authorized_at": NOW.replace(hour=10),
+            "license_note": "derived license",
+        }
+    )
+    derived_package = package.model_copy(
+        update={
+            "source_documents": [document],
+            "source_authorizations": [authorization],
+        }
+    )
+
+    snapshot = _course_import_snapshot(derived_package, source_bytes)
+    rows = list(
+        csv.DictReader(
+            io.StringIO(snapshot.source_authorization_bytes.decode("utf-8"))
+        )
+    )
+
+    assert rows == [
+        {
+            "file_name": "derived-course.txt",
+            "source_id": "derived_source",
+            "expected_sha256": document.sha256,
+            "authorized_by": "Derived teacher",
+            "authorized_at": NOW.replace(hour=10).isoformat(),
+            "license_note": "derived license",
+        }
+    ]
+
+
+def test_knowledge_seed_paths_use_canonical_evidence_id_helper(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    package = _course_package(GOVERNED_TEXT.encode("utf-8"))
+    calls: list[str] = []
+
+    def fake_evidence_id_for_chunk(chunk_id: str) -> str:
+        calls.append(chunk_id)
+        return "canonical-evidence-id"
+
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "evidence_id_for_chunk",
+        fake_evidence_id_for_chunk,
+    )
+
+    paths = _knowledge_seed_paths(tmp_path, package)
+    concept_payload = json.loads(
+        paths["concept"].read_text(encoding="utf-8")
+    )
+    item_payload = json.loads(paths["item"].read_text(encoding="utf-8"))
+
+    assert calls == [package.content_chunks[0].chunk_id]
+    assert concept_payload["concept_evidence_ids"] == {
+        "concept_1": ["canonical-evidence-id"]
+    }
+    assert item_payload["items"][0]["source_evidence_ids"] == [
+        "canonical-evidence-id"
+    ]
+
+
+def test_build_web_runtime_closes_container_when_initialization_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class FailingM0Service:
+        def initialize(self) -> None:
+            raise RuntimeError("initialization failed")
+
+    class FakeContainer:
+        def __init__(self) -> None:
+            self.m0_service = FailingM0Service()
+            self.closed = False
+
+        def close(self) -> None:
+            self.closed = True
+
+    fake_container = FakeContainer()
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "build_application",
+        lambda settings: fake_container,
+    )
+
+    with pytest.raises(RuntimeError, match="initialization failed"):
+        _build_web_runtime(tmp_path)
+
+    assert fake_container.closed is True
+
+
+def _knowledge_seed_paths(
+    seed_dir: Path,
+    package: CoursePackage,
+) -> dict[str, Path]:
+    seed_dir.mkdir(parents=True, exist_ok=True)
+    evidence_id = evidence_id_for_chunk(package.content_chunks[0].chunk_id)
+    seed_payloads: dict[str, dict[str, object]] = {
+        "concept": {
+            "knowledge_bundle_id": "bundle_1",
+            "bundle_version": "1.0.0",
+            "published_at": NOW.isoformat(),
+            "course_id": package.course_id,
+            "course_package_id": package.course_package_id,
+            "course_package_checksum": package.checksum,
+            "concepts": [
+                {
+                    "concept_id": "concept_1",
+                    "name": "Governed concept",
+                    "chapter_id": "chapter_1",
+                    "description": "A deterministic golden-path concept.",
+                    "aliases": [],
+                    "status": "published",
+                }
+            ],
+            "concept_evidence_ids": {"concept_1": [evidence_id]},
+        },
+        "item": {
+            "items": [
+                {
+                    "item_id": "item_1",
+                    "version": "1.0.0",
+                    "stem": "The governed proposition is true.",
+                    "item_type": "true_false",
+                    "concept_ids": ["concept_1"],
+                    "misconception_ids": [],
+                    "difficulty_level": 1,
+                    "cognitive_level": "remember",
+                    "parameter_rules": [],
+                    "answer_key": {"answer": True, "max_score": 1.0},
+                    "rubric_id": None,
+                    "source_evidence_ids": [evidence_id],
+                    "status": "teacher_approved",
+                }
+            ],
+            "q_matrix": [
+                {
+                    "item_id": "item_1",
+                    "item_version": "1.0.0",
+                    "concept_id": "concept_1",
+                    "weight": 1.0,
+                }
+            ],
+        },
+        "rubric": {"rubrics": []},
+        "blueprint": {
+            "blueprints": [
+                {
+                    "blueprint_id": "blueprint_1",
+                    "version": "1.0.0",
+                    "course_id": package.course_id,
+                    "sections": [
+                        {
+                            "section_id": "section_1",
+                            "name": "Governed objective section",
+                            "item_count": 1,
+                            "score": 1.0,
+                            "item_types": ["true_false"],
+                            "concept_weights": {"concept_1": 1.0},
+                            "difficulty_range": [1, 1],
+                            "anchor_item_ids": ["item_1"],
+                            "anchor_item_versions": {"item_1": "1.0.0"},
+                        }
+                    ],
+                    "total_score": 1.0,
+                    "duration_minutes": 30,
+                    "status": "teacher_approved",
+                }
+            ]
+        },
+        "prerequisite": {"prerequisite_relations": []},
+        "misconception": {"misconception_tags": []},
+    }
+    paths: dict[str, Path] = {}
+    for role, payload in seed_payloads.items():
+        path = seed_dir / f"{role}.json"
+        path.write_text(
+            json.dumps(payload, separators=(",", ":")),
+            encoding="utf-8",
+        )
+        paths[role] = path
+    return paths
 
 
 def _build_web_runtime(
@@ -213,76 +416,97 @@ def _build_web_runtime(
 ) -> tuple[ApplicationContainer, WebRuntime]:
     settings = _settings(tmp_path)
     container = build_application(settings)
-    container.m0_service.initialize()
+    try:
+        container.m0_service.initialize()
 
-    package = _course_package()
-    bundle = _knowledge_bundle()
-    expected_index = container.m2_service.build_index(package)
-    snapshot_dir = settings.runtime_dir / "snapshots"
-    container.m0_service.save_contract_snapshot(
-        package,
-        snapshot_dir / "course-package.json",
-    )
-    container.m0_service.save_contract_snapshot(
-        expected_index,
-        snapshot_dir / "evidence-index.json",
-    )
-    container.m0_service.save_contract_snapshot(
-        bundle,
-        snapshot_dir / "knowledge-bundle.json",
-    )
+        source_bytes = GOVERNED_TEXT.encode("utf-8")
+        package = _course_package(source_bytes)
+        container.m1_service._repository.save_course_import(  # noqa: SLF001
+            package,
+            _course_import_snapshot(package, source_bytes),
+        )
+        expected_index = container.m2_service.build_index(package)
+        seed_paths = _knowledge_seed_paths(tmp_path / "teacher-seeds", package)
+        bundle = container.m3_service.build_knowledge_bundle(
+            package,
+            seed_paths["concept"],
+            seed_paths["item"],
+            seed_paths["rubric"],
+            seed_paths["blueprint"],
+            seed_paths["prerequisite"],
+            seed_paths["misconception"],
+        )
+        snapshot_dir = settings.runtime_dir / "snapshots"
+        container.m0_service.save_contract_snapshot(
+            package,
+            snapshot_dir / "course-package.json",
+        )
+        container.m0_service.save_contract_snapshot(
+            expected_index,
+            snapshot_dir / "evidence-index.json",
+        )
+        container.m0_service.save_contract_snapshot(
+            bundle,
+            snapshot_dir / "knowledge-bundle.json",
+        )
 
-    state_policy_path = settings.runtime_dir / "policies/state.json"
-    threshold_policy_path = settings.runtime_dir / "policies/teacher.json"
-    write_json(
-        state_policy_path,
-        {
-            "aggregation_policy_version": "1.0.0",
-            "class_id": CLASS_ID,
-            "class_size": 1,
-            "consolidating_threshold": 0.5,
-            "mastered_threshold": 0.8,
-            "minimum_assessed_count": 1,
-            "minimum_coverage": 1.0,
-            "misconception_activation_threshold": 0.5,
-        },
-    )
-    write_json(
-        threshold_policy_path,
-        {
-            "minimum_coverage": 1.0,
-            "minimum_assessed_count": 1,
-            "minimum_confidence": 0.5,
-            "weak_mastery_threshold": 0.8,
-            "misconception_threshold": 0.5,
-            "priority_support_threshold": 0.5,
-        },
-    )
-    write_json(
-        settings.runtime_dir / "snapshots/course_runtime_manifest.json",
-        {
-            "schema_version": 1,
-            "courses": [
-                {
-                    "course_id": COURSE_ID,
-                    "course_package_ref": "snapshots/course-package.json",
-                    "evidence_index_ref": "snapshots/evidence-index.json",
-                    "knowledge_bundle_ref": "snapshots/knowledge-bundle.json",
-                    "state_policy_ref": "policies/state.json",
-                    "teacher_threshold_policy_ref": (
-                        "policies/teacher.json"
-                    ),
-                }
-            ],
-        },
-    )
-    return container, WebRuntime(
-        container=container,
-        courses=restore_course_runtime_manifest(
+        state_policy_path = settings.runtime_dir / "policies/state.json"
+        threshold_policy_path = settings.runtime_dir / "policies/teacher.json"
+        write_json(
+            state_policy_path,
+            {
+                "aggregation_policy_version": "1.0.0",
+                "class_id": CLASS_ID,
+                "class_size": 1,
+                "consolidating_threshold": 0.5,
+                "mastered_threshold": 0.8,
+                "minimum_assessed_count": 1,
+                "minimum_coverage": 1.0,
+                "misconception_activation_threshold": 0.5,
+            },
+        )
+        write_json(
+            threshold_policy_path,
+            {
+                "minimum_coverage": 1.0,
+                "minimum_assessed_count": 1,
+                "minimum_confidence": 0.5,
+                "weak_mastery_threshold": 0.8,
+                "misconception_threshold": 0.5,
+                "priority_support_threshold": 0.5,
+            },
+        )
+        write_json(
+            settings.runtime_dir / "snapshots/course_runtime_manifest.json",
+            {
+                "schema_version": 1,
+                "courses": [
+                    {
+                        "course_id": COURSE_ID,
+                        "course_package_ref": "snapshots/course-package.json",
+                        "evidence_index_ref": "snapshots/evidence-index.json",
+                        "knowledge_bundle_ref": "snapshots/knowledge-bundle.json",
+                        "state_policy_ref": "policies/state.json",
+                        "teacher_threshold_policy_ref": (
+                            "policies/teacher.json"
+                        ),
+                    }
+                ],
+            },
+        )
+        return container, WebRuntime(
             container=container,
-            runtime_dir=settings.runtime_dir,
-        ),
-    )
+            courses=restore_course_runtime_manifest(
+                container=container,
+                runtime_dir=settings.runtime_dir,
+            ),
+        )
+    except BaseException:
+        try:
+            container.close()
+        except BaseException:
+            pass
+        raise
 
 
 def _grant_user(

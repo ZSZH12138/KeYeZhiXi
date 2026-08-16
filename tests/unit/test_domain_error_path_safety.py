@@ -91,14 +91,28 @@ def test_missing_course_source_error_does_not_expose_host_path(
     assert "path" not in raised.value.details
 
 
-def test_knowledge_seed_error_does_not_expose_host_path(
+@pytest.mark.parametrize(
+    ("payload", "expected_code"),
+    [
+        (None, "KNOWLEDGE_SEED_READ_FAILED"),
+        ("{", "KNOWLEDGE_SEED_INVALID"),
+        ("[]", "KNOWLEDGE_SEED_INVALID"),
+    ],
+)
+def test_knowledge_seed_errors_are_categorized_without_host_paths(
     tmp_path: Path,
+    payload: str | None,
+    expected_code: str,
 ) -> None:
     seed_path = tmp_path / "private" / "concepts.json"
+    if payload is not None:
+        seed_path.parent.mkdir()
+        seed_path.write_text(payload, encoding="utf-8")
 
     with pytest.raises(DomainError) as raised:
         M3KnowledgeBundleService._load_seed(seed_path)
 
-    assert raised.value.code == "Q_MATRIX_CONFLICT"
+    assert raised.value.code == expected_code
     assert str(tmp_path) not in _serialized(raised.value)
-    assert "path" not in raised.value.details
+    assert raised.value.details == {}
+    assert raised.value.__cause__ is None

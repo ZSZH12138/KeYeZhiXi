@@ -10,6 +10,7 @@ from django.http import HttpRequest, HttpResponse, JsonResponse
 from django.views.decorators.cache import never_cache
 from django.views.decorators.http import require_GET
 
+from course_insight.application.readiness import evaluate_capability_readiness
 from course_insight.infrastructure.json_io import read_json
 from course_insight.modules.m0_platform.django_app import runtime
 
@@ -48,10 +49,30 @@ def ready(request: HttpRequest) -> HttpResponse:
         "runtime": "unavailable",
         "logging": "unavailable",
         "outbox": "unavailable",
+        "capabilities": "unavailable",
     }
     try:
         web_runtime = runtime.get_web_runtime()
-        health = web_runtime.container.m0_service.health_check()
+        container = web_runtime.container
+        health = container.m0_service.health_check()
+        capability_readiness = evaluate_capability_readiness(
+            backend=getattr(
+                container,
+                "persistence_backend",
+                getattr(container, "m1_service", None),
+            ),
+            parser_registry=getattr(
+                getattr(container, "m1_service", None),
+                "_parser_dispatch",
+                None,
+            ),
+            m2_service=getattr(container, "m2_service", None),
+            m3_service=getattr(container, "m3_service", None),
+            production=(
+                getattr(container.settings, "environment", None)
+                == "production"
+            ),
+        )
         components = {
             "config": health.get("config", "unavailable"),
             "database": health.get("database", "unavailable"),
@@ -67,18 +88,23 @@ def ready(request: HttpRequest) -> HttpResponse:
                 else "unavailable"
             ),
             "outbox": _outbox_status(
-                web_runtime.container.settings.runtime_dir,
+                container.settings.runtime_dir,
                 heartbeat_seconds=(
-                    web_runtime.container.settings.outbox
+                    container.settings.outbox
                     .heartbeat_interval_seconds
                 ),
                 poll_seconds=(
-                    web_runtime.container.settings.outbox
+                    container.settings.outbox
                     .poll_interval_seconds
                 ),
                 lease_seconds=(
-                    web_runtime.container.settings.outbox.lease_seconds
+                    container.settings.outbox.lease_seconds
                 ),
+            ),
+            "capabilities": (
+                "ok"
+                if capability_readiness["status"] == "ready"
+                else "unavailable"
             ),
         }
     except Exception:

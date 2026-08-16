@@ -148,6 +148,10 @@ def test_v14_creates_all_m5_m8_model_runtime_tables(tmp_path) -> None:
     assert SCHEMA_VERSION == 15
     assert expected <= actual
     assert "m5_learning_observation_audits" in actual
-    assert load_migrations()[-1].path.name == (
+    assert next(
+        migration.path.name
+        for migration in load_migrations()
+        if migration.version == 15
+    ) == (
         "0015_m5_learning_observation_audit_identity.sql"
     )

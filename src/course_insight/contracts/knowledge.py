@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import math
 from datetime import datetime
-from typing import Any, Literal
+from typing import Any, Literal, Self
 
 from pydantic import Field, field_validator
 
@@ -32,6 +32,18 @@ _OBJECTIVE_ITEM_TYPES = frozenset(
 def _normalized_text(value: str) -> str:
     """Normalize user-maintained labels without changing stored text."""
     return " ".join(value.split()).casefold()
+
+
+def _exclude_none(value: object) -> bool:
+    """Omit additive optional fields from historical contract payloads."""
+
+    return value is None
+
+
+def _exclude_empty_mapping(value: object) -> bool:
+    """Omit additive mapping fields from historical contract payloads."""
+
+    return value == {}
 
 
 def _require_unique(values: list[Any], *, entity: str) -> None:
@@ -389,6 +401,36 @@ class BlueprintSection(ContractModel):
     concept_weights: dict[str, float]
     difficulty_range: tuple[int, int]
     anchor_item_ids: list[str]
+    anchor_item_versions: dict[str, str] = Field(
+        default_factory=dict,
+        exclude_if=_exclude_empty_mapping,
+    )
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: str | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        """Revalidate copied or in-place-mutated sections at public boundaries."""
+
+        if isinstance(obj, cls):
+            obj = obj.model_dump(mode="python")
+        return super().model_validate(
+            obj,
+            strict=strict,
+            extra=extra,
+            from_attributes=from_attributes,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
 
     @field_validator("concept_weights")
     @classmethod
@@ -439,6 +481,33 @@ class BlueprintSection(ContractModel):
             )
         _require_unique(self.item_types, entity="blueprint item type")
         _require_unique(self.anchor_item_ids, entity="blueprint anchor item")
+        if self.anchor_item_versions:
+            if set(self.anchor_item_versions) != set(self.anchor_item_ids):
+                raise DomainError(
+                    code="ANCHOR_ITEM_VERSION_MAPPING_INVALID",
+                    module="m3",
+                    message="anchor item version keys must match anchor item IDs",
+                    details={"section_id": self.section_id},
+                )
+            if any(not version.strip() for version in self.anchor_item_versions.values()):
+                raise DomainError(
+                    code="ANCHOR_ITEM_VERSION_MAPPING_INVALID",
+                    module="m3",
+                    message="anchor item versions must be nonblank",
+                    details={"section_id": self.section_id},
+                )
+
+    def content_checksum(self) -> str:
+        """Reject invalid copied or in-place-mutated values before hashing."""
+
+        type(self).model_validate(self)
+        return super().content_checksum()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Reject invalid copied or in-place-mutated values before serializing."""
+
+        type(self).model_validate(self)
+        return super().to_dict()
 
     def accepts(self, item: ItemCard) -> bool:
         """Apply type, closed difficulty, and concept-overlap constraints."""
@@ -462,6 +531,32 @@ class AssessmentBlueprint(ContractModel):
     total_score: float = Field(ge=0.0, allow_inf_nan=False)
     duration_minutes: int = Field(gt=0)
     status: str = Field(min_length=1)
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: str | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        """Revalidate copied or in-place-mutated blueprints at public boundaries."""
+
+        if isinstance(obj, cls):
+            obj = obj.model_dump(mode="python")
+        return super().model_validate(
+            obj,
+            strict=strict,
+            extra=extra,
+            from_attributes=from_attributes,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
 
     def validate_business_rules(self) -> None:
         """Validate section identity and total score conservation."""
@@ -504,6 +599,18 @@ class AssessmentBlueprint(ContractModel):
             details={"blueprint_id": self.blueprint_id},
         )
 
+    def content_checksum(self) -> str:
+        """Reject invalid copied or in-place-mutated values before hashing."""
+
+        type(self).model_validate(self)
+        return super().content_checksum()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Reject invalid copied or in-place-mutated values before serializing."""
+
+        type(self).model_validate(self)
+        return super().to_dict()
+
 
 class QMatrixEntry(ContractModel):
     """Weighted item-version to concept relation in the Q matrix."""
@@ -535,12 +642,47 @@ class KnowledgeBundle(ContractModel):
     q_matrix: list[QMatrixEntry]
     status: Literal["draft", "published"]
     published_at: datetime | None
+    course_package_checksum: str | None = Field(
+        default=None,
+        exclude_if=_exclude_none,
+    )
+    concept_evidence_ids: dict[str, list[str]] = Field(
+        default_factory=dict,
+        exclude_if=_exclude_empty_mapping,
+    )
+
+    @classmethod
+    def model_validate(
+        cls,
+        obj: Any,
+        *,
+        strict: bool | None = None,
+        extra: str | None = None,
+        from_attributes: bool | None = None,
+        context: Any | None = None,
+        by_alias: bool | None = None,
+        by_name: bool | None = None,
+    ) -> Self:
+        """Revalidate copied or in-place-mutated bundles at public boundaries."""
+
+        if isinstance(obj, cls):
+            obj = obj.model_dump(mode="python")
+        return super().model_validate(
+            obj,
+            strict=strict,
+            extra=extra,
+            from_attributes=from_attributes,
+            context=context,
+            by_alias=by_alias,
+            by_name=by_name,
+        )
 
     def validate_business_rules(self) -> None:
         """Validate unique identity, references, publication, and Q alignment."""
 
         self._validate_unique_identifiers()
         self._validate_references()
+        self._validate_concept_evidence_ids()
         if self.status == "published" and self.published_at is None:
             raise DomainError(
                 code="PUBLISHED_AT_REQUIRED",
@@ -558,6 +700,50 @@ class KnowledgeBundle(ContractModel):
                     message="published knowledge bundles require approved items",
                     details={"item_ids": unapproved_ids},
                 )
+
+    def _validate_concept_evidence_ids(self) -> None:
+        """Validate optional complete teacher evidence coverage by concept."""
+
+        if not self.concept_evidence_ids:
+            return
+        concept_ids = {concept.concept_id for concept in self.concepts}
+        if set(self.concept_evidence_ids) != concept_ids:
+            raise DomainError(
+                code="CONCEPT_EVIDENCE_MAPPING_INVALID",
+                module="m3",
+                message="concept evidence keys must match bundle concepts",
+            )
+        for evidence_ids in self.concept_evidence_ids.values():
+            if not evidence_ids:
+                raise DomainError(
+                    code="CONCEPT_EVIDENCE_MAPPING_INVALID",
+                    module="m3",
+                    message="concept evidence lists must be non-empty",
+                )
+            if any(not evidence_id.strip() for evidence_id in evidence_ids):
+                raise DomainError(
+                    code="CONCEPT_EVIDENCE_MAPPING_INVALID",
+                    module="m3",
+                    message="concept evidence IDs must be nonblank",
+                )
+            if len(evidence_ids) != len(set(evidence_ids)):
+                raise DomainError(
+                    code="CONCEPT_EVIDENCE_MAPPING_INVALID",
+                    module="m3",
+                    message="concept evidence IDs must be unique",
+                )
+
+    def content_checksum(self) -> str:
+        """Reject invalid copied or in-place-mutated values before hashing."""
+
+        type(self).model_validate(self)
+        return super().content_checksum()
+
+    def to_dict(self) -> dict[str, Any]:
+        """Reject invalid copied or in-place-mutated values before serializing."""
+
+        type(self).model_validate(self)
+        return super().to_dict()
 
     def _validate_unique_identifiers(self) -> None:
         """Apply the version-aware identity rules from the contract table."""

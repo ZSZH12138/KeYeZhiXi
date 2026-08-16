@@ -45,6 +45,117 @@ def test_m6_policy_defaults_are_strict_rules_without_learned_io(
     ).resolve()
 
 
+def test_retrieval_policy_is_loaded_from_governed_environment_settings(
+    tmp_path: Path,
+) -> None:
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=None,
+        dotenv_path=None,
+        environment={
+            "COURSE_INSIGHT_RETRIEVAL__POLICY_ID": "production-hybrid-v2",
+            "COURSE_INSIGHT_RETRIEVAL__STRATEGY": "hybrid",
+            "COURSE_INSIGHT_RETRIEVAL__TOP_K": "5",
+            "COURSE_INSIGHT_RETRIEVAL__LEXICAL_WEIGHT": "0.4",
+            "COURSE_INSIGHT_RETRIEVAL__VECTOR_WEIGHT": "0.6",
+        },
+    )
+
+    assert settings.retrieval.policy_id == "production-hybrid-v2"
+    assert settings.retrieval.strategy == "hybrid"
+    assert settings.retrieval.top_k == 5
+    assert settings.retrieval.lexical_weight == 0.4
+    assert settings.retrieval.vector_weight == 0.6
+
+
+def test_live_database_guard_variables_are_not_platform_settings(
+    tmp_path: Path,
+) -> None:
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=None,
+        dotenv_path=None,
+        environment={
+            "COURSE_INSIGHT_DATABASE__BACKEND": "postgresql",
+            "COURSE_INSIGHT_DATABASE__URL_ENV": "COURSE_INSIGHT_TEST_DATABASE_URL",
+            "COURSE_INSIGHT_TEST_DATABASE_URL": (
+                "postgresql://postgres:postgres@localhost:5432/course_insight_test_ci"
+            ),
+            "COURSE_INSIGHT_TEST_DATABASE_NAME": "course_insight_test_ci",
+        },
+    )
+
+    assert settings.database.backend == "postgresql"
+    assert settings.database.url is not None
+    assert settings.database.url.get_secret_value().endswith(
+        "/course_insight_test_ci"
+    )
+
+
+def test_hybrid_retrieval_weights_must_sum_to_one(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ConfigurationError) as captured:
+        load_platform_settings(
+            project_root=tmp_path,
+            app_json_path=None,
+            dotenv_path=None,
+            environment={
+                "COURSE_INSIGHT_RETRIEVAL__STRATEGY": "hybrid",
+                "COURSE_INSIGHT_RETRIEVAL__LEXICAL_WEIGHT": "0.3",
+                "COURSE_INSIGHT_RETRIEVAL__VECTOR_WEIGHT": "0.3",
+            },
+        )
+
+    assert captured.value.code == "INVALID_RETRIEVAL_POLICY"
+
+
+def test_embedding_dimension_matches_pgvector_schema_limit(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ConfigurationError) as captured:
+        load_platform_settings(
+            project_root=tmp_path,
+            app_json_path=None,
+            dotenv_path=None,
+            environment={},
+            overrides={
+                "embedding": {
+                    "backend": "openai_compatible",
+                    "endpoint": "https://embeddings.example",
+                    "model_name": "embedding-model",
+                    "model_version": "v1",
+                    "dimension": 16_001,
+                }
+            },
+        )
+
+    assert "embedding.dimension" in captured.value.fields
+
+
+def test_production_vector_strategy_requires_embedding_backend(
+    tmp_path: Path,
+) -> None:
+    with pytest.raises(ConfigurationError) as captured:
+        load_platform_settings(
+            project_root=tmp_path,
+            app_json_path=None,
+            dotenv_path=None,
+            environment={},
+            overrides={
+                "environment": "production",
+                "retrieval": {
+                    "strategy": "vector",
+                    "lexical_weight": 0.0,
+                    "vector_weight": 1.0,
+                },
+            },
+        )
+
+    assert captured.value.code == "INSECURE_PRODUCTION_CONFIGURATION"
+    assert "embedding.backend" in captured.value.fields
+
+
 @pytest.mark.parametrize(
     "m6_policy",
     [

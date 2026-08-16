@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from inspect import signature
@@ -124,7 +125,8 @@ def _task_plan() -> TaskPlan:
 
 
 def _course_package() -> CoursePackage:
-    return CoursePackage(
+    text = "A governed rule, distinction, and example for this concept."
+    candidate = CoursePackage(
         course_package_id=COURSE_PACKAGE_ID,
         course_id=COURSE_ID,
         package_version="1.0.0",
@@ -143,16 +145,19 @@ def _course_package() -> CoursePackage:
             ContentChunk(
                 chunk_id="chunk_1",
                 source_id="source_1",
-                text="A governed rule, distinction, and example for this concept.",
+                text=text,
                 locator="section-1",
                 concept_hints=[CONCEPT_ID],
-                sha256="chunk_checksum",
+                sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
             )
         ],
         source_authorizations=[],
         imported_at=NOW,
         status="ready",
         checksum="package_checksum",
+    )
+    return candidate.model_copy(
+        update={"checksum": candidate.recalculate_checksum()}
     )
 
 

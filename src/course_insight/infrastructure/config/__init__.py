@@ -11,6 +11,7 @@ from course_insight.infrastructure.config.models import (
     LoggingSettings,
     OutboxSettings,
     PlatformSettings,
+    RetrievalSettings,
     SecuritySettings,
     WebSettings,
 )
@@ -29,6 +30,7 @@ __all__ = [
     "LoggingSettings",
     "OutboxSettings",
     "PlatformSettings",
+    "RetrievalSettings",
     "RoleGrantSeed",
     "RoleSeedDocument",
     "RoleSeedError",

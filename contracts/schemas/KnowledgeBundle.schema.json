@@ -70,6 +70,13 @@
           "title": "Anchor Item Ids",
           "type": "array"
         },
+        "anchor_item_versions": {
+          "additionalProperties": {
+            "type": "string"
+          },
+          "title": "Anchor Item Versions",
+          "type": "object"
+        },
         "concept_weights": {
           "additionalProperties": {
             "type": "number"
@@ -641,6 +648,16 @@
       "title": "Bundle Version",
       "type": "string"
     },
+    "concept_evidence_ids": {
+      "additionalProperties": {
+        "items": {
+          "type": "string"
+        },
+        "type": "array"
+      },
+      "title": "Concept Evidence Ids",
+      "type": "object"
+    },
     "concepts": {
       "items": {
         "$ref": "#/$defs/KnowledgeConcept"
@@ -652,6 +669,18 @@
       "minLength": 1,
       "title": "Course Id",
       "type": "string"
+    },
+    "course_package_checksum": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Course Package Checksum"
     },
     "course_package_id": {
       "minLength": 1,

@@ -6,24 +6,37 @@
   <meta name="referrer" content="same-origin">
   <title>{% block title %}课业智析{% endblock %}</title>
   <style>
-    :root { color-scheme: light; font-family: system-ui, sans-serif; }
-    body { margin: 0 auto; max-width: 72rem; padding: 1.25rem; line-height: 1.55; }
-    header { display: flex; gap: 1rem; align-items: center; justify-content: space-between; }
-    nav { display: flex; gap: .75rem; align-items: center; }
-    main { margin-top: 1.5rem; }
+    :root { color-scheme: light; font-family: "Microsoft YaHei", system-ui, sans-serif; }
+    body { margin: 0; background: #f5f6f8; color: #2b2b2b; line-height: 1.55; }
+    .site-header { border-top: 5px solid #921041; background: #fff; border-bottom: 1px solid #e4e6ea; }
+    .header-inner, main { width: min(72rem, calc(100% - 2rem)); margin: 0 auto; }
+    .header-inner { min-height: 4.5rem; display: flex; gap: 1.5rem; align-items: center; justify-content: space-between; }
+    .brand { color: #921041; font-size: 1.35rem; font-weight: 700; letter-spacing: .04em; }
+    nav { display: flex; gap: 1.2rem; align-items: center; }
+    nav a { color: #424242; text-decoration: none; }
+    nav a:hover { color: #921041; }
+    main { padding: 2rem 0 3rem; }
+    .page-title { color: #921041; font-size: 1.8rem; font-weight: 600; margin: 0 0 .25rem; }
+    .breadcrumb { color: #777; font-size: .9rem; margin: 0 0 1.25rem; }
     form p { display: grid; gap: .35rem; }
-    input, select, textarea, button { font: inherit; padding: .55rem; }
+    input, select, textarea, button { font: inherit; padding: .55rem .65rem; border: 1px solid #c8cbd0; border-radius: 2px; }
     textarea { min-height: 8rem; }
-    .card { border: 1px solid #ccd3dc; border-radius: .5rem; padding: 1rem; margin: 1rem 0; }
+    button { background: #921041; border-color: #921041; color: white; cursor: pointer; }
+    button:hover { background: #741033; }
+    .card { background: #fff; border: 1px solid #e0e2e6; padding: 1.25rem; margin: 1rem 0; }
     .errorlist { color: #9d1c1c; }
-    .muted { color: #52606d; }
-    table { border-collapse: collapse; width: 100%; }
-    th, td { border: 1px solid #ccd3dc; padding: .5rem; text-align: left; vertical-align: top; }
+    .muted { color: #66717c; }
+    .status { color: #921041; font-weight: 600; }
+    table { border-collapse: collapse; width: 100%; background: #fff; }
+    th, td { border: 1px solid #e0e2e6; padding: .65rem; text-align: left; vertical-align: top; }
+    .actions { display: flex; gap: .75rem; align-items: end; flex-wrap: wrap; }
+    .actions p { margin: 0; min-width: 12rem; }
   </style>
 </head>
 <body>
-  <header>
-    <strong>课业智析</strong>
+  <header class="site-header">
+    <div class="header-inner">
+    <strong class="brand">课业智析</strong>
     {% if request.user.is_authenticated %}
       <nav>
         <a href="{% url 'student-home' %}">学生端</a>
@@ -34,6 +47,7 @@
         </form>
       </nav>
     {% endif %}
+    </div>
   </header>
   <main>{% block content %}{% endblock %}</main>
 </body>

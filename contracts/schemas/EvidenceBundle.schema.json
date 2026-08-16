@@ -74,12 +74,48 @@
       "title": "Course Id",
       "type": "string"
     },
+    "course_package_checksum": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Course Package Checksum"
+    },
+    "course_package_id": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Course Package Id"
+    },
     "evidence_chunks": {
       "items": {
         "$ref": "#/$defs/EvidenceChunk"
       },
       "title": "Evidence Chunks",
       "type": "array"
+    },
+    "index_checksum": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Index Checksum"
     },
     "index_id": {
       "minLength": 1,

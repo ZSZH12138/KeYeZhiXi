@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -84,6 +85,93 @@ class DatabaseSettings(_FrozenModel):
                     fields=("database.url",),
                     reason="invalid_url",
                 ) from None
+        return self
+
+
+class EmbeddingSettings(_FrozenModel):
+    """Portable OpenAI-compatible embedding deployment settings."""
+
+    backend: Literal["disabled", "openai_compatible"] = "disabled"
+    endpoint: str | None = None
+    api_key_env: str = "OPENAI_API_KEY"
+    model_name: str | None = None
+    model_version: str | None = None
+    dimension: int | None = Field(default=None, ge=1, le=16_000)
+    timeout_seconds: Annotated[FiniteFloat, Field(gt=0, le=300)] = 10.0
+    max_retries: int = Field(default=2, ge=0, le=8)
+    verify_tls: bool = True
+
+    @field_validator("api_key_env")
+    @classmethod
+    def _validate_api_key_env(cls, value: str) -> str:
+        if not _ENV_NAME.fullmatch(value):
+            raise ValueError("invalid environment variable name")
+        return value
+
+    @model_validator(mode="after")
+    def _validate_embedding(self) -> Self:
+        configured = self.backend == "openai_compatible"
+        if configured and any(
+            value is None or not str(value).strip()
+            for value in (self.endpoint, self.model_name, self.model_version)
+        ):
+            raise ConfigurationError(
+                code="MISSING_REQUIRED_SETTING",
+                fields=("embedding.endpoint", "embedding.model_name", "embedding.model_version"),
+                reason="required",
+            )
+        if configured and self.dimension is None:
+            raise ConfigurationError(
+                code="MISSING_REQUIRED_SETTING",
+                fields=("embedding.dimension",),
+                reason="required",
+            )
+        if not configured and any(
+            value is not None
+            for value in (self.endpoint, self.model_name, self.model_version, self.dimension)
+        ):
+            raise ConfigurationError(
+                code="INVALID_EMBEDDING_CONFIGURATION",
+                fields=("embedding.backend",),
+                reason="disabled_with_values",
+            )
+        return self
+
+
+class RetrievalSettings(_FrozenModel):
+    """Governed application-level M2 retrieval policy selection."""
+
+    policy_id: str = Field(default="application-lexical-v1", min_length=1)
+    strategy: Literal["lexical", "vector", "hybrid"] = "lexical"
+    top_k: int = Field(default=3, ge=1, le=1000)
+    lexical_weight: Annotated[FiniteFloat, Field(ge=0.0, le=1.0)] = 1.0
+    vector_weight: Annotated[FiniteFloat, Field(ge=0.0, le=1.0)] = 0.0
+    rerank: bool = False
+
+    @model_validator(mode="after")
+    def _validate_retrieval_policy(self) -> Self:
+        required_weights = {
+            "lexical": (self.lexical_weight,),
+            "vector": (self.vector_weight,),
+            "hybrid": (self.lexical_weight, self.vector_weight),
+        }[self.strategy]
+        if any(weight <= 0.0 for weight in required_weights):
+            raise ConfigurationError(
+                code="INVALID_RETRIEVAL_POLICY",
+                fields=("retrieval.lexical_weight", "retrieval.vector_weight"),
+                reason="strategy_signal_missing",
+            )
+        if self.strategy == "hybrid" and not math.isclose(
+            self.lexical_weight + self.vector_weight,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ConfigurationError(
+                code="INVALID_RETRIEVAL_POLICY",
+                fields=("retrieval.lexical_weight", "retrieval.vector_weight"),
+                reason="hybrid_weights_must_sum_to_one",
+            )
         return self
 
 
@@ -397,6 +485,8 @@ class PlatformSettings(BaseSettings):
     runtime_dir: Path
     config_dir: Path
     database: DatabaseSettings
+    embedding: EmbeddingSettings = Field(default_factory=EmbeddingSettings)
+    retrieval: RetrievalSettings = Field(default_factory=RetrievalSettings)
     logging: LoggingSettings
     outbox: OutboxSettings = Field(default_factory=OutboxSettings)
     web: WebSettings = Field(default_factory=WebSettings)
@@ -473,6 +563,13 @@ class PlatformSettings(BaseSettings):
             invalid_fields.append("web.secure_cookie")
         if self.logging.mode != "stdout":
             invalid_fields.append("logging.mode")
+        if (
+            self.retrieval.strategy in {"vector", "hybrid"}
+            and self.embedding.backend != "openai_compatible"
+        ):
+            invalid_fields.extend(
+                ("retrieval.strategy", "embedding.backend")
+            )
         if invalid_fields:
             raise ConfigurationError(
                 code="INSECURE_PRODUCTION_CONFIGURATION",

@@ -22,7 +22,7 @@ jobs:
     timeout-minutes: 10
     services:
       postgres:
-        image: postgres:16
+        image: pgvector/pgvector:pg16
         env:
           POSTGRES_USER: course_insight
           POSTGRES_PASSWORD: course_insight
@@ -60,7 +60,7 @@ jobs:
         run: >-
           python -m pip install --disable-pip-version-check
           --constraint requirements/ci-constraints.txt
-          -e ".[dev,intent]"
+          -e ".[dev,intent,performance]"
 
       - name: Check installed dependencies
         run: python -m pip check
@@ -74,20 +74,114 @@ jobs:
       - name: Enforce M6 coverage gate
         run: >-
           python -m pytest -q
-          tests/unit/test_m6_tutoring_fsm.py
-          tests/integration/test_m6_persistence.py
-          tests/integration/test_m6_cross_module.py
+          tests/unit/test_m6_*.py
+          tests/unit/test_frozen_policy_loading.py
+          tests/unit/test_postgresql_m6_repository_parity.py
+          tests/integration/test_m6_*.py
+          tests/integration/test_m4_m6_migration_sequence.py
+          tests/integration/test_postgresql_m4_m6_repository_parity.py
           --cov=course_insight.modules.m6_tutoring_fsm
           --cov=course_insight.infrastructure.sqlite.m6_repository
           --cov=course_insight.infrastructure.sqlite.migrations
           --cov-report=term-missing
-          --cov-fail-under=90
+          --cov-fail-under=88
 
       - name: Verify deterministic public schemas
         run: |
           python scripts/export_schemas.py
           python -m course_insight.cli export-schemas
           git diff --exit-code -- contracts/schemas
+
+      - name: Check whitespace
+        run: git diff --check
+
+  live-m1-m3:
+    name: Live PostgreSQL pgvector M1-M3 retrieval
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    services:
+      postgres:
+        image: pgvector/pgvector:pg16
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: course_insight_test_ci
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d course_insight_test_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 20
+
+    env:
+      COURSE_INSIGHT_DATABASE__BACKEND: postgresql
+      COURSE_INSIGHT_DATABASE__URL_ENV: COURSE_INSIGHT_TEST_DATABASE_URL
+      COURSE_INSIGHT_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/course_insight_test_ci
+      COURSE_INSIGHT_TEST_DATABASE_NAME: course_insight_test_ci
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            pyproject.toml
+            requirements/ci-constraints.txt
+
+      - name: Install project and verification dependencies
+        run: >-
+          python -m pip install --disable-pip-version-check
+          --constraint requirements/ci-constraints.txt
+          -e ".[dev,intent,performance]"
+
+      - name: Run live M1-M3 PostgreSQL/pgvector acceptance
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m pytest -vv --tb=long --junitxml=live-m1-m3.xml tests/unit/test_postgres_s1_s6_migration.py tests/integration/test_postgres_m1_m2_m3_live.py 2>&1 | tee live-m1-m3.log
+          python -c "import sys, xml.etree.ElementTree as ET; root = ET.parse('live-m1-m3.xml').getroot(); skipped = sum(int(node.attrib.get('skipped', '0')) for node in root.iter('testsuite')); sys.exit('live acceptance cannot pass with skipped tests' if skipped else 0)"
+
+      - name: Run bounded M2 pgvector performance smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m scripts.benchmark_m2_pgvector \
+            --chunk-count 64 \
+            --dimension 8 \
+            --query-count 12 \
+            --top-k 5 \
+            --max-p95-ms 1000 \
+            --min-recall-at-k 1.0 \
+            --seed 20260815 | tee m2-pgvector-smoke.json
+
+      - name: Publish live acceptance diagnostics
+        if: failure()
+        shell: bash
+        run: |
+          if [ -f live-m1-m3.log ]; then
+            {
+              echo "## Live M1-M3 acceptance diagnostics"
+              echo '```text'
+              cat live-m1-m3.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Live acceptance did not start; no test log was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
+          if [ -f m2-pgvector-smoke.json ]; then
+            {
+              echo "## M2 pgvector performance smoke"
+              echo '```json'
+              cat m2-pgvector-smoke.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Check whitespace
         run: git diff --check

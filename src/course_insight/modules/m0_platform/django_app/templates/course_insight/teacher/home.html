@@ -1,10 +1,22 @@
 {% extends "course_insight/base.html" %}
 {% block title %}教师端 · 课业智析{% endblock %}
 {% block content %}
-  <h1>教师端</h1>
-  <p>输入已获授权的课程、班级和试卷标识以查看复核上下文。</p>
-  <form method="get" action="{% url 'teacher-review-lookup' %}">
-    {{ lookup_form.as_p }}
-    <button type="submit">查看</button>
-  </form>
+  <p class="breadcrumb">首页 / 教师端</p>
+  <h1 class="page-title">教师端</h1>
+  <div class="card">
+    <h2>成绩复核</h2>
+    <p class="muted">输入已获授权的课程、班级和试卷标识，查看学生答卷复核信息。</p>
+    <form method="get" action="{% url 'teacher-review-lookup' %}">
+      {{ lookup_form.as_p }}
+      <button type="submit">查看复核</button>
+    </form>
+  </div>
+  <div class="card">
+    <h2>知识包审核</h2>
+    <p class="muted">输入课程、班级和审核编号，查看并处理 M3 知识包审核状态。</p>
+    <form method="get" action="{% url 'teacher-knowledge-review-lookup' %}">
+      {{ knowledge_lookup_form.as_p }}
+      <button type="submit">查看知识包</button>
+    </form>
+  </div>
 {% endblock %}

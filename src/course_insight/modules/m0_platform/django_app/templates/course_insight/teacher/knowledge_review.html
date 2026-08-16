@@ -1,0 +1,40 @@
+{% extends "course_insight/base.html" %}
+{% block title %}知识包审核 · 课业智析{% endblock %}
+{% block content %}
+  <p class="breadcrumb">教师端 / M3 知识包审核</p>
+  <h1 class="page-title">知识包审核</h1>
+  <p class="muted">确认课程知识材料后，才允许进入后续课程运行流程。</p>
+
+  <section class="card">
+    <h2>审核信息</h2>
+    <table>
+      <tr><th>审核编号</th><td>{{ review.review_id }}</td></tr>
+      <tr><th>课程包</th><td>{{ review.subject_id }}</td></tr>
+      <tr><th>状态</th><td class="status">{{ review.state }}</td></tr>
+      <tr><th>版本</th><td>{{ review.version }}</td></tr>
+      <tr><th>输入校验摘要</th><td>{{ review.input_checksum|slice:":12" }}…</td></tr>
+      <tr><th>验证报告</th><td>{{ review.validation_report_ref }}</td></tr>
+    </table>
+  </section>
+
+  <section class="card">
+    <h2>审核操作</h2>
+    {% if not can_change %}
+      <p class="muted">当前状态没有可执行的操作。</p>
+    {% else %}
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="flow_token" value="{{ flow }}">
+      <div class="actions">
+        {{ form.action.errors }}
+        {{ form.action.label_tag }}
+        {{ form.action }}
+        {{ form.reason.errors }}
+        {{ form.reason.label_tag }}
+        {{ form.reason }}
+        <button type="submit">提交操作</button>
+      </div>
+    </form>
+    {% endif %}
+  </section>
+{% endblock %}
