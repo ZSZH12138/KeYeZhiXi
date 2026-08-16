@@ -64,6 +64,11 @@ urlpatterns = [
     path("teacher/", teacher.home, name="teacher-home"),
     path("teacher/reviews/", teacher.lookup, name="teacher-review-lookup"),
     path(
+        "teacher/knowledge-reviews/",
+        teacher.knowledge_lookup,
+        name="teacher-knowledge-review-lookup",
+    ),
+    path(
         "teacher/courses/<str:course_id>/classes/<str:class_id>/",
         teacher.class_context,
         name="teacher-class",
@@ -83,5 +88,13 @@ urlpatterns = [
         ),
         teacher.review,
         name="teacher-review",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "knowledge-reviews/<str:review_id>/"
+        ),
+        teacher.knowledge_review,
+        name="teacher-knowledge-review",
     ),
 ]

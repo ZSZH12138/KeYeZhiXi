@@ -743,11 +743,11 @@ M7 的持久表保存现有学生反馈契约，不保存 DeepSeek 密钥、完�
 |---|---|---|
 | M0 | 配置、日志、SQLite/PostgreSQL、真实 Django/权限/表单、流程恢复、leased Worker | 在目标环境完成生产容量、备份与真实 PostgreSQL 验收 |
 | M1 | 版本化 ParserRegistry、本地多格式解析、授权与确定性分块 | 通过同一端口增加受治理解析器，不绕过来源校验 |
-| M2 | SQLite/离线 lexical 基线；生产 PostgreSQL+pgvector 支持 embedding、vector/hybrid、审计 | 以 CI `live-m1-m3` job 的真实 PostgreSQL+pgvector 结果完成生产运行验收 |
-| M3 | 教师种子校验与 CAS 复核门；`initialize_course` 可携带审批 ID/version，生产发布必须走 `build_knowledge_bundle_after_approval` | 将 M3 S4 审批接入现有 M0 教师 UI 操作流 |
+| M2 | SQLite/离线 lexical 基线；生产 PostgreSQL+pgvector 支持 embedding、vector/hybrid、审计；提供 bounded/target-scale exact-search 基准 profile | 以 disposable PostgreSQL+pgvector 实测结果完成目标规模验收，ANN 仍不自动启用 |
+| M3 | 教师种子校验与 CAS 复核门；`initialize_course` 可携带审批 ID/version，生产发布必须走 `build_knowledge_bundle_after_approval`；教师端提供基础知识包审核页面 | 在目标环境完成真实发布、备份和恢复验收 |
 | M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 91 个公开契约、`TaskPlan` 和八字段业务身份 |
 | M5 | 真实 DINA/BKT、完整历史、版本化模型与模型驱动状态 | 使用达到治理门槛的去标识化数据训练；数据不足时明确失败 |
-| M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline |
+| M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索；提供 fail-closed 受控验证脚本 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline |
 | M7 | `PlaceholderRubricAdapter` 未配置时抛出 `MODEL_ADAPTER_UNCONFIGURED`；DeepSeek 适配器返回 `empty` | 安全、超时、限流和输出校验完成后在 M7 启用 DeepSeek API |
 | M8 | 权重组卷、冻结评分证据、真实 2PL/EAP、审核发布和受约束自适应选题 | 生产启用前提供足量作答并完成 M9 质量与教师审批 |
 | M9 | 阈值统计/规则建议、真实 IRT 质量门槛与标定审核；DeepSeek 叙述仍 `empty` | 安全、超时、限流和输出校验完成后启用 DeepSeek 教师叙述 |

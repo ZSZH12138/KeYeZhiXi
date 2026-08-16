@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import PurePath
+from typing import Protocol
 import unicodedata
 from zipfile import BadZipFile, ZipFile
 
@@ -31,6 +32,23 @@ class _ParserError(ValueError):
     """A safe, private parser failure reason for the M1 service to map."""
 
 
+class OCRTextProvider(Protocol):
+    """Injectable OCR adapter for image-only PDF pages.
+
+    The parser owns byte limits and page locators; an adapter owns the
+    environment-specific PDF rasterisation and OCR executable.
+    """
+
+    def extract_text(self, payload: bytes, *, page_number: int) -> str:
+        """Return text for one 1-based PDF page."""
+
+
+class OCRRequiredError(_ParserError):
+    """The PDF has no text layer and no OCR provider was configured."""
+
+    code = "COURSE_PDF_OCR_REQUIRED"
+
+
 @dataclass(frozen=True, slots=True)
 class ParsedBlock:
     """One normalized text block with a stable source-relative locator."""
@@ -49,7 +67,12 @@ class ParsedSource:
     blocks: tuple[ParsedBlock, ...]
 
 
-def parse_source(file_name: str, payload: bytes) -> ParsedSource:
+def parse_source(
+    file_name: str,
+    payload: bytes,
+    *,
+    ocr_provider: OCRTextProvider | None = None,
+) -> ParsedSource:
     """Parse one supported source byte sequence without accessing the host."""
 
     if not isinstance(payload, bytes):
@@ -65,7 +88,7 @@ def parse_source(file_name: str, payload: bytes) -> ParsedSource:
     if suffix == ".txt":
         return _parse_plain_text(payload, media_type="text/plain")
     if suffix == ".pdf":
-        return _parse_pdf(payload)
+        return _parse_pdf(payload, ocr_provider=ocr_provider)
     if suffix == ".docx":
         return _parse_docx(payload)
     if suffix == ".pptx":
@@ -73,9 +96,24 @@ def parse_source(file_name: str, payload: bytes) -> ParsedSource:
     raise _ParserError("unsupported source file type")
 
 
-def default_parser_registry() -> ParserRegistry:
+def default_parser_registry(
+    *,
+    ocr_provider: OCRTextProvider | None = None,
+) -> ParserRegistry:
     """Build the versioned registry for the built-in M1 byte parsers."""
 
+    pdf_parser = (
+        parse_source
+        if ocr_provider is None
+        else lambda file_name, payload: parse_source(
+            file_name,
+            payload,
+            ocr_provider=ocr_provider,
+        )
+    )
+    pdf_capabilities = frozenset({"byte-input", "paged"})
+    if ocr_provider is not None:
+        pdf_capabilities = frozenset({"byte-input", "paged", "ocr"})
     return ParserRegistry(
         (
             ParserEntry(
@@ -100,10 +138,14 @@ def default_parser_registry() -> ParserRegistry:
                 extension=".pdf",
                 media_type="application/pdf",
                 parser_version="parse-source-v1",
-                capabilities=frozenset({"byte-input", "paged"}),
+                capabilities=pdf_capabilities,
                 max_bytes=_MAX_RAW_BYTES,
-                parser=parse_source,
-                parser_id="m1.parse_source",
+                parser=pdf_parser,
+                parser_id=(
+                    "m1.parse_source"
+                    if ocr_provider is None
+                    else "m1.parse_source.ocr"
+                ),
             ),
             ParserEntry(
                 extension=".docx",
@@ -176,7 +218,11 @@ def _parse_plain_text(payload: bytes, *, media_type: str) -> ParsedSource:
     return ParsedSource(media_type=media_type, page_count=None, blocks=tuple(blocks))
 
 
-def _parse_pdf(payload: bytes) -> ParsedSource:
+def _parse_pdf(
+    payload: bytes,
+    *,
+    ocr_provider: OCRTextProvider | None = None,
+) -> ParsedSource:
     from pypdf import PdfReader
 
     try:
@@ -190,6 +236,13 @@ def _parse_pdf(payload: bytes) -> ParsedSource:
         total_text_bytes = 0
         for page_number, page in enumerate(reader.pages, start=1):
             extracted_text = _normalize_text(page.extract_text() or "")
+            if not extracted_text and ocr_provider is not None:
+                extracted_text = _normalize_text(
+                    ocr_provider.extract_text(
+                        payload,
+                        page_number=page_number,
+                    )
+                )
             page_text_bytes = len(extracted_text.encode("utf-8"))
             if page_text_bytes > _MAX_PDF_PAGE_TEXT_BYTES:
                 raise _ParserError("PDF extracted text byte limit exceeded")
@@ -206,7 +259,9 @@ def _parse_pdf(payload: bytes) -> ParsedSource:
     except Exception as error:
         raise _ParserError("PDF source could not be parsed") from error
     if not blocks:
-        raise _ParserError("source contains no text blocks")
+        raise OCRRequiredError(
+            "PDF has no text layer; configure an OCR provider before import"
+        )
     return ParsedSource(
         media_type="application/pdf",
         page_count=page_count,

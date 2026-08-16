@@ -26,6 +26,7 @@ from course_insight.modules.m1_course_governance.parser_protocol import (
     ParserRegistry,
 )
 from course_insight.modules.m1_course_governance.parsers import (
+    OCRRequiredError,
     ParsedBlock,
     ParsedSource,
 )
@@ -403,6 +404,13 @@ class M1CourseGovernanceService:
                     raise ValueError("parser media type does not match registry entry")
                 return parsed, parser.metadata()
             raise ValueError("parser did not return ParsedSource")
+        except OCRRequiredError as error:
+            raise _domain(
+                "COURSE_PDF_OCR_REQUIRED",
+                "PDF source has no text layer and requires an OCR provider",
+                file_name=path.name,
+                reason=type(error).__name__,
+            ) from error
         except Exception as error:
             raise _domain("COURSE_PARSE_FAILED", "authorized course source could not be parsed", file_name=path.name, reason=type(error).__name__) from error
 

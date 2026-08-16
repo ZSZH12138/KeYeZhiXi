@@ -42,6 +42,32 @@ DEFAULT_MIN_RECALL_AT_K = 1.0
 DEFAULT_SEED = 20260815
 DEFAULT_BATCH_SIZE = MAX_VECTOR_BATCH_SIZE
 
+
+@dataclass(frozen=True, slots=True)
+class BenchmarkProfile:
+    """Named acceptance scale; profiles never change the search algorithm."""
+
+    profile_id: str
+    chunk_count: int
+    dimension: int
+    query_count: int
+    top_k: int
+    max_p95_ms: float
+    min_recall_at_k: float
+    batch_size: int = DEFAULT_BATCH_SIZE
+    ann_enabled: bool = False
+
+
+TARGET_SCALE_PROFILE = BenchmarkProfile(
+    profile_id="m2-target-scale-v1",
+    chunk_count=50_000,
+    dimension=1_536,
+    query_count=100,
+    top_k=10,
+    max_p95_ms=DEFAULT_MAX_P95_MS,
+    min_recall_at_k=1.0,
+)
+
 # These bounds keep accidental local/CI runs finite while leaving room for a
 # realistic target-scale run in a disposable PostgreSQL database.
 MAX_CHUNK_COUNT = 100_000
@@ -121,8 +147,19 @@ class BenchmarkConfig:
     min_recall_at_k: float = DEFAULT_MIN_RECALL_AT_K
     seed: int = DEFAULT_SEED
     batch_size: int = DEFAULT_BATCH_SIZE
+    profile_id: str = "m2-bounded-v1"
+    ann_enabled: bool = False
 
     def __post_init__(self) -> None:
+        if (
+            not isinstance(self.profile_id, str)
+            or not self.profile_id
+            or self.profile_id != self.profile_id.strip()
+            or any(character in "\\/:?*<>|\"" for character in self.profile_id)
+        ):
+            raise ValueError("profile_id must be safe text")
+        if self.ann_enabled is not False:
+            raise ValueError("ANN activation is not part of the M2 acceptance benchmark")
         _validate_bounded_int(
             self.chunk_count,
             field="chunk_count",
@@ -656,6 +693,7 @@ def build_report(
         "status": status,
         "environment": _json_ready(environment_value),
         "scale": {
+            "profile_id": config.profile_id,
             "chunk_count": config.chunk_count,
             "dimension": config.dimension,
             "query_count": config.query_count,
@@ -663,6 +701,7 @@ def build_report(
             "seed": config.seed,
             "batch_size": config.batch_size,
             "workload_units": config.chunk_count * config.query_count * config.dimension,
+            "ann_enabled": config.ann_enabled,
         },
         "build_ms": _finite_or_none(build_ms),
         "p50_ms": _finite_or_none(p50_ms),
@@ -1079,6 +1118,7 @@ __all__ = [
     "BenchmarkError",
     "BenchmarkExecutionError",
     "BenchmarkIdentity",
+    "BenchmarkProfile",
     "DEFAULT_BATCH_SIZE",
     "DEFAULT_CHUNK_COUNT",
     "DEFAULT_DIMENSION",
@@ -1087,6 +1127,7 @@ __all__ = [
     "DEFAULT_QUERY_COUNT",
     "DEFAULT_SEED",
     "DEFAULT_TOP_K",
+    "TARGET_SCALE_PROFILE",
     "M2PgVectorBenchmark",
     "DisposableDatabaseTarget",
     "MAX_BATCH_SIZE",

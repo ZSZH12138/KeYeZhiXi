@@ -21,7 +21,9 @@ from course_insight.modules.m2_evidence_retrieval.performance import (
     DEFAULT_SEED,
     DEFAULT_TOP_K,
     DEFAULT_BATCH_SIZE,
+    BenchmarkProfile,
     M2PgVectorBenchmark,
+    TARGET_SCALE_PROFILE,
     build_report,
     make_benchmark_identity,
     failure_reasons_for_error,
@@ -46,33 +48,39 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument(
+        "--profile",
+        choices=("bounded", "target"),
+        default="bounded",
+        help="named governed scale profile (default: bounded)",
+    )
+    parser.add_argument(
         "--chunk-count",
-        default=str(DEFAULT_CHUNK_COUNT),
+        default=None,
         help=f"synthetic chunk count (default: {DEFAULT_CHUNK_COUNT})",
     )
     parser.add_argument(
         "--dimension",
-        default=str(DEFAULT_DIMENSION),
+        default=None,
         help=f"validated vector dimension (default: {DEFAULT_DIMENSION})",
     )
     parser.add_argument(
         "--query-count",
-        default=str(DEFAULT_QUERY_COUNT),
+        default=None,
         help=f"measured query count (default: {DEFAULT_QUERY_COUNT})",
     )
     parser.add_argument(
         "--top-k",
-        default=str(DEFAULT_TOP_K),
+        default=None,
         help=f"retrieval top-k (default: {DEFAULT_TOP_K})",
     )
     parser.add_argument(
         "--max-p95-ms",
-        default=str(DEFAULT_MAX_P95_MS),
+        default=None,
         help=f"maximum accepted P95 in milliseconds (default: {DEFAULT_MAX_P95_MS})",
     )
     parser.add_argument(
         "--min-recall-at-k",
-        default=str(DEFAULT_MIN_RECALL_AT_K),
+        default=None,
         help=(
             "minimum accepted recall at k, between 0 and 1 "
             f"(default: {DEFAULT_MIN_RECALL_AT_K})"
@@ -80,15 +88,68 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument(
         "--seed",
-        default=str(DEFAULT_SEED),
+        default=None,
         help=f"deterministic vector/query seed (default: {DEFAULT_SEED})",
     )
     parser.add_argument(
         "--batch-size",
-        default=str(DEFAULT_BATCH_SIZE),
+        default=None,
         help=f"bounded write batch size (default: {DEFAULT_BATCH_SIZE})",
     )
     return parser
+
+
+def config_from_args(args: argparse.Namespace) -> BenchmarkConfig:
+    """Resolve CLI overrides against a named scale profile."""
+
+    if args.profile == "target":
+        profile = TARGET_SCALE_PROFILE
+    else:
+        profile = BenchmarkProfile(
+            profile_id="m2-bounded-v1",
+            chunk_count=DEFAULT_CHUNK_COUNT,
+            dimension=DEFAULT_DIMENSION,
+            query_count=DEFAULT_QUERY_COUNT,
+            top_k=DEFAULT_TOP_K,
+            max_p95_ms=DEFAULT_MAX_P95_MS,
+            min_recall_at_k=DEFAULT_MIN_RECALL_AT_K,
+            batch_size=DEFAULT_BATCH_SIZE,
+        )
+    return BenchmarkConfig(
+        chunk_count=_parse_int(
+            profile.chunk_count if args.chunk_count is None else args.chunk_count,
+            "chunk_count",
+        ),
+        dimension=_parse_int(
+            profile.dimension if args.dimension is None else args.dimension,
+            "dimension",
+        ),
+        query_count=_parse_int(
+            profile.query_count if args.query_count is None else args.query_count,
+            "query_count",
+        ),
+        top_k=_parse_int(profile.top_k if args.top_k is None else args.top_k, "top_k"),
+        max_p95_ms=_parse_float(
+            profile.max_p95_ms if args.max_p95_ms is None else args.max_p95_ms,
+            "max_p95_ms",
+        ),
+        min_recall_at_k=_parse_float(
+            profile.min_recall_at_k
+            if args.min_recall_at_k is None
+            else args.min_recall_at_k,
+            "min_recall_at_k",
+        ),
+        seed=_parse_int(
+            DEFAULT_SEED if args.seed is None else args.seed,
+            "seed",
+        ),
+        batch_size=_parse_int(
+            profile.batch_size if args.batch_size is None else args.batch_size,
+            "batch_size",
+        ),
+        profile_id=profile.profile_id,
+        ann_enabled=profile.ann_enabled,
+    )
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -106,19 +167,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         _write_report(report)
         return 2
     try:
-        config = BenchmarkConfig(
-            chunk_count=_parse_int(args.chunk_count, "chunk_count"),
-            dimension=_parse_int(args.dimension, "dimension"),
-            query_count=_parse_int(args.query_count, "query_count"),
-            top_k=_parse_int(args.top_k, "top_k"),
-            max_p95_ms=_parse_float(args.max_p95_ms, "max_p95_ms"),
-            min_recall_at_k=_parse_float(
-                args.min_recall_at_k,
-                "min_recall_at_k",
-            ),
-            seed=_parse_int(args.seed, "seed"),
-            batch_size=_parse_int(args.batch_size, "batch_size"),
-        )
+        config = config_from_args(args)
     except (TypeError, ValueError) as error:
         report = _failure_report(
             BenchmarkConfig(),

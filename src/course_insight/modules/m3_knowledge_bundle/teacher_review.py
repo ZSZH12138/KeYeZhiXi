@@ -351,6 +351,11 @@ class TeacherReviewWorkflow:
             )
         return record
 
+    def get(self, review_id: str) -> TeacherReviewRecord:
+        """Return one review for a read-only teacher workflow page."""
+
+        return self._get(review_id)
+
     def publish_approved(
         self,
         review_id: str,

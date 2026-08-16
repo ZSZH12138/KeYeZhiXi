@@ -298,6 +298,11 @@ class AppCoordinator:
             misconception_seed_path=misconception_seed_path,
         )
 
+    def get_knowledge_review(self, review_id: str) -> TeacherReviewRecord:
+        """Read one M3 knowledge-package review for the teacher Web flow."""
+
+        return self._m3.get_teacher_review(review_id)
+
     def submit_knowledge_review(
         self,
         review_id: str,

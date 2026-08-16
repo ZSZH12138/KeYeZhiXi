@@ -107,6 +107,11 @@ class M3KnowledgeBundleService:
         self._require_teacher_approval = require_teacher_approval
         self._last_course_package: CoursePackage | None = None
 
+    def get_teacher_review(self, review_id: str) -> TeacherReviewRecord:
+        """Read one immutable review record without changing its state."""
+
+        return self._require_review_workflow().get(review_id)
+
     def create_teacher_review_draft(
         self,
         *,

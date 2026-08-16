@@ -8,6 +8,7 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied
 from django.http import HttpRequest, HttpResponse, QueryDict
 from django.shortcuts import redirect, render
+from django.utils import timezone
 from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods
 
@@ -27,8 +28,18 @@ from course_insight.modules.m0_platform.django_app.flow_tokens import (
     stable_flow_identifier,
     verify_flow_token,
 )
+from course_insight.modules.m0_platform.django_app.knowledge_review_flow import (
+    issue_knowledge_review_token,
+    verify_knowledge_review_token,
+)
 from course_insight.modules.m0_platform.django_app.forms.review import (
     TeacherReviewForm,
+)
+from course_insight.modules.m0_platform.django_app.forms.knowledge_review import (
+    KnowledgeReviewForm,
+)
+from course_insight.modules.m0_platform.django_app.forms.knowledge_lookup import (
+    KnowledgeReviewLookupForm,
 )
 from course_insight.modules.m0_platform.django_app.forms.start import (
     ReviewLookupForm,
@@ -39,6 +50,9 @@ from course_insight.modules.m0_platform.django_app.views.viewmodels import (
     criterion_caps,
     paper_view,
     teacher_review_view,
+)
+from course_insight.modules.m3_knowledge_bundle.teacher_review import (
+    TeacherReviewRecord,
 )
 
 
@@ -52,7 +66,10 @@ def home(request: HttpRequest) -> HttpResponse:
     return render(
         request,
         "course_insight/teacher/home.html",
-        {"lookup_form": ReviewLookupForm()},
+        {
+            "lookup_form": ReviewLookupForm(),
+            "knowledge_lookup_form": KnowledgeReviewLookupForm(),
+        },
     )
 
 
@@ -289,6 +306,135 @@ def review(
     )
 
 
+@login_required
+@require_GET
+def knowledge_lookup(request: HttpRequest) -> HttpResponse:
+    form = KnowledgeReviewLookupForm(data=request.GET)
+    if not form.is_valid():
+        return render(
+            request,
+            "course_insight/teacher/home.html",
+            {
+                "lookup_form": ReviewLookupForm(),
+                "knowledge_lookup_form": form,
+            },
+            status=400,
+        )
+    course_id = str(form.cleaned_data["course_id"])
+    class_id = str(form.cleaned_data["class_id"])
+    _authorize_teacher(
+        request,
+        "view_class_analytics",
+        course_id=course_id,
+        class_id=class_id,
+    )
+    return redirect(
+        "teacher-knowledge-review",
+        course_id=course_id,
+        class_id=class_id,
+        review_id=str(form.cleaned_data["review_id"]),
+    )
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def knowledge_review(
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+    review_id: str,
+) -> HttpResponse:
+    """Review M3 knowledge-package governance state through a signed flow."""
+
+    _authorize_teacher(
+        request,
+        "view_class_analytics",
+        course_id=course_id,
+        class_id=class_id,
+    )
+    _authorize_teacher(
+        request,
+        "review_score",
+        course_id=course_id,
+        class_id=class_id,
+    )
+    web_runtime = runtime.get_web_runtime()
+    course = web_runtime.require_course(course_id)
+    review_record = _knowledge_review_record(web_runtime, review_id)
+    package = getattr(course.course_context, "course_package", None)
+    package_id = getattr(package, "course_package_id", None)
+    if not isinstance(package_id, str) or review_record.subject_id != package_id:
+        raise DomainError(
+            code="M3_REVIEW_NOT_FOUND",
+            module="m3",
+            message="knowledge review does not belong to this course",
+            recoverable=True,
+        )
+    if request.method == "GET":
+        flow = issue_knowledge_review_token(
+            actor_id=request.user.actor_id,
+            course_id=course_id,
+            class_id=class_id,
+            review_id=review_id,
+            review_version=review_record.version,
+        )
+        return _render_knowledge_review(
+            request,
+            review=review_record,
+            flow=flow,
+            form=KnowledgeReviewForm(
+                initial={"action": _default_knowledge_action(review_record.state)},
+                allowed_actions=_knowledge_actions(review_record.state),
+            ),
+        )
+
+    flow = _single_flow_value(request.POST)
+    verify_knowledge_review_token(
+        flow,
+        actor_id=request.user.actor_id,
+        course_id=course_id,
+        class_id=class_id,
+        review_id=review_id,
+        review_version=review_record.version,
+        max_age_seconds=web_runtime.container.settings.web.session_timeout_seconds,
+    )
+    form = KnowledgeReviewForm(
+        data=_without_flow(request.POST),
+        allowed_actions=_knowledge_actions(review_record.state),
+    )
+    if not form.is_valid():
+        return _render_knowledge_review(
+            request,
+            review=review_record,
+            flow=flow,
+            form=form,
+            status=400,
+        )
+    action = str(form.cleaned_data["action"])
+    reason = str(form.cleaned_data["reason"])
+    method = getattr(web_runtime.container.coordinator, f"{action}_knowledge_review", None)
+    if not callable(method):
+        raise DomainError(
+            code="M3_REVIEW_ACTION_INVALID",
+            module="m3",
+            message="knowledge review action is unavailable",
+            recoverable=True,
+        )
+    method(
+        review_id,
+        request.user.actor_id,
+        reason,
+        review_record.version,
+        timezone.now(),
+    )
+    return redirect(
+        "teacher-knowledge-review",
+        course_id=course_id,
+        class_id=class_id,
+        review_id=review_id,
+    )
+
+
 def _teacher_context(
     *,
     course_id: str,
@@ -362,6 +508,68 @@ def _render_review(
             "review": teacher_review_view(paper, audit, analytics),
             "form": form,
             "flow": flow,
+        },
+        status=status,
+    )
+
+
+def _knowledge_review_record(web_runtime: object, review_id: str) -> TeacherReviewRecord:
+    try:
+        value = web_runtime.container.coordinator.get_knowledge_review(
+            review_id=review_id
+        )
+    except AttributeError as error:
+        raise DomainError(
+            code="M3_REVIEW_NOT_FOUND",
+            module="m3",
+            message="knowledge review is unavailable",
+            recoverable=True,
+        ) from error
+    if type(value) is not TeacherReviewRecord:
+        raise DomainError(
+            code="WEB_RESPONSE_INVALID",
+            module="m0",
+            message="knowledge review response is invalid",
+        )
+    return value
+
+
+def _default_knowledge_action(state: str) -> str:
+    return {
+        "draft": "submit",
+        "submitted": "approve",
+        "approved": "recall",
+        "rejected": "recall",
+        "recalled": "",
+    }.get(state, "")
+
+
+def _knowledge_actions(state: str) -> tuple[str, ...]:
+    return {
+        "draft": ("submit",),
+        "submitted": ("approve", "reject"),
+        "approved": ("recall",),
+        "rejected": ("recall",),
+        "recalled": (),
+    }.get(state, ())
+
+
+def _render_knowledge_review(
+    request: HttpRequest,
+    *,
+    review: TeacherReviewRecord,
+    flow: str,
+    form: KnowledgeReviewForm,
+    status: int = 200,
+) -> HttpResponse:
+    return render(
+        request,
+        "course_insight/teacher/knowledge_review.html",
+        {
+            "review": review,
+            "flow": flow,
+            "form": form,
+            "can_change": bool(_knowledge_actions(review.state)),
         },
         status=status,
     )

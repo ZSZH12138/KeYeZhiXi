@@ -61,7 +61,11 @@ from course_insight.modules.m0_platform.service import M0PlatformService
 from course_insight.modules.m0_platform.outbox import IdempotentJsonlSink
 from course_insight.modules.m0_platform.outbox_worker import OutboxWorker
 from course_insight.modules.m1_course_governance.repository import M1Repository
-from course_insight.modules.m1_course_governance.parsers import parse_source
+from course_insight.modules.m1_course_governance.parsers import (
+    OCRTextProvider,
+    default_parser_registry,
+    parse_source,
+)
 from course_insight.modules.m1_course_governance.service import (
     M1CourseGovernanceService,
 )
@@ -190,6 +194,7 @@ class ServiceOverrides:
 
     m0: M0PlatformService | None = None
     m1: M1CourseGovernanceService | None = None
+    ocr_provider: OCRTextProvider | None = None
     m2: M2EvidenceRetrievalService | None = None
     reranker: Callable[[RetrievalCandidate], float] | None = None
     m3: M3KnowledgeBundleService | None = None
@@ -415,13 +420,17 @@ def _assemble_application(
     )
     m1 = (
         M1CourseGovernanceService(
-            {
-                ".md": parse_source,
-                ".txt": parse_source,
-                ".pdf": parse_source,
-                ".docx": parse_source,
-                ".pptx": parse_source,
-            },
+            (
+                default_parser_registry(ocr_provider=service_overrides.ocr_provider)
+                if service_overrides.ocr_provider is not None
+                else {
+                    ".md": parse_source,
+                    ".txt": parse_source,
+                    ".pdf": parse_source,
+                    ".docx": parse_source,
+                    ".pptx": parse_source,
+                }
+            ),
             _sha256,
             cast(M1Repository, m1_repository),
         )

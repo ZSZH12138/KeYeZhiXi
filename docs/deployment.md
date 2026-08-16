@@ -882,3 +882,14 @@ checksum 和 manifest checksum，再在一个事务中发布；同身份同内�
 真实 PostgreSQL+pgvector 还需设置专用、可销毁的
 `COURSE_INSIGHT_TEST_DATABASE_URL` 和匹配的 `COURSE_INSIGHT_TEST_DATABASE_NAME`。
 若环境未提供它们，live 用例只能 skip，验收报告必须明确“未执行真实数据库联调”。
+
+本阶段还提供两个只读检查入口：
+
+```powershell
+.venv\Scripts\python.exe -m scripts.verify_m6_controlled_rollout --evidence evidence.json
+.venv\Scripts\python.exe -m scripts.check_production_readiness --settings production-facts.json
+```
+
+前者在证据缺失或门禁不完整时返回 `blocked`，保持 M6 rules/零 rollout；后者检查
+生产环境、PostgreSQL+pgvector、迁移、主机和安全 cookie 等事实。两个命令都不修改
+数据库、不发布策略，也不实现 M7/M9。

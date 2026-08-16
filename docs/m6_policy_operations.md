@@ -124,6 +124,11 @@ Artifact 可以携带额外 action 参数，但 `SafetyEnvelope` 永远不会把
 
 ## Promotion 前检查
 
+仓库提供 `python -m scripts.verify_m6_controlled_rollout --evidence <json>` 作为
+受控验证入口。证据缺失、OPE 未达到 `sufficient_data`、没有治理批准、模式不是
+`rules` 或 rollout 非零都会返回 `status=blocked`；脚本只输出脱敏结果，不会训练、
+发布策略，也不会接入 M7/M9。
+
 仓库当前没有训练、manifest 注册或 promotion 的公共 CLI/管理页。制品和私有
 Repository 记录必须由另行受审计的治理/发布流程写入；不要用手工 SQL 绕过
 dataclass、canonical JSON 和 insert-or-verify 校验。
