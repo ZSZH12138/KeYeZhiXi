@@ -455,6 +455,7 @@ def _review() -> TeacherReviewDecision:
         decision_id="decision_1",
         audit_id="audit_attempt_1",
         expected_audit_version=1,
+        expected_audit_checksum=_audit().content_checksum(),
         decision="confirm",
         final_total_score=1.0,
         criterion_overrides=[],
@@ -662,7 +663,7 @@ def test_m5_forward_migration_preserves_all_legacy_v3_state_versions(
 
         migrate(connection)
         migrate(connection)
-        assert SCHEMA_VERSION == 13
+        assert SCHEMA_VERSION == 15
         assert current_schema_version(connection) == SCHEMA_VERSION
         assert (
             connection.execute(
@@ -966,7 +967,15 @@ def test_m8_recovers_paper_scope_and_complete_scoring_bundle(
     assert "unavailable" not in bundle.learning_events[0].course_id
     assert restarted_repository.get_scoring_result("attempt_1") == bundle
 
-    conflict = bundle.model_copy(update={"finalized_at": NOW.replace(hour=9)})
+    conflict = bundle.model_copy(
+        update={
+            "learning_events": [
+                bundle.learning_events[0].model_copy(
+                    update={"payload": {"paper_id": "different_paper"}}
+                )
+            ]
+        }
+    )
     with pytest.raises(RuntimeError, match="conflict"):
         restarted_repository.insert_or_get_scoring_result(conflict)
 

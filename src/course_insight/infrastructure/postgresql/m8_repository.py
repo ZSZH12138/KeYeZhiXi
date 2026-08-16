@@ -15,12 +15,32 @@ from course_insight.contracts.assessment import (
     ScoringResultBundle,
 )
 from course_insight.contracts.base import ContractModel
+from course_insight.contracts.learning_models import (
+    AbilityEstimate,
+    AdaptiveSelectionResult,
+    CalibrationReviewDecision,
+    CalibrationRunResult,
+    IRTParameterSet,
+)
 from course_insight.infrastructure.json_io import dumps_json
+from course_insight.infrastructure.postgresql import m8_model_runtime
 from course_insight.infrastructure.postgresql.base import (
     PostgresError,
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.modules.m8_assessment_scoring.paper_record import (
+    FrozenAssessmentRecord,
+)
+from course_insight.modules.m8_assessment_scoring.repository import (
+    ReviewVersionConflictError,
+    assert_review_transition,
+)
+from course_insight.modules.m8_assessment_scoring.retry_equivalence import (
+    same_paper_generation,
+    same_score_audit_result,
+    same_scoring_result,
+)
 
 
 _OPERATION_ERROR = "PostgreSQL repository operation failed"
@@ -59,6 +79,12 @@ payload,
 payload_checksum,
 schema_version
 """
+_PAPER_RECORD_COLUMNS = """
+paper_id,
+payload,
+payload_checksum,
+schema_version
+"""
 
 
 class PostgresM8Repository:
@@ -84,57 +110,94 @@ class PostgresM8Repository:
         try:
             with self._pool.connection() as connection:
                 with connection.transaction():
-                    connection.execute(
-                        """
-                        INSERT INTO m8_assessment_papers(
-                            paper_id,
-                            task_id,
-                            course_id,
-                            class_id,
-                            learner_id,
-                            payload,
-                            payload_checksum,
-                            schema_version
-                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
-                        ON CONFLICT DO NOTHING
-                        """,
-                        (
-                            candidate.paper_id,
-                            candidate.task_id,
-                            course_id,
-                            class_id,
-                            candidate.learner_id,
-                            Jsonb(candidate.to_dict()),
-                            candidate.content_checksum(),
-                            candidate.schema_version,
-                        ),
+                    return _insert_or_validate_paper(
+                        connection,
+                        candidate,
+                        course_id=course_id,
+                        class_id=class_id,
                     )
-                    row = connection.execute(
-                        f"""
-                        SELECT {_PAPER_COLUMNS}
-                        FROM m8_assessment_papers
-                        WHERE paper_id = %s OR task_id = %s
-                        ORDER BY
-                            CASE WHEN paper_id = %s THEN 0 ELSE 1 END
-                        LIMIT 1
-                        """,
-                        (
-                            candidate.paper_id,
-                            candidate.task_id,
-                            candidate.paper_id,
-                        ),
-                    ).fetchone()
-                    stored = _paper_from_row(row)
-                    stored_scope = (
-                        _required_text(row, "course_id"),
-                        _required_text(row, "class_id"),
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def insert_or_get_paper_record(
+        self,
+        record: FrozenAssessmentRecord,
+    ) -> FrozenAssessmentRecord:
+        """Persist one append-only paper, scope, and rubric record."""
+
+        candidate = _isolated_contract(record, FrozenAssessmentRecord)
+        try:
+            with self._pool.connection() as connection:
+                with connection.transaction():
+                    authoritative_paper = _insert_or_validate_paper(
+                        connection,
+                        candidate.paper,
+                        course_id=candidate.course_id,
+                        class_id=candidate.class_id,
                     )
                     if (
-                        stored != candidate
-                        or stored_scope != (course_id, class_id)
+                        authoritative_paper != candidate.paper
+                        and not same_paper_generation(
+                            authoritative_paper,
+                            candidate.paper,
+                        )
                     ):
                         raise PostgresOperationError(_CONFLICT_ERROR)
-                    return stored
+                    authoritative_record = candidate.model_copy(
+                        update={"paper": authoritative_paper},
+                        deep=True,
+                    )
+                    return _insert_or_validate_paper_record(
+                        connection,
+                        authoritative_record,
+                    )
+        except PostgresError:
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def get_paper_record(
+        self,
+        paper_id: str,
+    ) -> FrozenAssessmentRecord | None:
+        """Load the exact frozen evidence retained for one paper."""
+
+        try:
+            with self._pool.connection() as connection:
+                row = connection.execute(
+                    f"""
+                    SELECT {_PAPER_RECORD_COLUMNS}
+                    FROM m8_frozen_assessment_records
+                    WHERE paper_id = %s
+                    """,
+                    (paper_id,),
+                ).fetchone()
+                if row is None:
+                    return None
+                record = _paper_record_from_row(row)
+                if record.paper.paper_id != paper_id:
+                    raise PostgresOperationError(_INTEGRITY_ERROR)
+                paper_row = connection.execute(
+                    f"""
+                    SELECT {_PAPER_COLUMNS}
+                    FROM m8_assessment_papers
+                    WHERE paper_id = %s
+                    """,
+                    (paper_id,),
+                ).fetchone()
+                if (
+                    paper_row is None
+                    or _paper_from_row(paper_row) != record.paper
+                    or (
+                        _required_text(paper_row, "course_id"),
+                        _required_text(paper_row, "class_id"),
+                    )
+                    != (record.course_id, record.class_id)
+                ):
+                    raise PostgresOperationError(_INTEGRITY_ERROR)
+                return record
         except PostgresError:
             raise
         except psycopg.Error:
@@ -286,7 +349,10 @@ class PostgresM8Repository:
                         (candidate.attempt_id, result_key),
                     ).fetchone()
                     stored = _scoring_from_row(row)
-                    if stored != candidate:
+                    if stored != candidate and not same_scoring_result(
+                        stored,
+                        candidate,
+                    ):
                         raise PostgresOperationError(_CONFLICT_ERROR)
                     return stored
         except PostgresError:
@@ -352,6 +418,122 @@ class PostgresM8Repository:
                 return bundle
         return None
 
+    def insert_or_get_calibration_run(
+        self,
+        result: CalibrationRunResult,
+        *,
+        course_id: str,
+    ) -> CalibrationRunResult:
+        return m8_model_runtime.insert_or_get_calibration_run(
+            self._pool,
+            result,
+            course_id=course_id,
+        )
+
+    def get_calibration_run(
+        self,
+        run_id: str,
+    ) -> CalibrationRunResult | None:
+        return m8_model_runtime.get_calibration_run(self._pool, run_id)
+
+    def get_calibration_run_course_id(self, run_id: str) -> str | None:
+        return m8_model_runtime.get_calibration_run_course_id(
+            self._pool,
+            run_id,
+        )
+
+    def insert_or_get_parameter_set(
+        self,
+        parameter_set: IRTParameterSet,
+        *,
+        course_id: str,
+    ) -> IRTParameterSet:
+        return m8_model_runtime.insert_or_get_parameter_set(
+            self._pool,
+            parameter_set,
+            course_id=course_id,
+        )
+
+    def get_parameter_set(
+        self,
+        parameter_set_id: str,
+    ) -> IRTParameterSet | None:
+        return m8_model_runtime.get_parameter_set(self._pool, parameter_set_id)
+
+    def get_parameter_set_course_id(self, parameter_set_id: str) -> str | None:
+        return m8_model_runtime.get_parameter_set_course_id(
+            self._pool,
+            parameter_set_id,
+        )
+
+    def list_parameter_sets(self, *, course_id: str) -> list[IRTParameterSet]:
+        return m8_model_runtime.list_parameter_sets(
+            self._pool,
+            course_id=course_id,
+        )
+
+    def insert_or_get_calibration_review(
+        self,
+        decision: CalibrationReviewDecision,
+        reviewed_parameter_set: IRTParameterSet,
+        *,
+        course_id: str,
+    ) -> tuple[CalibrationReviewDecision, IRTParameterSet]:
+        return m8_model_runtime.insert_or_get_calibration_review(
+            self._pool,
+            decision,
+            reviewed_parameter_set,
+            course_id=course_id,
+        )
+
+    def get_calibration_review(
+        self,
+        calibration_run_id: str,
+    ) -> CalibrationReviewDecision | None:
+        return m8_model_runtime.get_calibration_review(
+            self._pool,
+            calibration_run_id,
+        )
+
+    def insert_or_get_ability_estimate(
+        self,
+        estimate: AbilityEstimate,
+        *,
+        course_id: str,
+    ) -> AbilityEstimate:
+        return m8_model_runtime.insert_or_get_ability_estimate(
+            self._pool,
+            estimate,
+            course_id=course_id,
+        )
+
+    def get_ability_estimate(
+        self,
+        estimate_id: str,
+    ) -> AbilityEstimate | None:
+        return m8_model_runtime.get_ability_estimate(self._pool, estimate_id)
+
+    def insert_or_get_adaptive_selection(
+        self,
+        selection: AdaptiveSelectionResult,
+        *,
+        course_id: str,
+    ) -> AdaptiveSelectionResult:
+        return m8_model_runtime.insert_or_get_adaptive_selection(
+            self._pool,
+            selection,
+            course_id=course_id,
+        )
+
+    def get_adaptive_selection(
+        self,
+        selection_id: str,
+    ) -> AdaptiveSelectionResult | None:
+        return m8_model_runtime.get_adaptive_selection(
+            self._pool,
+            selection_id,
+        )
+
     def _scoring_history(
         self,
         attempt_id: str,
@@ -372,6 +554,242 @@ class PostgresM8Repository:
             raise
         except psycopg.Error:
             raise PostgresOperationError(_OPERATION_ERROR) from None
+
+    def insert_or_get_reviewed_scoring_result(
+        self,
+        bundle: ScoringResultBundle,
+        *,
+        audit_id: str,
+        expected_audit_version: int,
+        expected_audit_checksum: str,
+    ) -> ScoringResultBundle:
+        """Lock the review base, compare its checksum, and append one winner."""
+
+        candidate = _isolated_contract(bundle, ScoringResultBundle)
+        candidate.validate_business_rules()
+        result_key = _result_key(candidate)
+        try:
+            with self._pool.connection() as connection:
+                with connection.transaction():
+                    base_row = connection.execute(
+                        f"""
+                        SELECT {_AUDIT_COLUMNS}
+                        FROM m8_score_audits
+                        WHERE audit_id = %s AND audit_version = %s
+                        FOR UPDATE
+                        """,
+                        (audit_id, expected_audit_version),
+                    ).fetchone()
+                    if base_row is None:
+                        raise ReviewVersionConflictError(
+                            "review base audit is unavailable"
+                        )
+                    if (
+                        _audit_from_row(base_row).content_checksum()
+                        != expected_audit_checksum
+                    ):
+                        raise ReviewVersionConflictError(
+                            "review base audit checksum changed"
+                        )
+
+                    existing_row = connection.execute(
+                        f"""
+                        SELECT {_SCORING_COLUMNS}
+                        FROM m8_scoring_results
+                        WHERE attempt_id = %s AND result_key = %s
+                        """,
+                        (candidate.attempt_id, result_key),
+                    ).fetchone()
+                    if existing_row is not None:
+                        stored = _scoring_from_row(existing_row)
+                        if stored != candidate and not same_scoring_result(
+                            stored,
+                            candidate,
+                        ):
+                            raise ReviewVersionConflictError(
+                                "review result vector has a different winner"
+                            )
+                        return stored
+
+                    current_audit_row = connection.execute(
+                        f"""
+                        SELECT {_AUDIT_COLUMNS}
+                        FROM m8_score_audits
+                        WHERE audit_id = %s
+                        ORDER BY audit_version DESC
+                        LIMIT 1
+                        """,
+                        (audit_id,),
+                    ).fetchone()
+                    if current_audit_row is None:
+                        raise ReviewVersionConflictError(
+                            "review base audit is unavailable"
+                        )
+                    current_audit = _audit_from_row(current_audit_row)
+                    if (
+                        current_audit.audit_version
+                        != expected_audit_version
+                        or current_audit.content_checksum()
+                        != expected_audit_checksum
+                    ):
+                        raise ReviewVersionConflictError(
+                            "review base audit version or checksum changed"
+                        )
+
+                    current_row = connection.execute(
+                        f"""
+                        SELECT {_SCORING_COLUMNS}
+                        FROM m8_scoring_results
+                        WHERE attempt_id = %s
+                        ORDER BY finalized_at DESC, result_key DESC
+                        LIMIT 1
+                        FOR UPDATE
+                        """,
+                        (candidate.attempt_id,),
+                    ).fetchone()
+                    if current_row is None:
+                        raise ReviewVersionConflictError(
+                            "review base scoring result is unavailable"
+                        )
+                    assert_review_transition(
+                        _scoring_from_row(current_row),
+                        candidate,
+                        audit_id=audit_id,
+                        expected_audit_version=expected_audit_version,
+                        expected_audit_checksum=expected_audit_checksum,
+                    )
+                    for record in candidate.score_audit_records:
+                        _insert_or_validate_audit(connection, record)
+                    connection.execute(
+                        """
+                        INSERT INTO m8_scoring_results(
+                            attempt_id, result_key, paper_id, learner_id,
+                            finalized_at, payload, payload_checksum,
+                            schema_version
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (attempt_id, result_key) DO NOTHING
+                        """,
+                        (
+                            candidate.attempt_id,
+                            result_key,
+                            candidate.paper_id,
+                            candidate.learner_id,
+                            candidate.finalized_at,
+                            Jsonb(candidate.to_dict()),
+                            candidate.content_checksum(),
+                            candidate.schema_version,
+                        ),
+                    )
+                    stored_row = connection.execute(
+                        f"""
+                        SELECT {_SCORING_COLUMNS}
+                        FROM m8_scoring_results
+                        WHERE attempt_id = %s AND result_key = %s
+                        """,
+                        (candidate.attempt_id, result_key),
+                    ).fetchone()
+                    stored = _scoring_from_row(stored_row)
+                    if stored != candidate and not same_scoring_result(
+                        stored,
+                        candidate,
+                    ):
+                        raise ReviewVersionConflictError(
+                            "persisted review differs from the requested result"
+                        )
+                    return stored
+        except (PostgresError, ReviewVersionConflictError):
+            raise
+        except psycopg.Error:
+            raise PostgresOperationError(_OPERATION_ERROR) from None
+
+
+def _insert_or_validate_paper(
+    connection: Any,
+    candidate: AssessmentPaper,
+    *,
+    course_id: str,
+    class_id: str,
+) -> AssessmentPaper:
+    connection.execute(
+        """
+        INSERT INTO m8_assessment_papers(
+            paper_id,
+            task_id,
+            course_id,
+            class_id,
+            learner_id,
+            payload,
+            payload_checksum,
+            schema_version
+        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s)
+        ON CONFLICT DO NOTHING
+        """,
+        (
+            candidate.paper_id,
+            candidate.task_id,
+            course_id,
+            class_id,
+            candidate.learner_id,
+            Jsonb(candidate.to_dict()),
+            candidate.content_checksum(),
+            candidate.schema_version,
+        ),
+    )
+    row = connection.execute(
+        f"""
+        SELECT {_PAPER_COLUMNS}
+        FROM m8_assessment_papers
+        WHERE paper_id = %s OR task_id = %s
+        ORDER BY CASE WHEN paper_id = %s THEN 0 ELSE 1 END
+        LIMIT 1
+        """,
+        (candidate.paper_id, candidate.task_id, candidate.paper_id),
+    ).fetchone()
+    stored = _paper_from_row(row)
+    stored_scope = (
+        _required_text(row, "course_id"),
+        _required_text(row, "class_id"),
+    )
+    if stored_scope != (course_id, class_id) or (
+        stored != candidate and not same_paper_generation(stored, candidate)
+    ):
+        raise PostgresOperationError(_CONFLICT_ERROR)
+    return stored
+
+
+def _insert_or_validate_paper_record(
+    connection: Any,
+    candidate: FrozenAssessmentRecord,
+) -> FrozenAssessmentRecord:
+    connection.execute(
+        """
+        INSERT INTO m8_frozen_assessment_records(
+            paper_id,
+            payload,
+            payload_checksum,
+            schema_version
+        ) VALUES (%s, %s, %s, %s)
+        ON CONFLICT (paper_id) DO NOTHING
+        """,
+        (
+            candidate.paper.paper_id,
+            Jsonb(candidate.to_dict()),
+            candidate.content_checksum(),
+            candidate.schema_version,
+        ),
+    )
+    row = connection.execute(
+        f"""
+        SELECT {_PAPER_RECORD_COLUMNS}
+        FROM m8_frozen_assessment_records
+        WHERE paper_id = %s
+        """,
+        (candidate.paper.paper_id,),
+    ).fetchone()
+    stored = _paper_record_from_row(row)
+    if stored != candidate:
+        raise PostgresOperationError(_CONFLICT_ERROR)
+    return stored
 
 
 def _insert_or_validate_audit(
@@ -408,7 +826,10 @@ def _insert_or_validate_audit(
         """,
         (candidate.audit_id, candidate.audit_version),
     ).fetchone()
-    if row is None or _audit_from_row(row) != candidate:
+    if row is None:
+        raise PostgresOperationError(_CONFLICT_ERROR)
+    stored = _audit_from_row(row)
+    if stored != candidate and not same_score_audit_result(stored, candidate):
         raise PostgresOperationError(_CONFLICT_ERROR)
 
 
@@ -444,6 +865,24 @@ def _paper_from_row(row: Mapping[str, Any] | None) -> AssessmentPaper:
         _required_text(row, "course_id")
         _required_text(row, "class_id")
         return paper
+    except PostgresError:
+        raise
+    except Exception:
+        raise PostgresOperationError(_INTEGRITY_ERROR) from None
+
+
+def _paper_record_from_row(
+    row: Mapping[str, Any] | None,
+) -> FrozenAssessmentRecord:
+    record = _contract_from_row(
+        row,
+        FrozenAssessmentRecord,
+        label="paper record",
+    )
+    try:
+        if record.paper.paper_id != _required_text(row, "paper_id"):
+            raise ValueError
+        return record
     except PostgresError:
         raise
     except Exception:

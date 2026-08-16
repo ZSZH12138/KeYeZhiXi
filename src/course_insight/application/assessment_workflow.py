@@ -29,10 +29,12 @@ from course_insight.application.assessment_results import (
     validate_decision,
 )
 from course_insight.application.retrieval import retrieve_for_application
+from course_insight.contracts.assessment import ScoringResultBundle
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef
 from course_insight.contracts.knowledge import KnowledgeBundle
+from course_insight.contracts.learning_models import LearningObservationBatch
 from course_insight.contracts.platform import (
     AssessmentSubmission,
     TeacherReviewSubmission,
@@ -324,6 +326,9 @@ class AssessmentWorkflow:
                         expected_policy_checksum=(
                             expected_state_policy_checksum
                         ),
+                        learning_observation_batch=(
+                            self._build_observation_batch(scoring)
+                        ),
                     ),
                 )
             if run.checkpoint == "state_inputs_frozen":
@@ -592,8 +597,12 @@ class AssessmentWorkflow:
                 self._m0.append_learning_events(reviewed.learning_events)
                 run = self._advance(run, "events_appended")
 
+            review_rejected = (
+                reviewed.get_audit_record(decision.audit_id).review_status
+                == "rejected"
+            )
             state = self._results.exact_state(run)
-            if state is None:
+            if state is None and not review_rejected:
                 state = self._m5.get_state_update_for_audit(
                     run.attempt_id,
                     decision.audit_id,
@@ -610,7 +619,16 @@ class AssessmentWorkflow:
                     learner=previous_state.learner_state_snapshot,
                     class_state=previous_state.class_state_snapshot,
                 )
-            if state is None or review_key not in state.processed_audit_ids:
+            if review_rejected and state is None:
+                state = self._results.exact_state(base_run)
+                require_results(state)
+            if (
+                not review_rejected
+                and (
+                    state is None
+                    or review_key not in state.processed_audit_ids
+                )
+            ):
                 if run.checkpoint != "state_inputs_frozen":
                     missing("review state result is unavailable")
                 previous_learner, previous_class = (
@@ -631,6 +649,9 @@ class AssessmentWorkflow:
                         state_policy_path=state_policy_path,
                         expected_policy_checksum=(
                             expected_state_policy_checksum
+                        ),
+                        learning_observation_batch=(
+                            self._build_observation_batch(reviewed)
                         ),
                     ),
                 )
@@ -732,6 +753,15 @@ class AssessmentWorkflow:
                 **dependencies.as_run_fields(),
             )
         )
+
+    def _build_observation_batch(
+        self,
+        scoring: ScoringResultBundle,
+    ) -> LearningObservationBatch | None:
+        builder = getattr(self._m8, "build_observation_batch", None)
+        if not callable(builder):
+            return None
+        return builder(scoring.paper_id, scoring)
 
     def _claim(self, run: AssessmentRun, worker_id: str) -> AssessmentRun:
         return self._recovery.claim(

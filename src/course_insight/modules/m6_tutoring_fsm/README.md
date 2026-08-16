@@ -22,7 +22,7 @@ LinUCB 制品、奖励、去标识离线数据、OPE 和 SQLite/PostgreSQL 持�
   `StateUpdateResult`，以及可选的前版 `SessionStateSnapshot`。
 - 公开输出：`TutoringControlResult`。其中 `TaskPlan.course_package_id` 原样进入
   M2 `EvidenceQuery`，`FeedbackGenerationTask` 直接进入 M7。
-- `M6TutoringControlService.decide_next_action(...)` 的四输入签名、84 个公共
+- `M6TutoringControlService.decide_next_action(...)` 的四输入签名、91 个公共
   schema 和 contract provenance 均未改变。
 - `prepare_policy_execution(...) -> PolicyExecutionRef` 是 M0/应用层内部的
   first-writer 冻结入口；直接调用公开方法时会惰性准备同一 binding。
@@ -143,7 +143,8 @@ core migrations。
   policy freeze 字段。
 
 M4 intent 已占用 schema v10/v11，且这些已发布 migration 保持不变。M6 policy
-与 M0 freeze 因此安全顺延到 v12/v13；当前 bundled schema 总版本是 v13。
+与 M0 freeze 因此安全顺延到 v12/v13；后续 M5/M8 追加 v14/v15，当前 bundled
+schema 总版本是 v15。
 数据库高于应用支持版本时拒绝启动；项目不自动破坏性降级，回退旧应用前必须停写
 并恢复匹配备份。
 

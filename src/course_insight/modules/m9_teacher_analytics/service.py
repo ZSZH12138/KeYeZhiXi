@@ -28,7 +28,13 @@ from course_insight.contracts.platform import TeacherReviewSubmission
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.deepseek import EmptyDeepSeekAdapter
 from course_insight.infrastructure.json_io import read_json
-from course_insight.modules.m9_teacher_analytics.repository import M9Repository
+from course_insight.modules.m9_teacher_analytics.model_quality import (
+    build_calibration_quality_report,
+)
+from course_insight.modules.m9_teacher_analytics.repository import (
+    M9Repository,
+    ReviewDecisionConflictError,
+)
 from course_insight.modules.m9_teacher_analytics.reports import (
     build_class_report,
     build_individual_report,
@@ -114,22 +120,19 @@ class M9TeacherAnalyticsService:
         calibration_result: CalibrationRunResult,
         requested_at: datetime,
     ) -> ModelQualityReport:
-        """Return an insufficient-data report for empty IRT calibration.
+        """Evaluate one IRT calibration for teacher approval.
 
         原始输入：M8 标定结果和质量检查请求时间。
         契约来源：CalibrationRunResult 与 ModelQualityReport。
         返回消费者：AppCoordinator、教师复核和后续模型发布门。
-        业务校验：空标定不得声明质量指标或可发布状态。
-        错误码：无；当前空实现固定返回 insufficient_data。
+        业务校验：空标定不得声明指标；只有收敛、覆盖、参数稳定性和信息量
+        同时达标的 shadow 标定才能返回 ready。
+        错误码：无；未达门槛返回 failed 或 insufficient_data。
         """
 
-        return ModelQualityReport(
-            report_id=f"quality_empty_{calibration_result.run_id}",
-            subject_ref=calibration_result.parameter_set.parameter_set_id,
-            metrics={},
-            observation_count=calibration_result.parameter_set.sample_size,
-            status="insufficient_data",
-            generated_at=requested_at,
+        return build_calibration_quality_report(
+            calibration_result,
+            requested_at,
         )
 
     def build_teacher_analytics(
@@ -308,6 +311,9 @@ class M9TeacherAnalyticsService:
                     expected_audit_version=(
                         raw_review_path.expected_audit_version
                     ),
+                    expected_audit_checksum=(
+                        raw_review_path.expected_audit_checksum
+                    ),
                     decision=raw_review_path.decision,
                     final_total_score=raw_review_path.final_total_score,
                     criterion_overrides=[
@@ -361,10 +367,30 @@ class M9TeacherAnalyticsService:
             None,
         )
         if callable(insert_or_get):
-            authoritative = insert_or_get(decision.model_copy(deep=True))
+            try:
+                authoritative = insert_or_get(decision.model_copy(deep=True))
+            except ReviewDecisionConflictError as error:
+                raise DomainError(
+                    code="REVIEW_VERSION_CONFLICT",
+                    module="m9",
+                    message=(
+                        "another teacher decision already reviewed this audit version"
+                    ),
+                    details={
+                        "audit_id": decision.audit_id,
+                        "expected_audit_version": (
+                            decision.expected_audit_version
+                        ),
+                    },
+                    recoverable=True,
+                ) from error
             if authoritative != decision:
-                raise RuntimeError(
-                    "M9 persisted teacher review conflicts with result"
+                raise DomainError(
+                    code="REVIEW_VERSION_CONFLICT",
+                    module="m9",
+                    message="persisted teacher review conflicts with the request",
+                    details={"audit_id": decision.audit_id},
+                    recoverable=True,
                 )
             return authoritative.model_copy(deep=True)
         saver = getattr(self._repository, "save_review_decision", None)

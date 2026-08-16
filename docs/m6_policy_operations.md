@@ -11,7 +11,7 @@ JSON-only LinUCB 制品校验、奖励关联、去标识离线数据、OPE、SQL
 治理批准、线上 rollout 或真实 PostgreSQL live migration 验证。本文不声称
 `active` 已具备生产启用条件，也不声称任何学习策略优于确定性 baseline。
 
-M6 的策略制品、执行、观测、奖励和评估均为私有模型，不进入 84 个公共 Pydantic
+M6 的策略制品、执行、观测、奖励和评估均为私有模型，不进入 91 个公共 Pydantic
 契约。`M6TutoringControlService.decide_next_action(...)` 仍保留四个公开输入，
 公共输出仍是 `TutoringControlResult`。
 
@@ -266,17 +266,20 @@ OPE 是依赖 logging propensity、direct estimate 和数据覆盖假设的离�
   `m6_policy_evaluations`。
 - v13/`0013_m0_policy_freeze.sql`：只为 `m0_assessment_runs` 安全追加七个 freeze
   字段与完整性约束。
-- 已发布的 M4 v10/0010 与 v11/0011 保持不变；M6/M0 迁移顺延到 v12/v13。
-- 当前 bundled PostgreSQL/SQLite schema version 为 13，SQLite→PostgreSQL
-  allowlist 包含 M4 intent、五张 M6 policy 表和 v13 M0 字段。
+- v14/v15 继续追加 M5/M8 模型运行历史与学习观测审计身份，不修改 M6 表。
+- PostgreSQL v16/v17 继续追加 M1—M3 S1-S6 与向量 metadata，不修改 M6 表；
+  SQLite platform ledger 仍为 v15，M1—M3 SQLite 仓储使用独立 version 1 ledger。
+- 已发布的 M4 v10/v11 与 M6/M0 v12/v13 保持不变。
+- 当前 bundled PostgreSQL schema version 为 17、SQLite platform schema version 为 15，SQLite→PostgreSQL
+  allowlist 同时包含 M4 intent、M6 policy、M0 freeze 和 M5/M8 新历史表。
 
-仓库的 live PostgreSQL tests 需要受保护的临时数据库。本阶段没有执行真实教学、
-线上 rollout 或 live PostgreSQL migration；跳过 live tests 不能记录为通过。
+仓库的 live PostgreSQL tests 需要受保护的临时数据库。本阶段没有执行真实教学或
+线上 rollout；live PostgreSQL migration 只能以当次未跳过的 CI/验收结果记录为通过。
 
 ## M9 非集成边界
 
 M6 的 OPE、approval 和 gate 是 M6 私有能力，尚未正式接入 M9。当前公共
 `M9TeacherAnalyticsService.build_model_quality_report(...)` 只接收 M8
-`CalibrationRunResult`；84 个公共 schema 和 contract provenance 都未增加 M6
+`CalibrationRunResult`；91 个公共 schema 和 contract provenance 都未增加 M6
 policy evaluation 边。不能把 M6 的私有 `approved=true` 写成 M9 审核，也不能
 声称 M9 已批准或监控 M6 策略。

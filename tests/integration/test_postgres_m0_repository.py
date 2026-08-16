@@ -810,7 +810,7 @@ def live_repository() -> Iterator[PostgresM0Repository]:
     )
     try:
         rebuild_schema_for_tests(pool, allow_destructive=True)
-        repository = PostgresM0Repository(pool)
+        repository = PostgresM0Repository(pool, outbox_clock=lambda: NOW)
         assert repository.schema_is_current()
         yield repository
     finally:

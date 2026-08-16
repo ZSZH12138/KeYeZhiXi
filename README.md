@@ -2,7 +2,7 @@
 
 ## 项目定位
 
-课业智析是 Python 3.11+、Pydantic v2 的模块化单体。当前交付 84 个数据契约、
+课业智析是 Python 3.11+、Pydantic v2 的模块化单体。当前交付 91 个数据契约、
 10 个公开服务、`AppCoordinator`、Schema 导出和中性空示例。模块之间传递完整
 契约对象；`AppCoordinator` 只调用公开服务，不读任何业务表。
 
@@ -30,14 +30,14 @@
 - M6 私有 `rules`/`shadow`/`active` 运行时、JSON-only LinUCB 制品、奖励/OPE、
   双后端策略持久化和 M0 恢复冻结；默认仍为零 rollout/零探索的 `rules`；
 - 证据化学生反馈、教师报告与低证据保护；
-- M5 DINA 认知诊断、BKT 知识追踪的契约与空运行；
-- M8 IRT、自适应选题和在线标定契约，M9 模型质量/审核边界；
+- M5 真实 DINA 认知诊断、BKT 知识追踪、完整历史恢复和模型驱动状态；
+- M8 真实 2PL IRT、能力估计和受约束自适应选题，M9 模型质量与教师审核发布；
 - M7/M9 统一的 DeepSeek API 契约与空适配器；
 - M0 配置优先级、真实 Django 学生/教师 Web、两层权限、roles 完整状态同步、
   runtime snapshot 与独立 leased outbox Worker；
 - SQLite 适配器用于 M1—M3 离线、测试和迁移演练，生产环境必须使用
-  PostgreSQL+pgvector；生产 M1—M3 通过 `0014_m1_m2_m3_capabilities.sql`、
-  `0015_vector_index_metadata.sql` 和共享的 `PostgresM1M2M3Repository` 持久化完整
+  PostgreSQL+pgvector；生产 M1—M3 通过 `0016_m1_m2_m3_capabilities.sql`、
+  `0017_vector_index_metadata.sql` 和共享的 `PostgresM1M2M3Repository` 持久化完整
   制品、向量索引、检索审计与教师复核记录；
 - SQLite→PostgreSQL 导入器，以及离线/测试模式下 `runtime/artifacts/` 的完整、不可变、
   带 checksum 制品仍然保留；SQLite 不是生产权威后端；
@@ -54,7 +54,7 @@
 ```shell
 conda create --name course-insight-framework python=3.12 -y
 conda activate course-insight-framework
-python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
+python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev,intent]"
 python -m pytest -q
 ```
 
@@ -79,7 +79,7 @@ python -m course_insight.cli export-schemas
 ├─ README.md                      接手工程师首要入口
 ├─ config/                        可提交的无密钥示例配置
 ├─ contracts/
-│  ├─ schemas/                    84 份公开契约 Schema
+│  ├─ schemas/                    91 份公开契约 Schema
 │  ├─ examples/                   1 份中性架构空结果示例
 │  └─ contract_provenance.json    契约生产者—消费者来源图
 ├─ data/raw_course/               本地原始资料占位；真实资料不提交
@@ -128,7 +128,7 @@ python -m course_insight.cli export-schemas
 生产者—消费者的机器可检验映射见
 [contract_provenance.json](contracts/contract_provenance.json)。
 
-## 契约总览（84 个）
+## 契约总览（91 个）
 
 每个类都继承 `schema_version: str`，拒绝额外字段，要求带时区时间，并继承
 `to_dict() -> dict[str, Any]`、`to_json(indent: int = 2) -> str`、
@@ -237,7 +237,7 @@ python -m course_insight.cli export-schemas
 | `TeachingSuggestion` | `suggestion_id:str; action_type:str; concept_ids:list[str]; content:str; trigger_metrics:dict[str,float]; affected_count:int; affected_rate:float; coverage_rate:float; confidence:float; evidence_ids:list[str]; status:str` | `is_actionable` |
 | `CriterionOverride` | `criterion_id:str; previous_score:float; new_score:float; reason:str` | `delta` |
 | `TeacherAnalyticsBundle` | `report_id:str; class_report:ClassReport; individual_reports:list[IndividualReport]; review_queue:list[ReviewQueueItem]; teaching_suggestions:list[TeachingSuggestion]; generated_at:datetime` | `open_review_count; actionable_suggestions; report_for_learner` |
-| `TeacherReviewDecision` | `decision_id:str; audit_id:str; expected_audit_version:int; decision:Literal[confirm,override,reject]; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; reviewer_id:str; reviewed_at:datetime` | `is_override; override_score_sum; assert_matches` |
+| `TeacherReviewDecision` | `decision_id:str; audit_id:str; expected_audit_version:int; expected_audit_checksum:str; decision:Literal[confirm,override,reject]; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; reviewer_id:str; reviewed_at:datetime` | `is_override; override_score_sum; assert_matches` |
 
 ### 事件契约（[events.py](src/course_insight/contracts/events.py)）
 
@@ -252,7 +252,7 @@ python -m course_insight.cli export-schemas
 |---|---|---|
 | `ActorContext` | `actor_id:str; role:student\|teacher\|course_admin\|system_admin; course_ids:list[str]; class_ids:list[str]; issued_at:datetime` | 鉴权范围不可重复；只用伪匿名身份 |
 | `AssessmentSubmission` | `submission_id:str; attempt_id:str; paper_id:str; learner_id:str; answers:dict[str,str\|bool\|int\|float]; submitted_at:datetime` | Django 学生表单到 M8 的无路径输入；答案键为题目实例 ID |
-| `TeacherReviewSubmission` | `submission_id:str; audit_id:str; expected_audit_version:int; reviewer_id:str; decision:confirm\|override\|reject; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; submitted_at:datetime` | Django 教师表单到 M9 的无路径输入；M9 转成同词汇的 `TeacherReviewDecision` |
+| `TeacherReviewSubmission` | `submission_id:str; audit_id:str; expected_audit_version:int; expected_audit_checksum:str; reviewer_id:str; decision:confirm\|override\|reject; final_total_score:float; criterion_overrides:list[CriterionOverride]; teacher_comment:str; submitted_at:datetime` | Django 教师表单到 M9 的无路径输入；版本与 checksum 必须同时匹配当前评分审计；M9 转成同词汇的 `TeacherReviewDecision` |
 | `AsyncJobStatus` | `job_id:str; job_type:django_frontend\|vector_index\|llm_generation\|learning_model\|calibration; status:queued\|running\|succeeded\|failed\|skipped; progress:float; result_ref/error_code; created_at/finished_at` | 终态必须有完成时间；legacy Django scaffold 作业保持 `skipped` |
 
 ### M2/M7/M9 智能边界契约（[intelligence.py](src/course_insight/contracts/intelligence.py)）
@@ -277,7 +277,7 @@ python -m course_insight.cli export-schemas
 | `LearningObservationBatch` | `batch_id:str; learner_id:str; observations:list[LearningObservation]; watermark:str; created_at:datetime` | 观测 ID 唯一且学习者一致；空列表是合法架构输入 |
 | `CognitiveDiagnosisResult` | `run_id; learner_id; model_type:DINA\|DINO\|GDINA\|NCDM; model_version; concept_mastery; observation_count; status; generated_at` | 概率为 [0,1]；`empty` 时掌握字典必须为空 |
 | `KnowledgeTraceSnapshot` | `trace_id; learner_id; model_type:BKT\|BKT_FORGETTING\|DKT; model_version; concept_probabilities; watermark/count; status; updated_at` | 概率为 [0,1]；`empty` 时追踪字典必须为空 |
-| `LearningModelRun` | `run_id; diagnosis; knowledge_trace; observation_count; status; created_at` | DINA/BKT 学习者、观测数和空状态必须对齐 |
+| `LearningModelRun` | `run_id; diagnosis; knowledge_trace; observation_count; status; created_at` | DINA/BKT 学习者、观测数、版本和状态必须对齐 |
 | `IRTItemParameters` | `item_id/version; discrimination; difficulty; guessing; sample_size` | 题目版本不可变；区分度为正，猜测率在 [0,1) |
 | `IRTParameterSet` | `parameter_set_id; model_type:1PL\|2PL\|3PL; version; item_parameters; sample_size; status:empty\|shadow\|approved\|rejected; created_at` | 题目版本唯一；空集不带参数/样本 |
 | `AbilityEstimate` | `estimate_id; learner_id; parameter_set_id; theta; standard_error; status; estimated_at` | 仅 `estimated` 状态可同时携带 theta 和标准误 |
@@ -287,7 +287,7 @@ python -m course_insight.cli export-schemas
 | `ModelQualityReport` | `report_id; subject_ref; metrics; observation_count; status:insufficient_data\|ready\|failed; generated_at` | 证据不足时禁止伪造质量指标 |
 | `CalibrationReviewDecision` | `decision_id; calibration_run_id; reviewer_id; decision:approve\|reject\|defer; target_parameter_version; reason; reviewed_at` | M9 教师对 M8 shadow 标定的审核契约 |
 
-`DomainError` 不是 84 个 Pydantic 类之一；它固定包含 `code`、`module`、
+`DomainError` 不是 91 个 Pydantic 类之一；它固定包含 `code`、`module`、
 `message`、`details`、`recoverable`，公开 `to_dict()`、`with_detail()` 和稳定
 字符串表示。来源图辅助模型位于
 [provenance.py](src/course_insight/contracts/provenance.py)。
@@ -391,9 +391,10 @@ class_aggregation_policy: Any)`。
   state_policy_path: Path) -> StateUpdateResult`：scoring 来自 M8、bundle 来自 M3、
   前版状态来自本模块；输出给 M6/M9；错误 `INSUFFICIENT_EVIDENCE`、
   `STALE_STATE_VERSION`、`STATE_POLICY_INVALID`、`STATE_REFERENCE_MISMATCH`。
-- `run_learning_models(observation_batch: LearningObservationBatch)
-  -> LearningModelRun`：为同一学习者返回对齐的空 DINA 认知诊断与空 BKT
-  知识追踪；不做概率估计。
+- `run_learning_models(observation_batch: LearningObservationBatch,
+  knowledge_bundle: KnowledgeBundle|None=None) -> LearningModelRun`：空观测保留
+  `empty` 架构语义；正式观测使用已训练且已收敛的 DINA/BKT 模型和完整治理历史，
+  返回认知诊断、知识追踪、模型版本与审计水位。数据或模型不足时明确失败。
 
 ### M6TutoringControlService
 
@@ -464,11 +465,14 @@ parameter_item_generator: Any)`。
   来自本模块、决定来自 M9；新版本给 M0/M5/M9；错误
   `REVIEW_VERSION_CONFLICT`、`REVIEW_TOTAL_MISMATCH` 及复核契约错误。
 - `calibrate_irt(observation_batch: LearningObservationBatch,
-  requested_at: datetime) -> CalibrationRunResult`：当前产生空 2PL 参数集，
-  不估计、不声称收敛、不伪造质量指标。
+  requested_at: datetime) -> CalibrationRunResult`：足量数据运行真实 2PL 标定，
+  成功时只产生 `shadow` 参数；数据不足返回明确失败，不伪造指标。
 - `select_adaptive_items(policy: AdaptiveSelectionPolicy,
-  ability_estimate: AbilityEstimate, requested_at: datetime)
-  -> AdaptiveSelectionResult`：当前不计算 IRT 信息量，返回空题目列表。
+  ability_estimate: AbilityEstimate, parameter_set: IRTParameterSet,
+  candidate_items: list[ItemCard], administered_item_ids: frozenset[str],
+  exposure_snapshot: ItemExposureSnapshot, requested_at: datetime)
+  -> AdaptiveSelectionResult`：只使用 approved 参数，按信息量、概念配额、
+  难度、已作答和曝光约束选择并持久化题目。
 
 ### M9TeacherAnalyticsService
 
@@ -485,8 +489,8 @@ suggestion_rule_engine: Any)`。
   -> LLMGenerationResult`：仅接受 DeepSeek `teacher_narrative` 用例；当前空实现
   不访问网络且不生成叙述；其他用例返回 `LLM_USE_CASE_INVALID`。
 - `build_model_quality_report(calibration_result: CalibrationRunResult,
-  requested_at: datetime) -> ModelQualityReport`：为 M8 空标定返回
-  `insufficient_data`，不伪造指标；后续作为参数发布门槛。
+  requested_at: datetime) -> ModelQualityReport`：检查收敛、样本覆盖、参数边界
+  和信息量，输出 `ready`、`failed` 或 `insufficient_data`，作为参数发布门槛。
 - `record_teacher_review(raw_review_path: Path|TeacherReviewSubmission,
   current_scoring_result_bundle: ScoringResultBundle) -> TeacherReviewDecision`：原始
   JSON 来自教师、当前审计来自 M8；决定回 M8；错误 `REPORT_SCOPE_INVALID` 和
@@ -528,8 +532,10 @@ suggestion_rule_engine: Any)`。
   course_package_id: str, learner_id: str, requested_at: datetime)
   -> ArchitectureScaffoldResult`，保留为 legacy 智能能力脚手架；M0 的作业字段
   为兼容契约保持 `skipped`；该 legacy 脚手架不执行 M2 正式
-  `retrieve_with_policy`。M5 DINA/BKT、M7/M9 DeepSeek、M8 IRT/自适应在线标定仍保持
-  空结果或证据不足。真实 Django 不由该入口启动。
+  `retrieve_with_policy`。该入口没有作答数据，因此 M5/M8 继续返回空模型探测；
+  正式测评流程中的 M5 DINA/BKT、M8 IRT/自适应功能使用真实实现。M2 正式业务
+  路径可按配置使用 PostgreSQL+pgvector；M7/M9 DeepSeek 网络适配器仍未启用，
+  真实 Django 不由该入口启动。
 - `export_run_manifest(*, objects: list[ContractModel], output_path: Path) -> Path`，
   仅导出 ID、checksum、时间，不导出学生答案。
 
@@ -593,6 +599,7 @@ actor+IP、actor 与 IP 三个 HMAC 桶，成功登录保留共享 IP 历史。
   "decision_id": "decision_example",
   "audit_id": "audit_example",
   "expected_audit_version": 1,
+  "expected_audit_checksum": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
   "decision": "override",
   "final_total_score": 5.0,
   "criterion_overrides": [
@@ -608,13 +615,15 @@ actor+IP、actor 与 IP 三个 HMAC 桶，成功登录保留共享 IP 历史。
 `override` 必须完整覆盖当前量规分项，旧分和版本必须与当前 v1 一致，新分之和
 等于 `final_total_score` 且不超过题目上限。
 
+复核请求必须同时携带 `expected_audit_version` 和 `expected_audit_checksum`；checksum 必须匹配当前评分审计内容，版本或 checksum 任一不一致都必须拒绝复核。
+
 ## PostgreSQL 目标、SQLite 基线、JSON 与 runtime 边界
 
 SQLite 适配器用于离线、测试和迁移演练；生产环境必须使用 PostgreSQL+pgvector。
 离线/测试组合根默认使用共享的 `SQLiteM1M2M3Repository`；显式文件导出/文件后端时，
 `FileM1Repository`、`FileM2Repository`、`FileM3Repository` 将完整的
 不可变、内容寻址运行时制品写入 `runtime/artifacts/`。生产模式下，M1—M3 使用共享的
-`PostgresM1M2M3Repository`，并由 0014/0015 migrations 持久化完整制品、pgvector 索引/文档、
+`PostgresM1M2M3Repository`，并由 0016/0017 migrations 持久化完整制品、pgvector 索引/文档、
 检索审计和教师复核 CAS 记录。
 
 仓库已经包含 Psycopg 3 连接池、checksum-locked core migrations、M0/M1—M3/M4—M9
@@ -669,7 +678,7 @@ S1-S6 表和共享仓储。两种模式都必须遵守相同的契约、checksum
 SQLite/离线模式下，M1—M3 的备份、恢复、checksum 校验、清理和回滚都必须以完整制品
 为单位覆盖 `runtime/artifacts/` 下的全部版本，并保留 artifact manifest 及其 payload
 checksum；生产 PostgreSQL 模式应使用数据库备份或 `export_manifest/import_manifest`
-覆盖 0014/0015 中的权威制品、向量索引/文档、审计和 review：
+覆盖 0016/0017 中的权威制品、向量索引/文档、审计和 review：
 
 - M1 必须保留完整课程导入制品，包括课程包、解析结果、metadata、授权输入和来源
   payload；只备份 `CoursePackage` JSON 不足以恢复一次导入。
@@ -690,11 +699,10 @@ M7 的持久表保存现有学生反馈契约，不保存 DeepSeek 密钥、完�
 保存数据库、JSON 快照、索引、M1—M3 immutable artifacts、日志和运行清单。运行产物
 不得回写 `data/` 或 `contracts/`。
 
-## 智能算法空边界
+## Legacy 无数据脚手架边界
 
-`AppCoordinator.run_intelligence_architecture` 保留为智能能力脚手架入口。
-M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、DeepSeek 密钥或
-模型训练数据：
+`AppCoordinator.run_intelligence_architecture` 保留为无作答数据的兼容探测入口。
+它不能代替正式测评学习闭环：
 
 1. M0 为保持 legacy `ArchitectureScaffoldResult.is_empty()` 语义返回 Django
    作业 `skipped`；真实 Web 由独立部署入口启动并通过 health 检查。
@@ -702,10 +710,9 @@ M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、Deep
    M2 生产检索使用 PostgreSQL+pgvector 和 `retrieve_with_policy`，缺少依赖时
    fail closed。SQLite/离线兼容入口才可能返回逻辑 `empty`。
 3. M7 返回 DeepSeek 评分空结果，M9 返回 DeepSeek 教师叙述空结果。
-4. M5 返回 DINA 认知诊断和 BKT 知识追踪空运行。
-5. M8 返回 IRT 空标定与空自适应选题。
-6. M9 为空标定返回 `insufficient_data` 质量报告。
-7. 编排器将上述 legacy/算法空结果组合为 `ArchitectureScaffoldResult(status="empty")`。
+4. 因该入口没有学习观测，M5/M8 返回数据不足或空探测结果。
+5. M9 对空标定返回 `insufficient_data` 质量报告。
+6. 编排器将上述值组合为 `ArchitectureScaffoldResult(status="empty")`。
 
 该入口不伪造真实模型运行。M0 已实现的 Web/Worker/PostgreSQL 能力不应被写成
 算法空实现。
@@ -721,8 +728,8 @@ M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、Deep
   最后读 [AppCoordinator](src/course_insight/application/coordinator.py)。
 - 谢：按 M1 `service.py` → M2 `service.py` → M3 `service.py` 阅读，先理解
   `CoursePackage` 和证据定位，再处理 RAG/pgvector 引用与 Q 矩阵标定依据。
-- 童：先读 M8 `paper_generator.py`/`rule_scorer.py`/`service.py` 的审计身份和
-  IRT/在线标定边界，再读 M5 `update_policy.py`、`aggregation.py` 与 DINA/BKT 空运行。
+- 童：先读 M8 `paper_generator.py`/`rule_scorer.py`/`service.py` 的审计身份，
+  再读 `irt_2pl.py`/`adaptive_selector.py` 和 M5 `dina.py`/`bkt.py`/`service.py`。
 - 冯：先读 M7 DeepSeek 空适配器及量规/证据约束，再读 M9
   `reports.py`/`suggestions.py`、DeepSeek 叙述与模型质量门槛。
 
@@ -735,21 +742,21 @@ M0 Web 已是真实基础设施，其他智能算法仍不需要 pgvector、Deep
 | 模块 | 当前可运行行为 | 真实实现与启用条件 |
 |---|---|---|
 | M0 | 配置、日志、SQLite/PostgreSQL、真实 Django/权限/表单、流程恢复、leased Worker | 在目标环境完成生产容量、备份与真实 PostgreSQL 验收 |
-| M1 | 仅固定本地文本解析与段落切分 | 在 parser registry 后增加可替换解析器 |
+| M1 | 版本化 ParserRegistry、本地多格式解析、授权与确定性分块 | 通过同一端口增加受治理解析器，不绕过来源校验 |
 | M2 | SQLite/离线 lexical 基线；生产 PostgreSQL+pgvector 支持 embedding、vector/hybrid、审计 | 以 CI `live-m1-m3` job 的真实 PostgreSQL+pgvector 结果完成生产运行验收 |
 | M3 | 教师种子校验与 CAS 复核门；`initialize_course` 可携带审批 ID/version，生产发布必须走 `build_knowledge_bundle_after_approval` | 将 M3 S4 审批接入现有 M0 教师 UI 操作流 |
-| M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 84 个公开契约、`TaskPlan` 和八字段业务身份 |
-| M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
+| M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 91 个公开契约、`TaskPlan` 和八字段业务身份 |
+| M5 | 真实 DINA/BKT、完整历史、版本化模型与模型驱动状态 | 使用达到治理门槛的去标识化数据训练；数据不足时明确失败 |
 | M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline |
 | M7 | `PlaceholderRubricAdapter` 未配置时抛出 `MODEL_ADAPTER_UNCONFIGURED`；DeepSeek 适配器返回 `empty` | 安全、超时、限流和输出校验完成后在 M7 启用 DeepSeek API |
-| M8 | 固定 anchor/规则评分；IRT 标定与自适应选题为 `empty` | 足量数据下实现 IRT shadow 标定，经 M9 质量/教师审核后启用 |
-| M9 | 阈值统计/规则建议；DeepSeek 叙述 `empty`；质量 `insufficient_data` | 实现模型指标与标定审核；在 M9 启用 DeepSeek 教师叙述 |
+| M8 | 权重组卷、冻结评分证据、真实 2PL/EAP、审核发布和受约束自适应选题 | 生产启用前提供足量作答并完成 M9 质量与教师审批 |
+| M9 | 阈值统计/规则建议、真实 IRT 质量门槛与标定审核；DeepSeek 叙述仍 `empty` | 安全、超时、限流和输出校验完成后启用 DeepSeek 教师叙述 |
 
 M6 私有 OPE/approval 尚未正式接入 M9；当前 M9 公共质量入口只接收 M8
-`CalibrationRunResult`。公共 84 个 schema、`decide_next_action(...)` 四输入签名
+`CalibrationRunResult`。公共 91 个 schema、`decide_next_action(...)` 四输入签名
 和 contract provenance 均未为 M6 policy learning 改动。
 
-后续实现必须保留 84 个契约、10 个服务和 `AppCoordinator` 的责任边界，
+后续实现必须保留 91 个契约、10 个服务和 `AppCoordinator` 的责任边界，
 不得把密钥、日志、真实运行数据或主机路径写入可分发项目文件。
 
 ## 禁止事项与安全边界
@@ -777,9 +784,9 @@ OpenAI-compatible embedding、pgvector 两阶段建索引、lexical/vector/hybri
 缺失 embedding/vector/audit/review 依赖时 fail closed，不返回伪造的 `empty` 成功。
 
 SQLite 适配器用于离线、测试和迁移演练，PostgreSQL + pgvector 是生产权威适配器。
-PostgreSQL 的 S1-S6 核心 migration 为 `0014_m1_m2_m3_capabilities.sql`，向量索引
-元数据绑定由 `0015_vector_index_metadata.sql` 补充；当前 PostgreSQL core schema 为
-v15。M1/M2/M3 共用一个仓储与事务边界；完整制品使用
+PostgreSQL 的 S1-S6 核心 migration 为 `0016_m1_m2_m3_capabilities.sql`，向量索引
+元数据绑定由 `0017_vector_index_metadata.sql` 补充；当前 PostgreSQL core schema 为
+v17。M1/M2/M3 共用一个仓储与事务边界；完整制品使用
 `export_manifest/import_manifest` 做校验后迁移。
 
 关键配置为 `COURSE_INSIGHT_EMBEDDING__*` 和 `OPENAI_API_KEY`。生产 embedding endpoint

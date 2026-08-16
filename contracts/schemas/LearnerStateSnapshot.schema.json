@@ -113,6 +113,19 @@
   "additionalProperties": false,
   "description": "Versioned learner-state snapshot consumed across later modules.",
   "properties": {
+    "bkt_model_version": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Bkt Model Version"
+    },
     "class_id": {
       "minLength": 1,
       "title": "Class Id",
@@ -130,6 +143,19 @@
       "title": "Course Id",
       "type": "string"
     },
+    "dina_model_version": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Dina Model Version"
+    },
     "evidence_count": {
       "minimum": 0,
       "title": "Evidence Count",
@@ -139,6 +165,32 @@
       "minLength": 1,
       "title": "Learner Id",
       "type": "string"
+    },
+    "model_run_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Model Run Id"
+    },
+    "observation_watermark": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Observation Watermark"
     },
     "overall_mastery": {
       "maximum": 1.0,

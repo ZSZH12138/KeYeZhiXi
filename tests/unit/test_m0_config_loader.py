@@ -262,6 +262,24 @@ def test_intent_defaults_are_rules_only(tmp_path: Path) -> None:
     assert settings.intent.fail_closed is True
 
 
+def test_postgres_live_test_variables_are_not_platform_configuration(
+    tmp_path: Path,
+) -> None:
+    settings = load_platform_settings(
+        project_root=tmp_path,
+        app_json_path=None,
+        dotenv_path=None,
+        environment={
+            "COURSE_INSIGHT_TEST_DATABASE_URL": (
+                "postgresql://tester:secret@localhost/course_insight_test"
+            ),
+            "COURSE_INSIGHT_TEST_DATABASE_NAME": "course_insight_test",
+        },
+    )
+
+    assert settings.database.backend == "sqlite"
+
+
 @pytest.mark.parametrize(
     "overrides",
     [

@@ -169,6 +169,10 @@ def validate_decision(decision, submission) -> None:
             decision.expected_audit_version,
             submission.expected_audit_version,
         ),
+        (
+            decision.expected_audit_checksum,
+            submission.expected_audit_checksum,
+        ),
         (decision.reviewer_id, submission.reviewer_id),
         (decision.decision, submission.decision),
         (decision.final_total_score, submission.final_total_score),
@@ -184,12 +188,61 @@ def validate_decision(decision, submission) -> None:
 
 def existing_review(current, decision):
     record = current.get_audit_record(decision.audit_id)
+    base_record = next(
+        (
+            candidate
+            for candidate in current.score_audit_records
+            if candidate.audit_id == decision.audit_id
+            and candidate.audit_version == decision.expected_audit_version
+        ),
+        None,
+    )
+    if base_record is None:
+        raise DomainError(
+            code="REVIEW_VERSION_CONFLICT",
+            module="application",
+            message="persisted review base audit is unavailable",
+            recoverable=True,
+        )
+    decision.assert_matches(base_record)
     if record.audit_version == decision.expected_audit_version:
         return None
+    expected_status = "rejected" if decision.decision == "reject" else "approved"
+    expected_reasons = (
+        [decision.teacher_comment] if decision.decision == "reject" else []
+    )
+    expected_scores = (
+        {
+            override.criterion_id: (override.new_score, override.reason)
+            for override in decision.criterion_overrides
+        }
+        if decision.is_override()
+        else {
+            criterion.criterion_id: (criterion.score, criterion.reason)
+            for criterion in base_record.criterion_scores
+        }
+    )
+    record_scores = {
+        criterion.criterion_id: (criterion.score, criterion.reason)
+        for criterion in record.criterion_scores
+    }
+    expected_event_id = (
+        f"event_{decision.decision_id}_"
+        f"audit_v{decision.expected_audit_version + 1}"
+    )
     if (
         record.audit_version == decision.expected_audit_version + 1
         and record.scoring_method == "teacher_override"
+        and record.review_status == expected_status
+        and record.review_reason == expected_reasons
         and record.total_score == decision.final_total_score
+        and record_scores == expected_scores
+        and any(
+            event.event_id == expected_event_id
+            and event.payload.get("audit_id") == decision.audit_id
+            and event.payload.get("decision") == decision.decision
+            for event in current.learning_events
+        )
     ):
         return current
     raise DomainError(

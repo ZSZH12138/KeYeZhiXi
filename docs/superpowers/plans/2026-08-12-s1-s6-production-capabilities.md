@@ -18,7 +18,7 @@
 - Create `src/course_insight/application/persistence.py` for authoritative backend selection, readiness and explicit migration boundary.
 - Create `src/course_insight/infrastructure/sqlite/m1_m2_m3_repository.py` for one SQLite transaction-backed repository facade.
 - Create `src/course_insight/infrastructure/postgresql/m1_m2_m3_repository.py` for the PostgreSQL counterpart using the existing pool protocol.
-- Create `src/course_insight/infrastructure/sqlite/migrations_s1_s6.py` and `src/course_insight/infrastructure/postgresql/migrations/0014_m1_m2_m3_capabilities.sql` for versioned S1-S6 schema.
+- Create `src/course_insight/infrastructure/sqlite/migrations_s1_s6.py` and `src/course_insight/infrastructure/postgresql/migrations/0016_m1_m2_m3_capabilities.sql` for versioned S1-S6 schema.
 - Create `src/course_insight/modules/m2_evidence_retrieval/embedding.py` for `EmbeddingProvider`, model identity, deterministic test provider and OpenAI-compatible HTTP adapter.
 - Create `src/course_insight/modules/m2_evidence_retrieval/vector_store.py` for vector index ports and pgvector implementation.
 - Create `src/course_insight/modules/m2_evidence_retrieval/ranking.py` for lexical/vector/hybrid score normalization and stable ordering.
@@ -134,7 +134,7 @@
 - S1-S6 implementation and application wiring: complete. Formal application retrieval uses
   `retrieve_for_application -> retrieve_with_policy`; M3 S4 CAS wrappers and approved-publication
   gate are exposed through `AppCoordinator`.
-- Vector restart binding: complete. PostgreSQL migration `0015_vector_index_metadata.sql` and
+- Vector restart binding: complete. PostgreSQL migration `0017_vector_index_metadata.sql` and
   durable metadata discovery validate package/model/dimension/count/time/checksum bindings without
   re-embedding. The existing `embedding_model_id` column is written and cross-checked as well.
 - Verification: `python -m pytest -q` => `1773 passed, 18 skipped`; targeted application/chain

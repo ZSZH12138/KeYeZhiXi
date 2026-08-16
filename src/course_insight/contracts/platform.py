@@ -57,6 +57,7 @@ class TeacherReviewSubmission(ContractModel):
     submission_id: str = Field(min_length=1)
     audit_id: str = Field(min_length=1)
     expected_audit_version: int = Field(ge=1)
+    expected_audit_checksum: str = Field(pattern=r"^[0-9a-f]{64}$")
     reviewer_id: str = Field(min_length=1)
     decision: Literal["confirm", "override", "reject"]
     final_total_score: float = Field(ge=0.0, allow_inf_nan=False)

@@ -1,0 +1,74 @@
+{
+  "additionalProperties": false,
+  "description": "One immutable binary response projected onto a governed concept.",
+  "properties": {
+    "attempt_id": {
+      "minLength": 1,
+      "title": "Attempt Id",
+      "type": "string"
+    },
+    "class_id": {
+      "minLength": 1,
+      "title": "Class Id",
+      "type": "string"
+    },
+    "concept_id": {
+      "minLength": 1,
+      "title": "Concept Id",
+      "type": "string"
+    },
+    "course_id": {
+      "minLength": 1,
+      "title": "Course Id",
+      "type": "string"
+    },
+    "is_correct": {
+      "title": "Is Correct",
+      "type": "boolean"
+    },
+    "learner_id": {
+      "minLength": 1,
+      "title": "Learner Id",
+      "type": "string"
+    },
+    "observation_id": {
+      "minLength": 1,
+      "title": "Observation Id",
+      "type": "string"
+    },
+    "occurred_at": {
+      "format": "date-time",
+      "title": "Occurred At",
+      "type": "string"
+    },
+    "schema_version": {
+      "default": "1.0.0",
+      "title": "Schema Version",
+      "type": "string"
+    },
+    "source_audit_id": {
+      "minLength": 1,
+      "title": "Source Audit Id",
+      "type": "string"
+    },
+    "source_audit_version": {
+      "minimum": 1,
+      "title": "Source Audit Version",
+      "type": "integer"
+    }
+  },
+  "required": [
+    "observation_id",
+    "learner_id",
+    "course_id",
+    "class_id",
+    "attempt_id",
+    "concept_id",
+    "is_correct",
+    "source_audit_id",
+    "source_audit_version",
+    "occurred_at"
+  ],
+  "title": "ConceptResponse",
+  "type": "object"
+}

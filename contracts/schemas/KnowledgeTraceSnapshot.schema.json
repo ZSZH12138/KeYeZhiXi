@@ -2,12 +2,38 @@
   "additionalProperties": false,
   "description": "Versioned BKT-family trace; empty until sequence data is available.",
   "properties": {
+    "class_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Class Id"
+    },
     "concept_probabilities": {
       "additionalProperties": {
         "type": "number"
       },
       "title": "Concept Probabilities",
       "type": "object"
+    },
+    "course_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Course Id"
     },
     "learner_id": {
       "minLength": 1,
@@ -37,6 +63,13 @@
       "minLength": 1,
       "title": "Observation Watermark",
       "type": "string"
+    },
+    "processed_audit_keys": {
+      "items": {
+        "type": "string"
+      },
+      "title": "Processed Audit Keys",
+      "type": "array"
     },
     "schema_version": {
       "default": "1.0.0",

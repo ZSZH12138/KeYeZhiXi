@@ -324,6 +324,7 @@ def test_teacher_override_form_builds_complete_existing_contract() -> None:
     assert type(submission) is TeacherReviewSubmission
     assert submission.audit_id == audit.audit_id
     assert submission.expected_audit_version == audit.audit_version
+    assert submission.expected_audit_checksum == audit.content_checksum()
     assert submission.final_total_score == 3.5
     assert [
         (

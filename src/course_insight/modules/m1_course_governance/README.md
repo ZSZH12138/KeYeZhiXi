@@ -28,8 +28,8 @@ RAG、知识模型或 LLM。
 `runtime/artifacts/`；完整制品包括 `CoursePackage`、解析结果、课程 metadata、
 授权输入和来源 payload，不能只保存一个课程包 JSON。默认 SQLite 组合根使用共享的
 `SQLiteM1M2M3Repository` 保存同一组完整制品；生产环境必须使用共享的
-`PostgresM1M2M3Repository`，并运行 `0014_m1_m2_m3_capabilities.sql` 与
-`0015_vector_index_metadata.sql`。
+`PostgresM1M2M3Repository`，并运行 `0016_m1_m2_m3_capabilities.sql` 与
+`0017_vector_index_metadata.sql`。
 
 `m1_course_packages`、`m2_evidence_indexes`、`m3_knowledge_bundles` 是 SQLite
 离线/测试 schema；生产 PostgreSQL 使用 `m1_m2_m3_artifacts` 及 M2/M3 专用表。

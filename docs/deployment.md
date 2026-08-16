@@ -2,14 +2,16 @@
 
 ## 文档边界
 
-本文件描述截至 `2026-08-12` 已实现的 M0 部署面、M1—M3 S1-S6 能力、M6 私有策略
+本文件描述截至 `2026-08-16` 已实现的 M0 部署面、M1—M3 S1-S6 能力、M5/M8
+本地模型能力、M6 私有策略
 配置与进程角色。它不把未实测的 PostgreSQL+pgvector 联调写成“已通过”，也不把开发
 服务器当成生产 WSGI/ASGI 部署。SQLite 仅用于离线、测试和迁移演练；生产必须使用
 PostgreSQL+pgvector。仓库已提供真实 HTTP embedding + PostgreSQL/pgvector + M1—M3
 恢复链路的 live 用例；本机没有受保护测试数据库时仍会明确 skip，只有 CI job 通过
 后才能记录为联调验收通过。
-M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M7/M9 的 DeepSeek 网络调用仍是
-空实现；M2 的 embedding/pgvector 代码、性能验收 CLI 和真实 live 验收用例已经实现；
+M5 的 DINA/BKT、M8 的 2PL IRT/能力估计/自适应选择以及 M9 的本地模型质量
+已经实现，并仍受数据门槛、shadow 质量审核和教师批准约束。M7/M9 的 DeepSeek
+网络调用仍未启用。M2 的 embedding/pgvector 代码、性能验收 CLI 和真实 live 验收用例已经实现；
 当前开发机若未提供受保护的 PostgreSQL 测试环境，性能 CLI 会 fail closed，不能
 把未执行写成通过。
 
@@ -103,7 +105,7 @@ Web 进程启动前需要：
 3. 已执行 `sync_roles --apply`
 4. SQLite/离线模式：校验 `runtime/snapshots/course_runtime_manifest.json`、其中全部
    快照与 policy，以及 `runtime/artifacts/` 下完整 M1/M2/M3 immutable artifacts；
-   生产 PostgreSQL 模式：校验 v15（0014/0015）schema、共享仓储中的 M1/M2/M3 制品、审计、review
+   生产 PostgreSQL 模式：校验 v17（0016/0017）schema、共享仓储中的 M1/M2/M3 制品、审计、review
    和 ready pgvector 引用
 
 建议命令：
@@ -138,9 +140,9 @@ PostgreSQL 核心 schema migration 与 Django migration 是两套：
 
 SQLite 的 `m1_course_packages`、`m2_evidence_indexes`、`m3_knowledge_bundles`
 用于离线/测试和迁移演练；SQLite 不是生产权威后端。生产 PostgreSQL core migration
-0014 创建 `m1_m2_m3_artifacts`、`m2_vector_indexes`、`m2_vector_documents`、
-`m2_retrieval_audits` 和 `m3_teacher_reviews`，0015 为向量索引补充受治理的
-package/model metadata；当前 PostgreSQL core schema 为 v15。两者由共享的
+0016 创建 `m1_m2_m3_artifacts`、`m2_vector_indexes`、`m2_vector_documents`、
+`m2_retrieval_audits` 和 `m3_teacher_reviews`，0017 为向量索引补充受治理的
+package/model metadata；当前 PostgreSQL core schema 为 v17。两者由共享的
 `PostgresM1M2M3Repository` 与 pgvector 适配器接收 M1—M3 业务写入。
 
 SQLite→PostgreSQL 数据迁移入口：
@@ -203,7 +205,7 @@ SQLite/离线启动时默认由共享 `SQLiteM1M2M3Repository` 读取完整制�
 
 生产 PostgreSQL 启动时还必须：
 
-- 通过 v15（0014/0015）schema 和 `PostgresM1M2M3Repository` 校验 M1—M3 制品、审计与 review；
+- 通过 v17（0016/0017）schema 和 `PostgresM1M2M3Repository` 校验 M1—M3 制品、审计与 review；
 - 为 vector/hybrid 检索显式提供并校验 `EvidenceIndexRef`，调用
   `restore_vector_index`；自动发现 ready 向量索引已通过 durable metadata 恢复路径实现，
   但本机未提供可执行的 PostgreSQL+pgvector 测试环境；CI `live-m1-m3` job 会执行
@@ -270,6 +272,9 @@ python -m pytest -q
 `COURSE_INSIGHT_TEST_DATABASE_NAME`。若任一变量缺失，则
 `tests/integration/test_postgres_foundation_live.py` 等 destructive live tests
 会显式 `skip`，表示 “real PostgreSQL integration was not run”。
+GitHub Actions CI 使用一次性的 PostgreSQL 16 服务并注入这两个变量，
+因此 CI 的完整测试会实际执行 M0、M4、M5、M6、M8 相关的 PostgreSQL live tests；
+这不替代生产数据库验收。
 若确认变量与 DSN 的数据库名不一致，或数据库名属于 `postgres`、
 `template0`、`template1`，或没有以 `_`/`-`/边界分隔的 `test`、`ci`、`tmp`
 一次性标记，
@@ -280,8 +285,10 @@ python -m pytest -q
 常规生产部署应保持示例的 rules-safe 默认值。任何 shadow/active 变更都必须在
 部署变更单中逐项记录：
 
-- [ ] 当前 core ledger 为 v13；确认 M4 intent 使用 v10/0010 与 v11/0011，
-  M6 policy 使用 v12/0012，M0 freeze 使用追加的 v13/0013，未改写已应用 migration；
+- [ ] 当前 PostgreSQL core ledger 为 v17；确认 M4 intent 使用 v10/v11，M6 policy 使用 v12，
+  M0 freeze 使用 v13，M5/M8 model runtime 使用 v14，观测审计身份使用 v15，
+  M1—M3 S1-S6 与向量 metadata 分别使用 v16/v17，
+  且未改写已应用 migration；
 - [ ] 使用全新 immutable `policy_id`；manifest 的 state graph/baseline/feature/
   action/reward/gate version 已治理，artifact 与 manifest 重叠的
   policy/adapter/feature/action 字段及 lowercase SHA-256 完全一致；
@@ -326,7 +333,7 @@ Conda 初始化与当前 shell，不要把依赖装入 base。
 命令：
 
 ```shell
-python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev]"
+python -m pip install --constraint requirements/ci-constraints.txt -e ".[dev,intent]"
 python -m pip check
 ```
 
@@ -370,7 +377,7 @@ cookie 和 stdout 模式。不要把实际值写回 `config/app.json`。
 
 在切换前停止旧写入，复制现有 SQLite 数据库和 `-wal`/`-shm`（若存在），保留离线
 模式的 `runtime/artifacts/` 作为迁移输入，再由 DBA 创建专用 PostgreSQL 应用库与
-最小权限账号。生产备份必须同时覆盖 PostgreSQL 0014/0015 中的 M1—M3 制品、向量索引/文档、
+最小权限账号。生产备份必须同时覆盖 PostgreSQL 0016/0017 中的 M1—M3 制品、向量索引/文档、
 检索审计和教师复核记录；不能只备份 SQLite 文件或只复制 manifest。示例：
 
 ```shell
@@ -396,9 +403,10 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --apply
 ```
 
-预期：core schema version 为 13；v10/0010 与 v11/0011 属于 M4 intent，
-v12/`0012_m6_policy_learning.sql` 新增五张 M6 私有 policy 表，
-v13/`0013_m0_policy_freeze.sql` 为 `m0_assessment_runs` 安全追加七个策略冻结字段。
+预期：PostgreSQL core schema version 为 17；v10/v11 属于 M4 intent，v12 新增 M6 私有
+policy 表，v13 为 `m0_assessment_runs` 追加策略冻结字段，v14 新增 M5/M8 模型
+运行历史，v15 为学习观测追加权威评分审计身份，v16/v17 分别追加 M1—M3 S1-S6
+能力与向量 metadata。
 报告为 `validated`/`completed`，或在已投递旧事件
 存在时明确为 `*_with_source_limitations`。失败时检查 `error_code`、migration
 checksum、源 schema version、`partial_envelope_rows` 和每表 digest。不要用
@@ -464,7 +472,7 @@ SQLite/离线验收时，将课程初始化产生并由 M0 保存的 `CoursePack
 `EvidenceIndexRef`、`KnowledgeBundle` 快照放入 `runtime/snapshots/`；同时保留
 M1/M2/M3 File repository 写入的完整 `runtime/artifacts/`。快照不能替代 artifact：
 M2 要有完整 lexical snapshot，M3 要有 bundle、seed snapshot 和 validation report。
-生产 PostgreSQL 验收则校验 v15（0014/0015）migration、共享仓储中的 M1—M3 制品、审计、review
+生产 PostgreSQL 验收则校验 v17（0016/0017）migration、共享仓储中的 M1—M3 制品、审计、review
 和 ready pgvector 引用，不把 SQLite 文件当成生产数据源。把真实可解析的
 `StatePolicy` 与 `TeacherThresholdPolicy` 放入 `runtime/policies/`，再写上述
 manifest。不要手工伪造 checksum。验证命令：
@@ -596,7 +604,7 @@ delivered_count 增加；运行日志不含密码、Cookie、Authorization、Ses
 
 ### 19. 验证 PostgreSQL、live tests 与重启恢复
 
-先在生产应用库用只读 SQL 核对 migration ledger、0014/0015 的 M1—M3/pgvector/review
+先在生产应用库用只读 SQL 核对 migration ledger、0016/0017 的 M1—M3/pgvector/review
 表、关键计数和追加版本；SQLite/离线模式才核对 `runtime/artifacts/` 中每个完整制品
 的 manifest、身份、版本和 payload checksum。正常停止并重启 Web/Worker 后，重新
 恢复已有课程、索引和知识包，再访问结果与复核上下文。destructive live tests 必须
@@ -671,7 +679,7 @@ policy 记录或热更新 settings 的安全入口。
 - PostgreSQL 测试 schema 销毁/重建辅助函数 `destroy_schema_for_tests()` 与 `rebuild_schema_for_tests()`
 - SQLite→PostgreSQL 单批失败的事务回滚和原 SQLite 保留
 - SQLite/离线回滚可恢复经过 checksum 验证的完整 `runtime/artifacts/` 版本；生产
-  PostgreSQL 回滚必须恢复经过校验的 0014/0015 数据库备份或 manifest，不是 migration 降级，
+  PostgreSQL 回滚必须恢复经过校验的 0016/0017 数据库备份或 manifest，不是 migration 降级，
   也不能只恢复 SQLite 预留表
 
 这些不是生产 schema 回退工具。上线前必须由数据库平台创建可恢复备份并记录
@@ -718,9 +726,9 @@ outbox 投递和外部日志保留策略都可能不可逆；执行前必须解�
 
 ### 生产后端与配置
 
-生产必须选择 `database.backend=postgresql`，并运行 PostgreSQL migration 至 v15：
-`0014_m1_m2_m3_capabilities.sql` 创建完整 M1/M2/M3 制品表、pgvector 索引/文档表、
-检索审计表和教师复核 CAS 表，`0015_vector_index_metadata.sql` 补充向量索引的
+生产必须选择 `database.backend=postgresql`，并运行 PostgreSQL migration 至 v17：
+`0016_m1_m2_m3_capabilities.sql` 创建完整 M1/M2/M3 制品表、pgvector 索引/文档表、
+检索审计表和教师复核 CAS 表，`0017_vector_index_metadata.sql` 补充向量索引的
 课程包/embedding 模型 metadata；M1/M2/M3 在应用组合根共用一个
 `PostgresM1M2M3Repository`，不会在 SQLite 与 PostgreSQL 之间隐式 fallback。
 
@@ -768,7 +776,7 @@ metadata 恢复路径实现。当前 `AppCoordinator` 和 `assessment_workflow` 
 
 ### 向量性能验收与 ANN 索引
 
-`0014` 默认保留精确余弦搜索，保证结果召回率；它不会在未知 embedding 维度时盲目
+`0016` 默认保留精确余弦搜索，保证结果召回率；它不会在未知 embedding 维度时盲目
 创建全表 ANN 索引。上线前必须用目标课程规模定义 chunk 数、P95 检索耗时和召回率，
 先运行 `EXPLAIN (ANALYZE, BUFFERS)` 与重复请求基准，再决定是否为每个 ready index
 创建按维度绑定的表达式索引。例如配置维度为 1536 时：

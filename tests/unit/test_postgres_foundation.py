@@ -570,8 +570,10 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
         "0011_m4_intent_runtime_statuses.sql",
         "0012_m6_policy_learning.sql",
         "0013_m0_policy_freeze.sql",
-        "0014_m1_m2_m3_capabilities.sql",
-        "0015_vector_index_metadata.sql",
+        "0014_m5_m8_model_runtime.sql",
+        "0015_m5_learning_observation_audit_identity.sql",
+        "0016_m1_m2_m3_capabilities.sql",
+        "0017_vector_index_metadata.sql",
     )
     all_sql = "\n".join(migration.sql for migration in migrations)
     for table_name in CORE_TABLES:
@@ -585,6 +587,17 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
     assert "TEXT" in all_sql
     assert "CHAR(64)" in all_sql
     assert "BOOLEAN" in MIGRATION_TABLE_SQL
+
+
+def test_m5_audit_identity_migration_backfills_one_guard_per_audit_version() -> None:
+    """Catch PostgreSQL accepting concurrent aliases for one M5 audit."""
+
+    migration = next(item for item in load_migrations() if item.version == 15)
+
+    assert migration.name == "m5_learning_observation_audit_identity"
+    assert "CREATE TABLE m5_learning_observation_audits" in migration.sql
+    assert "PRIMARY KEY (source_audit_id, source_audit_version)" in migration.sql
+    assert "DISTINCT ON" in migration.sql
 
 
 def test_m4_intent_migration_is_checksum_locked_and_constraint_complete() -> None:

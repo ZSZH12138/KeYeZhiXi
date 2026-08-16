@@ -17,11 +17,11 @@ from course_insight.infrastructure.postgresql.migration_runner import (
 
 
 def test_s1_s6_migration_is_the_next_checksum_locked_version() -> None:
-    assert SCHEMA_VERSION == 15
+    assert SCHEMA_VERSION == 17
     migrations = load_migrations()
-    assert migrations[-1].version == 15
-    migration = next(item for item in migrations if item.version == 14)
-    assert migration.path.name == "0014_m1_m2_m3_capabilities.sql"
+    assert migrations[-1].version == 17
+    migration = next(item for item in migrations if item.version == 16)
+    assert migration.path.name == "0016_m1_m2_m3_capabilities.sql"
     assert migration.checksum
     sql = migration.sql
     assert "CREATE EXTENSION IF NOT EXISTS vector" in sql
@@ -40,7 +40,7 @@ def test_s1_s6_migration_is_the_next_checksum_locked_version() -> None:
     assert "JSONB NOT NULL" in sql
     assert "CREATE INDEX" in sql
     metadata_migration = migrations[-1]
-    assert metadata_migration.path.name == "0015_vector_index_metadata.sql"
+    assert metadata_migration.path.name == "0017_vector_index_metadata.sql"
     assert "ADD COLUMN metadata JSONB" in metadata_migration.sql
 
 

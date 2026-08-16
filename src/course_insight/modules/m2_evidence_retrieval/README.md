@@ -40,7 +40,7 @@ live 用例；本机缺少受保护测试数据库时仍会明确 skip，只有 
 离线/测试模式下默认使用共享 `SQLiteM1M2M3Repository`；需要文件导出或显式文件后端时，
 `FileM2Repository` 将完整、不可变、带 checksum 的 lexical 制品写入
 `runtime/artifacts/`，制品必须包含 `EvidenceIndexRef` 和完整 lexical snapshot，即
-`documents` 与 `postings`。生产模式下，`PostgresM1M2M3Repository` 使用 0014/0015 migrations
+`documents` 与 `postings`。生产模式下，`PostgresM1M2M3Repository` 使用 0016/0017 migrations
 持久化 M2 制品、`m2_vector_indexes`、`m2_vector_documents` 和
 `m2_retrieval_audits`；PostgreSQL+pgvector 是生产权威后端，SQLite 不是生产后端。
 备份、恢复、checksum 校验、清理和回滚必须覆盖所选后端的权威数据。

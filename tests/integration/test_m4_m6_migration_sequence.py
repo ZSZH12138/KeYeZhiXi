@@ -17,28 +17,30 @@ from course_insight.infrastructure.sqlite.migrations import (
 def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
     tmp_path: Path,
 ) -> None:
-    """Keep published M4 versions while appending M6 and its M0 freeze."""
+    """Keep published migrations while appending the M5/M8 runtime schema."""
 
     expected_sqlite_tail = (
         "0010_m4_intent_decisions.sql",
         "0011_m4_intent_runtime_statuses.sql",
         "0012_m6_policy_learning.sql",
         "0013_m0_policy_freeze.sql",
+        "0014_m5_m8_model_runtime.sql",
+        "0015_m5_learning_observation_audit_identity.sql",
     )
     expected_postgres_tail = expected_sqlite_tail + (
-        "0014_m1_m2_m3_capabilities.sql",
-        "0015_vector_index_metadata.sql",
+        "0016_m1_m2_m3_capabilities.sql",
+        "0017_vector_index_metadata.sql",
     )
 
-    assert SQLITE_SCHEMA_VERSION == 13
-    assert POSTGRES_SCHEMA_VERSION == 15
+    assert SQLITE_SCHEMA_VERSION == 15
+    assert POSTGRES_SCHEMA_VERSION == 17
     assert tuple(
         migration.path.name for migration in load_migrations()
-    )[-6:] == expected_postgres_tail
+    )[-8:] == expected_postgres_tail
     assert tuple(
         path.name
         for path in sorted(MIGRATIONS_DIRECTORY.glob("*.sql"))
-    )[-6:] == expected_postgres_tail
+    )[-8:] == expected_postgres_tail
 
     database_path = tmp_path / "runtime" / "course_insight.sqlite3"
     with connect_sqlite(database_path) as connection:
@@ -70,6 +72,8 @@ def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
         (11, "m4_intent_runtime_statuses"),
         (12, "m6_policy_learning"),
         (13, "m0_policy_freeze"),
+        (14, "m5_m8_model_runtime"),
+        (15, "m5_learning_observation_audit_identity"),
     )
     assert {
         "m4_intent_decisions",
@@ -78,4 +82,5 @@ def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
         "m6_policy_observations",
         "m6_policy_rewards",
         "m6_policy_evaluations",
+        "m5_learning_observation_audits",
     } <= tables

@@ -36,7 +36,7 @@ _LEGACY_ENV_PATHS: dict[str, tuple[str, ...]] = {
     "DATABASE_PATH": ("database", "sqlite_path"),
     "LOG_LEVEL": ("logging", "level"),
 }
-_TEST_DATABASE_GUARD_KEYS = frozenset(
+_TEST_HARNESS_ENVIRONMENT_KEYS = frozenset(
     {
         "COURSE_INSIGHT_TEST_DATABASE_URL",
         "COURSE_INSIGHT_TEST_DATABASE_NAME",
@@ -226,7 +226,7 @@ def environment_to_settings(
         # These are disposable integration-test guards.  They are consumed by
         # the live-test helpers or by database.url_env, not by PlatformSettings
         # itself; parsing them as top-level settings would violate extra=forbid.
-        if raw_key in _TEST_DATABASE_GUARD_KEYS:
+        if raw_key in _TEST_HARNESS_ENVIRONMENT_KEYS:
             continue
         if raw_key in _LEGACY_ENV_PATHS:
             _assign(result, _LEGACY_ENV_PATHS[raw_key], _parse_value(raw_value))

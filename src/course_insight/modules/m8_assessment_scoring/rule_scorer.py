@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from course_insight.contracts.assessment import (
@@ -13,13 +12,14 @@ from course_insight.contracts.assessment import (
 )
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import ItemCard
-
-
-FIXED_TIME = datetime(2026, 7, 15, 9, 0, tzinfo=timezone(timedelta(hours=8)))
+from course_insight.modules.m8_assessment_scoring.clock import Clock, SystemUTCClock
 
 
 class RuleScorer:
     """Score objective values against a frozen ItemCard answer key."""
+
+    def __init__(self, clock: Clock | None = None) -> None:
+        self._clock = SystemUTCClock() if clock is None else clock
 
     def score(
         self,
@@ -79,7 +79,7 @@ class RuleScorer:
             scoring_method="rule",
             review_status="not_required",
             review_reason=[],
-            created_at=FIXED_TIME,
+            created_at=self._clock.now(),
         )
 
     @staticmethod

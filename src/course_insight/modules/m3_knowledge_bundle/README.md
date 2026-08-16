@@ -27,7 +27,7 @@ M3 冻结题目和知识版本，为 M5 DINA 认知诊断、M8 IRT 标定与自�
 `FileM3Repository` 将完整、不可变、带 checksum 的知识制品写入
 `runtime/artifacts/`；已发布制品必须同时包含 bundle、seed snapshot 和 validation
 report，被拒绝的 validation 也要保留对应的 seed snapshot/report。生产模式下，
-`PostgresM1M2M3Repository` 使用 0014/0015 migrations 持久化 M3 artifact 和
+`PostgresM1M2M3Repository` 使用 0016/0017 migrations 持久化 M3 artifact 和
 `m3_teacher_reviews` CAS 复核记录；PostgreSQL 是生产权威后端，SQLite 不是生产后端。
 备份、恢复、checksum 校验、清理和回滚必须覆盖所选后端的权威数据，不能只备份
 `KnowledgeBundle` JSON 或教师 seed 源文件。

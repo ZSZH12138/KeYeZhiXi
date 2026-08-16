@@ -12,11 +12,18 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresConnectionError,
     PostgresOperationError,
 )
+from course_insight.modules.m8_assessment_scoring.paper_record import (
+    FrozenAssessmentRecord,
+)
+from course_insight.modules.m8_assessment_scoring.repository import (
+    ReviewVersionConflictError,
+)
 from tests.integration.test_web_workflow_persistence import (
     NOW,
     _paper,
     _vector_scoring_bundle,
 )
+from tests.factories.m5_m8 import make_paper, make_rubric, make_scoring_bundle
 from tests.unit._postgres_repository_fakes import (
     FailingPool,
     FakeConnection,
@@ -47,6 +54,13 @@ def _paper_row(paper: Any) -> dict[str, Any]:
         "class_id": "class_1",
         "learner_id": paper.learner_id,
         **_contract_columns(paper),
+    }
+
+
+def _paper_record_row(record: FrozenAssessmentRecord) -> dict[str, Any]:
+    return {
+        "paper_id": record.paper.paper_id,
+        **_contract_columns(record),
     }
 
 
@@ -85,7 +99,11 @@ def _scoring_row(bundle: Any) -> dict[str, Any]:
     }
 
 
-def _responder(paper: Any, bundles: list[Any]):
+def _responder(
+    paper: Any,
+    bundles: list[Any],
+    record: FrozenAssessmentRecord | None = None,
+):
     result_by_key = {_result_key(bundle): bundle for bundle in bundles}
     audit_by_key = {
         (record.audit_id, record.audit_version): record
@@ -95,13 +113,17 @@ def _responder(paper: Any, bundles: list[Any]):
 
     def respond(statement: str, parameters: tuple[Any, ...]):
         normalized = " ".join(statement.lower().split())
+        if "from m8_frozen_assessment_records" in normalized:
+            return None if record is None else _paper_record_row(record)
         if "from m8_assessment_papers" in normalized:
             if normalized.startswith("select course_id, class_id"):
                 return {"course_id": "course_1", "class_id": "class_1"}
             return _paper_row(paper)
         if "from m8_score_audits" in normalized:
-            record = audit_by_key[(str(parameters[0]), int(parameters[1]))]
-            return _audit_row(record)
+            audit_record = audit_by_key[
+                (str(parameters[0]), int(parameters[1]))
+            ]
+            return _audit_row(audit_record)
         if "from m8_scoring_results" in normalized:
             if "and result_key = %s" in normalized:
                 return _scoring_row(result_by_key[str(parameters[1])])
@@ -123,6 +145,12 @@ def test_postgres_m8_repository_module_exists() -> None:
 )
 def test_postgres_m8_persists_scope_audit_vectors_and_history() -> None:
     paper = _paper()
+    paper_record = FrozenAssessmentRecord(
+        paper=paper,
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[],
+    )
     first = _vector_scoring_bundle(
         first_version=4,
         second_version=3,
@@ -133,7 +161,9 @@ def test_postgres_m8_persists_scope_audit_vectors_and_history() -> None:
         second_version=1,
         finalized_at=NOW + timedelta(hours=2),
     )
-    connection = FakeConnection(_responder(paper, [first, second]))
+    connection = FakeConnection(
+        _responder(paper, [first, second], paper_record)
+    )
     repository = PostgresM8Repository(FakePool(connection))
 
     assert repository.insert_or_get_paper(
@@ -147,6 +177,8 @@ def test_postgres_m8_persists_scope_audit_vectors_and_history() -> None:
         "course_1",
         "class_1",
     )
+    assert repository.insert_or_get_paper_record(paper_record) == paper_record
+    assert repository.get_paper_record("paper_1") == paper_record
 
     audit = first.get_audit_record("audit_a")
     repository.save_score_audit(audit)
@@ -188,6 +220,89 @@ def test_postgres_m8_persists_scope_audit_vectors_and_history() -> None:
     assert first.finalized_at in insert_parameters
     assert first.content_checksum() in insert_parameters
     assert first.schema_version in insert_parameters
+
+
+def test_postgres_m8_teacher_review_locks_and_appends_atomically() -> None:
+    paper = make_paper(subjective=False)
+    original = make_scoring_bundle(paper)
+    original_audit = original.score_audit_records[0]
+    reviewed_audit = original_audit.model_copy(
+        update={
+            "audit_version": 2,
+            "scoring_method": "teacher_override",
+            "review_status": "approved",
+            "created_at": original_audit.created_at + timedelta(minutes=1),
+        }
+    )
+    reviewed = original.model_copy(
+        update={
+            "score_audit_records": [original_audit, reviewed_audit],
+            "finalized_at": original.finalized_at + timedelta(minutes=1),
+        }
+    )
+    inserted = False
+
+    def respond(statement: str, parameters: tuple[Any, ...]):
+        nonlocal inserted
+        normalized = " ".join(statement.lower().split())
+        if normalized.startswith("insert into m8_scoring_results"):
+            inserted = True
+            return None
+        if "from m8_score_audits" in normalized:
+            version = int(parameters[1]) if len(parameters) > 1 else 1
+            return _audit_row(original_audit if version == 1 else reviewed_audit)
+        if "from m8_scoring_results" in normalized:
+            if "and result_key = %s" in normalized:
+                return _scoring_row(reviewed) if inserted else None
+            if "limit 1" in normalized:
+                return _scoring_row(original)
+        return None
+
+    connection = FakeConnection(respond)
+    repository = PostgresM8Repository(FakePool(connection))
+
+    stored = repository.insert_or_get_reviewed_scoring_result(
+        reviewed,
+        audit_id=original_audit.audit_id,
+        expected_audit_version=1,
+        expected_audit_checksum=original_audit.content_checksum(),
+    )
+
+    assert stored == reviewed
+    assert connection.transaction_entries == 1
+    assert any(
+        "FOR UPDATE" in statement
+        for statement, _ in connection.executions
+    )
+
+    with pytest.raises(ReviewVersionConflictError):
+        repository.insert_or_get_reviewed_scoring_result(
+            reviewed,
+            audit_id=original_audit.audit_id,
+            expected_audit_version=1,
+            expected_audit_checksum="0" * 64,
+        )
+
+
+@pytest.mark.skipif(
+    PostgresM8Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m8_saves_paper_and_frozen_record_atomically() -> None:
+    paper = _paper()
+    record = FrozenAssessmentRecord(
+        paper=paper,
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[],
+    )
+    connection = FakeConnection(_responder(paper, [], record))
+    pool = FakePool(connection)
+    repository = PostgresM8Repository(pool)
+
+    assert repository.insert_or_get_paper_record(record) == record
+    assert pool.connection_entries == 1
+    assert connection.transaction_entries == 1
 
 
 @pytest.mark.skipif(
@@ -251,7 +366,11 @@ def test_postgres_m8_insert_or_get_rejects_same_vector_different_payload() -> No
         finalized_at=NOW,
     )
     conflicting = stored.model_copy(
-        update={"finalized_at": NOW + timedelta(minutes=1)}
+        update={
+            "remediation_plan": stored.remediation_plan.model_copy(
+                update={"plan_id": "different_plan"}
+            )
+        }
     )
     repository = PostgresM8Repository(
         FakePool(FakeConnection(_responder(paper, [stored])))
@@ -259,6 +378,156 @@ def test_postgres_m8_insert_or_get_rejects_same_vector_different_payload() -> No
 
     with pytest.raises(RuntimeError, match="conflict"):
         repository.insert_or_get_scoring_result(conflicting)
+
+
+@pytest.mark.skipif(
+    PostgresM8Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m8_returns_first_result_when_only_retry_times_change() -> None:
+    paper = _paper()
+    stored = _vector_scoring_bundle(
+        first_version=1,
+        second_version=1,
+        finalized_at=NOW,
+    )
+    retry_time = NOW + timedelta(minutes=5)
+    retried = stored.model_copy(
+        update={
+            "score_audit_records": [
+                audit.model_copy(update={"created_at": retry_time})
+                for audit in stored.score_audit_records
+            ],
+            "remediation_plan": stored.remediation_plan.model_copy(
+                update={"created_at": retry_time}
+            ),
+            "finalized_at": retry_time,
+        }
+    )
+    repository = PostgresM8Repository(
+        FakePool(FakeConnection(_responder(paper, [stored])))
+    )
+
+    assert repository.insert_or_get_scoring_result(retried) == stored
+
+
+@pytest.mark.skipif(
+    PostgresM8Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m8_returns_first_paper_when_only_retry_time_changes() -> None:
+    stored = _paper()
+    changed_payload = {
+        **stored.model_dump(mode="python"),
+        "generated_at": stored.generated_at + timedelta(minutes=5),
+        "immutable_checksum": "pending",
+    }
+    candidate = type(stored)(**changed_payload)
+    retried = type(stored)(
+        **{**changed_payload, "immutable_checksum": candidate.freeze()}
+    )
+    repository = PostgresM8Repository(
+        FakePool(FakeConnection(_responder(stored, [])))
+    )
+
+    assert repository.insert_or_get_paper(
+        retried,
+        course_id="course_1",
+        class_id="class_1",
+    ) == stored
+
+
+@pytest.mark.skipif(
+    PostgresM8Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m8_rejects_paper_and_frozen_record_conflicts() -> None:
+    paper = _paper()
+    changed_sections = [
+        paper.sections[0].model_copy(update={"name": "Changed section"}),
+        *paper.sections[1:],
+    ]
+    changed_payload = {
+        **paper.model_dump(mode="python"),
+        "sections": changed_sections,
+        "immutable_checksum": "pending",
+    }
+    unfrozen = type(paper)(**changed_payload)
+    changed_paper = type(paper)(
+        **{**changed_payload, "immutable_checksum": unfrozen.freeze()}
+    )
+    paper_repository = PostgresM8Repository(
+        FakePool(FakeConnection(_responder(paper, [])))
+    )
+    with pytest.raises(PostgresOperationError, match="conflict"):
+        paper_repository.insert_or_get_paper(
+            changed_paper,
+            course_id="course_1",
+            class_id="class_1",
+        )
+
+    subjective_paper = make_paper(subjective=True)
+    original = FrozenAssessmentRecord(
+        paper=subjective_paper,
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[make_rubric(version="1.0.0")],
+    )
+    changed_record = FrozenAssessmentRecord(
+        paper=subjective_paper,
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[make_rubric(version="2.0.0")],
+    )
+    record_repository = PostgresM8Repository(
+        FakePool(
+            FakeConnection(_responder(subjective_paper, [], original))
+        )
+    )
+    with pytest.raises(PostgresOperationError, match="conflict"):
+        record_repository.insert_or_get_paper_record(changed_record)
+
+
+@pytest.mark.skipif(
+    PostgresM8Repository is None,
+    reason="adapter is the RED-phase missing feature",
+)
+def test_postgres_m8_rejects_mismatched_frozen_record_rows() -> None:
+    paper = _paper()
+    record = FrozenAssessmentRecord(
+        paper=paper,
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[],
+    )
+
+    requested_mismatch = PostgresM8Repository(
+        FakePool(FakeConnection(_responder(paper, [], record)))
+    )
+    with pytest.raises(PostgresOperationError, match="integrity"):
+        requested_mismatch.get_paper_record("other_paper")
+
+    def missing_paper(statement: str, _: tuple[Any, ...]):
+        normalized = " ".join(statement.lower().split())
+        if "from m8_frozen_assessment_records" in normalized:
+            return _paper_record_row(record)
+        return None
+
+    with pytest.raises(PostgresOperationError, match="integrity"):
+        PostgresM8Repository(
+            FakePool(FakeConnection(missing_paper))
+        ).get_paper_record(paper.paper_id)
+
+    def invalid_record_identity(statement: str, _: tuple[Any, ...]):
+        normalized = " ".join(statement.lower().split())
+        if "from m8_frozen_assessment_records" in normalized:
+            return {**_paper_record_row(record), "paper_id": "wrong_paper"}
+        return _paper_row(paper)
+
+    with pytest.raises(PostgresOperationError, match="integrity"):
+        PostgresM8Repository(
+            FakePool(FakeConnection(invalid_record_identity))
+        ).get_paper_record(paper.paper_id)
 
 
 @pytest.mark.skipif(
@@ -288,6 +557,7 @@ def test_postgres_m8_validates_scope_and_empty_recovery_paths() -> None:
         repository.save_paper(paper)
 
     assert repository.get_paper("missing") is None
+    assert repository.get_paper_record("missing") is None
     assert repository.get_paper_execution_context("missing") is None
     assert repository.get_score_audit("missing", 1) is None
     assert repository.get_scoring_result("missing") is None
@@ -312,6 +582,18 @@ def test_postgres_m8_preserves_connection_errors_and_sanitizes_sql_errors() -> N
     with pytest.raises(PostgresConnectionError) as captured:
         failing_repository.get_paper("paper_1")
     assert captured.value is connection_error
+    record = FrozenAssessmentRecord(
+        paper=_paper(),
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[],
+    )
+    with pytest.raises(PostgresConnectionError) as record_insert_error:
+        failing_repository.insert_or_get_paper_record(record)
+    assert record_insert_error.value is connection_error
+    with pytest.raises(PostgresConnectionError) as record_read_error:
+        failing_repository.get_paper_record("paper_1")
+    assert record_read_error.value is connection_error
 
     def fail_operation(
         _statement: str,
@@ -357,6 +639,15 @@ def test_postgres_m8_sanitizes_database_errors_across_protocol_methods() -> None
             class_id="class_1",
         ),
         lambda repository: repository.get_paper_execution_context("paper_1"),
+        lambda repository: repository.insert_or_get_paper_record(
+            FrozenAssessmentRecord(
+                paper=paper,
+                course_id="course_1",
+                class_id="class_1",
+                frozen_rubrics=[],
+            )
+        ),
+        lambda repository: repository.get_paper_record("paper_1"),
         lambda repository: repository.save_score_audit(audit),
         lambda repository: repository.get_score_audit(
             audit.audit_id,

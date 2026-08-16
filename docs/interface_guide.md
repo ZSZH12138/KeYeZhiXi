@@ -2,16 +2,18 @@
 
 ## 使用规则
 
-本项目共有 84 个公开契约，其中 22 个是可独立导出的根契约。
+本项目共有 91 个公开契约，其中 22 个是可独立导出的根契约。
 路径 `$` 表示完整契约，`$[]` 表示列表元素，点路径表示组成字段。
 服务之间必须传递契约对象，不得用无类型字典代替。
 
-当前 v2 中仍返回空结果的只是尚未启用的算法/外部调用：DeepSeek 不发起 API 请求，
-DINA/BKT/IRT 不运行估计。M2 的 PostgreSQL+pgvector、embedding、策略检索和审计
+当前 v2 中仍返回空结果的外部调用只有 DeepSeek 网络边界。M2 的 PostgreSQL+pgvector、embedding、策略检索和审计
 端口已经实现；SQLite 仅用于离线、测试和迁移演练，生产必须使用 PostgreSQL+pgvector。
 仓库已提供真实 PostgreSQL+pgvector live 用例；当前机器缺少生产依赖时必须 fail
 closed，live 用例会明确 skip，不能把逻辑 `empty` 或 skip 当成生产成功，最终以 CI
 `live-m1-m3` job 的实际通过结果为准。
+
+M5 已运行真实 DINA/BKT，M8 已运行真实 2PL IRT、能力估计和自适应选题，M9
+已运行本地模型质量检查；这些本地能力仍受数据、质量审核和教师批准门槛约束。
 
 M2 正式业务检索入口是 `retrieve_with_policy`；旧 `retrieve` 仅为已有 lexical 调用
 保留的兼容入口。M3 生产发布必须使用 `build_knowledge_bundle_after_approval`，
@@ -65,11 +67,11 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 
 ## v2 组件契约流
 
-| 边界 | 生产者 | 消费者 | 当前空结果 |
+| 边界 | 生产者 | 消费者 | 当前行为 |
 |---|---|---|---|
 | `ActorContext` | M0 Django 鉴权边界 | `AppCoordinator`、所有受授权用例 | 可构造伪匿名上下文 |
 | `AssessmentSubmission` | M0 Django 学生表单 | `M8.prepare_scoring` | `answers` 是题目实例 ID 到字符串/布尔/整数/有限浮点答案的映射 |
-| `TeacherReviewSubmission` | M0 Django 教师表单 | `M9.record_teacher_review` | 使用 `confirm/override/reject`，并完整携带总分、分项覆盖和教师意见 |
+| `TeacherReviewSubmission` | M0 Django 教师表单 | `M9.record_teacher_review` | 使用 `confirm/override/reject`，并完整携带 `expected_audit_version`、`expected_audit_checksum`、总分、分项覆盖和教师意见；版本与 checksum 必须同时匹配当前评分审计 |
 | `AsyncJobStatus` | M0 作业边界 | legacy intelligence scaffold | Django 作业固定 `skipped`；不代表真实 Web 未实现 |
 | `EmbeddingModelRef` | M2 检索配置 | M2 索引器 | 生产为 `configured`；`empty` 仅用于离线/兼容场景 |
 | `RetrievalPolicy` | M2 检索配置 | M2 检索器 | 允许词法/向量/混合策略 |
@@ -79,17 +81,17 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 | `LLMGenerationResult` | M7/M9 DeepSeek 适配器 | M7/M9 业务服务 | `empty`，内容/引用为空，`not_run` |
 | `ModelInvocationAudit` | DeepSeek 适配器 | M9 审计 | `not_run`，token/延迟为 0 |
 | `SafetyCheckResult` | M7/M9 安全边界 | DeepSeek 适配器 | `not_run` |
-| `LearningObservation`/`LearningObservationBatch` | M8 评分审计转换 | M5 DINA/BKT、M8 IRT | 空 batch 仅携带 learner 和 watermark |
-| `CognitiveDiagnosisResult` | M5 DINA 引擎 | M5 状态、M6、M9 | `empty`，无掌握概率 |
-| `KnowledgeTraceSnapshot` | M5 BKT 引擎 | M5 状态、M6、M9 | `empty`，无追踪概率 |
-| `LearningModelRun` | `M5.run_learning_models` | `ArchitectureScaffoldResult`、M9 质量 | `empty` |
-| `IRTItemParameters`/`IRTParameterSet` | M8 标定引擎 | M8 能力估计/选题，M9 审核 | 空参数集 |
-| `AbilityEstimate` | M8 IRT 估计 | M8 自适应选题 | `empty`，无 theta/标准误 |
-| `CalibrationRunResult` | `M8.calibrate_irt` | M9 质量与审核 | `empty`，不收敛、无指标 |
-| `AdaptiveSelectionPolicy` | M8 配置 | M8 选题器 | 空策略不绑定参数集 |
-| `AdaptiveSelectionResult` | `M8.select_adaptive_items` | M8 出卷编排 | `empty`，无题目 |
-| `ModelQualityReport` | `M9.build_model_quality_report` | M9 教师审核与 M8 发布门槛 | `insufficient_data`，无指标 |
-| `CalibrationReviewDecision` | M9 教师审核 | M8 参数版本发布 | 仅契约，当前不自动发布 |
+| `LearningObservation`/`LearningObservationBatch` | M8 评分审计转换 | M5 DINA/BKT、M8 IRT | 最新有效审计生成权威观测；无有效审计时可为空 |
+| `CognitiveDiagnosisResult` | M5 DINA 引擎 | M5 状态、M6、M9 | 足量数据返回 DINA 掌握后验；不足时明确失败 |
+| `KnowledgeTraceSnapshot` | M5 BKT 引擎 | M5 状态、M6、M9 | 足量有序历史返回 BKT 掌握概率 |
+| `LearningModelRun` | `M5.run_learning_models` | `ArchitectureScaffoldResult`、M9 质量 | 绑定完整历史、模型版本和观测水位 |
+| `IRTItemParameters`/`IRTParameterSet` | M8 标定引擎 | M8 能力估计/选题，M9 审核 | 2PL shadow 经质量和教师审核后追加 approved 版本 |
+| `AbilityEstimate` | M8 IRT 估计 | M8 自适应选题 | approved 参数上的有限 EAP theta/标准误 |
+| `CalibrationRunResult` | `M8.calibrate_irt` | M9 质量与审核 | 足量数据返回真实收敛指标和 shadow 参数 |
+| `AdaptiveSelectionPolicy` | M8 配置 | M8 选题器 | 绑定参数集、数量、概念配额、难度和曝光上限 |
+| `AdaptiveSelectionResult` | `M8.select_adaptive_items` | M8 出卷编排 | 按 Fisher 信息量和约束选择并持久化 |
+| `ModelQualityReport` | `M9.build_model_quality_report` | M9 教师审核与 M8 发布门槛 | `ready`、`failed` 或证据不足时 `insufficient_data` |
+| `CalibrationReviewDecision` | M9 教师审核 | M8 参数版本发布 | approve/reject/defer 驱动追加式参数状态机 |
 
 M0 的 `TeacherReviewSubmission` 是 M8/M9 评分复核接口，不等同于 M3 S4 知识包复核。
 M3 生产发布必须先通过 `TeacherReviewWorkflow` 的 CAS 状态
@@ -128,7 +130,7 @@ Repository 恢复最新权威游标；全新会话从 S1/turn 0 开始。相同�
 `TaskPlan`、`ScoringResultBundle`、`StateUpdateResult` 和可选
 `SessionStateSnapshot` 四个输入，返回 `TutoringControlResult`。新增的
 `prepare_policy_execution(...) -> PolicyExecutionRef` 是应用层/M0 内部入口，
-不进入 84 个 schema 或 contract provenance；直接调用公开方法时会惰性执行相同
+不进入 91 个 schema 或 contract provenance；直接调用公开方法时会惰性执行相同
 first-writer binding。
 
 | 私有值/接口 | 生产者 | 消费者 | 不变量 |
@@ -156,8 +158,9 @@ M6 的 OPE/approval 尚未正式接入 M9。当前公共
 保留为 legacy 智能能力脚手架入口。为保持既有
 `ArchitectureScaffoldResult.is_empty()` 公共语义，M0 的
 `prepare_django_frontend()` 继续返回 `skipped`；该 legacy 脚手架不执行 M2 正式
-`retrieve_with_policy`。M7/M9 DeepSeek、M5 DINA/BKT、M8 IRT/自适应选择和 M9
-模型质量也保持空或证据不足状态。
+`retrieve_with_policy`；M7/M9 DeepSeek 保持空结果，没有作答数据的 M5/M8 探测
+保持证据不足。正式测评流程使用真实
+DINA/BKT、2PL IRT、模型质量和自适应选择。
 真实 Django Web/health 由独立进程入口提供，不依赖该脚手架，也不把完整领域契约
 存入 Session。
 

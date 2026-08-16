@@ -5,6 +5,13 @@ from __future__ import annotations
 import sqlite3
 from pathlib import Path
 
+from course_insight.contracts.learning_models import (
+    BktModelArtifact,
+    DinaModelArtifact,
+    KnowledgeTraceSnapshot,
+    LearningObservation,
+    LearningObservationBatch,
+)
 from course_insight.contracts.state import (
     ClassStateSnapshot,
     LearnerStateSnapshot,
@@ -13,6 +20,14 @@ from course_insight.contracts.state import (
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import migrate
+from course_insight.infrastructure.sqlite import m5_bkt_runtime
+from course_insight.modules.m5_learner_class_state.learning_observation_evidence import (
+    learning_observation_evidence_checksum,
+    normalize_learning_observations,
+)
+
+
+_UNSPECIFIED_CLASS_BASELINE = object()
 
 
 class SQLiteM5Repository:
@@ -31,6 +46,10 @@ class SQLiteM5Repository:
     def insert_or_get_state_update(
         self,
         result: StateUpdateResult,
+        *,
+        expected_previous_class_snapshot_id: str | None | object = (
+            _UNSPECIFIED_CLASS_BASELINE
+        ),
     ) -> StateUpdateResult:
         """Insert an attempt result once or return its identical winner."""
 
@@ -42,6 +61,44 @@ class SQLiteM5Repository:
         connection = connect_sqlite(self._database_path)
         try:
             connection.execute("BEGIN IMMEDIATE")
+            if expected_previous_class_snapshot_id is not _UNSPECIFIED_CLASS_BASELINE:
+                existing = connection.execute(
+                    """
+                    SELECT
+                        attempt_id,
+                        course_id,
+                        class_id,
+                        learner_id,
+                        state_version,
+                        payload
+                    FROM m5_state_updates
+                    WHERE attempt_id = ? AND state_version = ?
+                    """,
+                    (attempt_id, learner.state_version),
+                ).fetchone()
+                if existing is not None:
+                    stored = self._state_result_from_row(existing)
+                    if stored != result:
+                        raise RuntimeError(
+                            "M5 state-update conflict for the same attempt version"
+                        )
+                    connection.execute("COMMIT")
+                    return stored.model_copy(deep=True)
+                row = connection.execute(
+                    """
+                    SELECT snapshot_id
+                    FROM m5_class_states
+                    WHERE course_id = ? AND class_id = ?
+                    ORDER BY state_version DESC
+                    LIMIT 1
+                    """,
+                    (learner.course_id, learner.class_id),
+                ).fetchone()
+                current_snapshot_id = (
+                    None if row is None else str(row["snapshot_id"])
+                )
+                if current_snapshot_id != expected_previous_class_snapshot_id:
+                    raise RuntimeError("M5 class-state baseline conflict")
             self._insert_or_validate_learner(connection, learner)
             self._insert_or_validate_class(connection, class_state)
             connection.execute(
@@ -293,6 +350,384 @@ class SQLiteM5Repository:
         finally:
             connection.close()
 
+    def insert_or_get_learning_observation_batch(
+        self,
+        batch: LearningObservationBatch,
+    ) -> LearningObservationBatch:
+        """Insert immutable observations or return the identical replay."""
+
+        candidate = LearningObservationBatch.model_validate(
+            batch.model_dump(mode="python")
+        )
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            for observation in candidate.observations:
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO m5_learning_observation_audits (
+                        source_audit_id,
+                        source_audit_version,
+                        observation_id
+                    ) VALUES (?, ?, ?)
+                    """,
+                    (
+                        observation.source_audit_id,
+                        observation.source_audit_version,
+                        observation.observation_id,
+                    ),
+                )
+                audit_row = connection.execute(
+                    """
+                    SELECT observation_id
+                    FROM m5_learning_observation_audits
+                    WHERE source_audit_id = ? AND source_audit_version = ?
+                    """,
+                    (
+                        observation.source_audit_id,
+                        observation.source_audit_version,
+                    ),
+                ).fetchone()
+                if audit_row is None:
+                    raise RuntimeError("M5 learning observation audit insert failed")
+                canonical_observation_id = str(audit_row["observation_id"])
+                if canonical_observation_id != observation.observation_id:
+                    canonical_row = connection.execute(
+                        """
+                        SELECT
+                            observation_id,
+                            course_id,
+                            class_id,
+                            learner_id,
+                            attempt_id,
+                            occurred_at,
+                            payload,
+                            payload_checksum,
+                            schema_version
+                        FROM m5_learning_observations
+                        WHERE observation_id = ?
+                        """,
+                        (canonical_observation_id,),
+                    ).fetchone()
+                    canonical = self._learning_observation_from_row(canonical_row)
+                    if learning_observation_evidence_checksum(
+                        canonical
+                    ) != learning_observation_evidence_checksum(observation):
+                        raise RuntimeError("M5 learning observation audit conflict")
+                    continue
+                payload = dumps_json(observation.to_dict())
+                connection.execute(
+                    """
+                    INSERT OR IGNORE INTO m5_learning_observations (
+                        observation_id,
+                        course_id,
+                        class_id,
+                        learner_id,
+                        attempt_id,
+                        occurred_at,
+                        payload,
+                        payload_checksum,
+                        schema_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        observation.observation_id,
+                        observation.course_id,
+                        observation.class_id,
+                        observation.learner_id,
+                        observation.attempt_id,
+                        observation.occurred_at.isoformat(),
+                        payload,
+                        observation.content_checksum(),
+                        observation.schema_version,
+                    ),
+                )
+                row = connection.execute(
+                    """
+                    SELECT
+                        observation_id,
+                        course_id,
+                        class_id,
+                        learner_id,
+                        attempt_id,
+                        occurred_at,
+                        payload,
+                        payload_checksum,
+                        schema_version
+                    FROM m5_learning_observations
+                    WHERE observation_id = ?
+                    """,
+                    (observation.observation_id,),
+                ).fetchone()
+                stored = self._learning_observation_from_row(row)
+                if stored != observation:
+                    raise RuntimeError(
+                        "M5 learning observation conflict for the same identity"
+                    )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+        return candidate.model_copy(deep=True)
+
+    def list_learning_observations(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> list[LearningObservation]:
+        """List observations in stable chronological order."""
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT
+                    observation_id,
+                    course_id,
+                    class_id,
+                    learner_id,
+                    attempt_id,
+                    occurred_at,
+                    payload,
+                    payload_checksum,
+                    schema_version
+                FROM m5_learning_observations
+                WHERE course_id = ? AND class_id = ?
+                ORDER BY occurred_at, attempt_id, observation_id
+                """,
+                (course_id, class_id),
+            ).fetchall()
+            observations = [
+                self._learning_observation_from_row(row).model_copy(deep=True)
+                for row in rows
+            ]
+            return normalize_learning_observations(observations)
+        finally:
+            connection.close()
+
+    def insert_or_get_dina_model(
+        self,
+        model: DinaModelArtifact,
+    ) -> DinaModelArtifact:
+        """Insert one DINA model version without permitting replacement."""
+
+        candidate = DinaModelArtifact.model_validate(model.model_dump(mode="python"))
+        payload = dumps_json(candidate.to_dict())
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO m5_dina_models (
+                    model_id,
+                    course_id,
+                    model_version,
+                    created_at,
+                    payload,
+                    payload_checksum,
+                    schema_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    candidate.model_id,
+                    candidate.course_id,
+                    candidate.model_version,
+                    candidate.created_at.isoformat(),
+                    payload,
+                    candidate.content_checksum(),
+                    candidate.schema_version,
+                ),
+            )
+            row = connection.execute(
+                """
+                SELECT
+                    model_id,
+                    course_id,
+                    model_version,
+                    created_at,
+                    payload,
+                    payload_checksum,
+                    schema_version
+                FROM m5_dina_models
+                WHERE model_id = ? OR (course_id = ? AND model_version = ?)
+                ORDER BY model_id = ? DESC
+                LIMIT 1
+                """,
+                (
+                    candidate.model_id,
+                    candidate.course_id,
+                    candidate.model_version,
+                    candidate.model_id,
+                ),
+            ).fetchone()
+            stored = self._dina_model_from_row(row)
+            if stored != candidate:
+                raise RuntimeError("M5 DINA model conflict for the same identity")
+            connection.execute("COMMIT")
+            return stored.model_copy(deep=True)
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def get_dina_model(
+        self,
+        *,
+        course_id: str,
+        model_version: str,
+    ) -> DinaModelArtifact | None:
+        """Load one exact DINA model version."""
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT
+                    model_id,
+                    course_id,
+                    model_version,
+                    created_at,
+                    payload,
+                    payload_checksum,
+                    schema_version
+                FROM m5_dina_models
+                WHERE course_id = ? AND model_version = ?
+                """,
+                (course_id, model_version),
+            ).fetchone()
+            return (
+                None
+                if row is None
+                else self._dina_model_from_row(row).model_copy(deep=True)
+            )
+        finally:
+            connection.close()
+
+    def get_latest_dina_model(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> DinaModelArtifact | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT
+                    model_id,
+                    course_id,
+                    model_version,
+                    created_at,
+                    payload,
+                    payload_checksum,
+                    schema_version
+                FROM m5_dina_models
+                WHERE course_id = ?
+                ORDER BY created_at DESC, model_id DESC
+                """,
+                (course_id,),
+            ).fetchall()
+            for row in rows:
+                model = self._dina_model_from_row(row)
+                if model.class_id == class_id:
+                    return model.model_copy(deep=True)
+            return None
+        finally:
+            connection.close()
+
+    def insert_or_get_bkt_model(
+        self,
+        model: BktModelArtifact,
+    ) -> BktModelArtifact:
+        return m5_bkt_runtime.insert_or_get_bkt_model(self._database_path, model)
+
+    def get_bkt_model(
+        self,
+        *,
+        course_id: str,
+        model_version: str,
+    ) -> BktModelArtifact | None:
+        return m5_bkt_runtime.get_bkt_model(
+            self._database_path,
+            course_id=course_id,
+            model_version=model_version,
+        )
+
+    def get_latest_bkt_model(
+        self,
+        *,
+        course_id: str,
+        class_id: str,
+    ) -> BktModelArtifact | None:
+        return m5_bkt_runtime.get_latest_bkt_model(
+            self._database_path,
+            course_id=course_id,
+            class_id=class_id,
+        )
+
+    def insert_or_get_knowledge_trace(
+        self,
+        trace: KnowledgeTraceSnapshot,
+    ) -> KnowledgeTraceSnapshot:
+        return m5_bkt_runtime.insert_or_get_knowledge_trace(
+            self._database_path,
+            trace,
+        )
+
+    def get_knowledge_trace(
+        self,
+        *,
+        trace_id: str,
+    ) -> KnowledgeTraceSnapshot | None:
+        return m5_bkt_runtime.get_knowledge_trace(
+            self._database_path,
+            trace_id=trace_id,
+        )
+
+    def list_latest_learner_states(
+        self,
+        course_id: str,
+        class_id: str,
+    ) -> list[LearnerStateSnapshot]:
+        """Load each learner's greatest state version in stable order."""
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            rows = connection.execute(
+                """
+                SELECT
+                    state.snapshot_id,
+                    state.course_id,
+                    state.class_id,
+                    state.learner_id,
+                    state.payload
+                FROM m5_learner_states AS state
+                JOIN (
+                    SELECT learner_id, MAX(state_version) AS state_version
+                    FROM m5_learner_states
+                    WHERE course_id = ? AND class_id = ?
+                    GROUP BY learner_id
+                ) AS latest
+                  ON latest.learner_id = state.learner_id
+                 AND latest.state_version = state.state_version
+                WHERE state.course_id = ? AND state.class_id = ?
+                ORDER BY state.learner_id
+                """,
+                (course_id, class_id, course_id, class_id),
+            ).fetchall()
+            return [
+                self._learner_from_row(row).model_copy(deep=True)
+                for row in rows
+            ]
+        finally:
+            connection.close()
+
     def save_class_state(self, snapshot: ClassStateSnapshot) -> None:
         connection = connect_sqlite(self._database_path)
         try:
@@ -419,6 +854,28 @@ class SQLiteM5Repository:
                 if row is None
                 else self._class_from_row(row).model_copy(deep=True)
             )
+        finally:
+            connection.close()
+
+    def get_latest_class_state_version(
+        self,
+        course_id: str,
+        class_id: str,
+    ) -> int | None:
+        connection = connect_sqlite(self._database_path)
+        try:
+            row = connection.execute(
+                """
+                SELECT MAX(state_version) AS state_version
+                FROM m5_class_states
+                WHERE course_id = ? AND class_id = ?
+                """,
+                (course_id, class_id),
+            ).fetchone()
+            value = None if row is None else row["state_version"]
+            if value is not None and (type(value) is not int or value < 1):
+                raise RuntimeError("M5 class-state version is invalid")
+            return value
         finally:
             connection.close()
 
@@ -609,3 +1066,39 @@ class SQLiteM5Repository:
         ):
             raise RuntimeError("M5 state-update row identity mismatch")
         return result
+
+    @staticmethod
+    def _learning_observation_from_row(
+        row: sqlite3.Row | None,
+    ) -> LearningObservation:
+        if row is None:
+            raise RuntimeError("M5 learning observation insert produced no row")
+        observation = LearningObservation.model_validate_json(str(row["payload"]))
+        if (
+            observation.observation_id != str(row["observation_id"])
+            or observation.course_id != str(row["course_id"])
+            or observation.class_id != str(row["class_id"])
+            or observation.learner_id != str(row["learner_id"])
+            or observation.attempt_id != str(row["attempt_id"])
+            or observation.occurred_at.isoformat() != str(row["occurred_at"])
+            or observation.content_checksum() != str(row["payload_checksum"])
+            or observation.schema_version != str(row["schema_version"])
+        ):
+            raise RuntimeError("M5 learning observation row integrity mismatch")
+        return observation
+
+    @staticmethod
+    def _dina_model_from_row(row: sqlite3.Row | None) -> DinaModelArtifact:
+        if row is None:
+            raise RuntimeError("M5 DINA model insert produced no row")
+        model = DinaModelArtifact.model_validate_json(str(row["payload"]))
+        if (
+            model.model_id != str(row["model_id"])
+            or model.course_id != str(row["course_id"])
+            or model.model_version != str(row["model_version"])
+            or model.created_at.isoformat() != str(row["created_at"])
+            or model.content_checksum() != str(row["payload_checksum"])
+            or model.schema_version != str(row["schema_version"])
+        ):
+            raise RuntimeError("M5 DINA model row integrity mismatch")
+        return model

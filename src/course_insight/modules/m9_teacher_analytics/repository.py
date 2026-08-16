@@ -13,6 +13,10 @@ from course_insight.contracts.analytics import (
 _REVIEW_TABLE = "m9_teacher_reviews"
 
 
+class ReviewDecisionConflictError(RuntimeError):
+    """Another immutable teacher decision already won this audit version."""
+
+
 class M9Repository(Protocol):
     """Persistence operations owned exclusively by M9."""
 
@@ -56,3 +60,6 @@ class M9Repository(Protocol):
         decision_id: str,
     ) -> TeacherReviewDecision | None:
         """Load one teacher decision by stable identity."""
+
+
+__all__ = ["M9Repository", "ReviewDecisionConflictError"]

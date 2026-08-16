@@ -76,7 +76,7 @@
     },
     "AdaptiveSelectionResult": {
       "additionalProperties": false,
-      "description": "M8 item selection output; empty until IRT is configured.",
+      "description": "M8 constrained item-selection output.",
       "properties": {
         "ability_estimate": {
           "anyOf": [
@@ -88,6 +88,19 @@
             }
           ],
           "default": null
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Code"
         },
         "item_ids": {
           "items": {
@@ -244,6 +257,19 @@
         "converged": {
           "title": "Converged",
           "type": "boolean"
+        },
+        "failure_code": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Failure Code"
         },
         "generated_at": {
           "format": "date-time",
@@ -595,12 +621,38 @@
       "additionalProperties": false,
       "description": "Versioned BKT-family trace; empty until sequence data is available.",
       "properties": {
+        "class_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Class Id"
+        },
         "concept_probabilities": {
           "additionalProperties": {
             "type": "number"
           },
           "title": "Concept Probabilities",
           "type": "object"
+        },
+        "course_id": {
+          "anyOf": [
+            {
+              "minLength": 1,
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Course Id"
         },
         "learner_id": {
           "minLength": 1,
@@ -630,6 +682,13 @@
           "minLength": 1,
           "title": "Observation Watermark",
           "type": "string"
+        },
+        "processed_audit_keys": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Processed Audit Keys",
+          "type": "array"
         },
         "schema_version": {
           "default": "1.0.0",
