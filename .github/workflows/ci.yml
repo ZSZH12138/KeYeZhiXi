@@ -164,12 +164,16 @@ jobs:
         if: failure()
         shell: bash
         run: |
-          {
-            echo "## Live M1-M3 acceptance diagnostics"
-            echo '```text'
-            cat live-m1-m3.log
-            echo '```'
-          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f live-m1-m3.log ]; then
+            {
+              echo "## Live M1-M3 acceptance diagnostics"
+              echo '```text'
+              cat live-m1-m3.log
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "Live acceptance did not start; no test log was produced." >> "$GITHUB_STEP_SUMMARY"
+          fi
           if [ -f m2-pgvector-smoke.json ]; then
             {
               echo "## M2 pgvector performance smoke"
