@@ -11,6 +11,31 @@ from typing import Protocol
 from course_insight.contracts.errors import DomainError
 
 
+MAX_VECTOR_BATCH_SIZE = 1024
+MAX_PGVECTOR_DIMENSION = 16_000
+M2_VECTOR_DOCUMENTS_TABLE = "m2_vector_documents"
+
+
+def build_pgvector_exact_search_sql(
+    dimension: int,
+    *,
+    explain: bool = False,
+) -> str:
+    """Build the one exact-search SQL shape used by every pgvector adapter."""
+
+    if type(dimension) is not int or not 1 <= dimension <= MAX_PGVECTOR_DIMENSION:
+        raise ValueError(
+            f"dimension must be an integer between 1 and {MAX_PGVECTOR_DIMENSION}"
+        )
+    prefix = "EXPLAIN (ANALYZE, BUFFERS, FORMAT JSON)\n" if explain else ""
+    return f"""{prefix}SELECT evidence_id, chunk_id, text_checksum,
+       1 - (embedding::vector({dimension}) <=> %s::vector) AS score
+FROM {M2_VECTOR_DOCUMENTS_TABLE}
+WHERE index_id = %s AND index_version = %s
+ORDER BY embedding::vector({dimension}) <=> %s::vector, evidence_id
+LIMIT %s"""
+
+
 @dataclass(frozen=True, slots=True)
 class VectorDocument:
     evidence_id: str
@@ -47,8 +72,19 @@ class VectorStore(Protocol):
     def begin(self, index_id: str, index_version: str, *, dimension: int) -> None:
         """Create or replace an unpublished staging batch."""
 
+    def discard(self, index_id: str, index_version: str) -> None:
+        """Remove only an unpublished staging batch after a failed build."""
+
     def add(self, index_id: str, index_version: str, document: VectorDocument) -> None:
         """Add one validated vector to a staging batch."""
+
+    def add_many(
+        self,
+        index_id: str,
+        index_version: str,
+        documents: Sequence[VectorDocument],
+    ) -> None:
+        """Add one bounded, transactionally validated batch to staging."""
 
     def publish(
         self,
@@ -85,8 +121,9 @@ class InMemoryVectorStore:
 
     def begin(self, index_id: str, index_version: str, *, dimension: int) -> None:
         _validate_identity(index_id, index_version)
-        if type(dimension) is not int or dimension < 1:
-            raise _invalid("vector dimension is invalid")
+        _validate_dimension(dimension)
+        if (index_id, index_version) in self._ready:
+            raise _invalid("ready vector index is immutable")
         self._staging[(index_id, index_version)] = (dimension, {})
 
     def add(self, index_id: str, index_version: str, document: VectorDocument) -> None:
@@ -99,6 +136,38 @@ class InMemoryVectorStore:
         if document.evidence_id in rows:
             raise _invalid("duplicate vector document")
         rows[document.evidence_id] = document
+
+    def add_many(
+        self,
+        index_id: str,
+        index_version: str,
+        documents: Sequence[VectorDocument],
+    ) -> None:
+        rows_to_add = _validated_batch(documents)
+        key = (index_id, index_version)
+        batch = self._staging.get(key)
+        if batch is None:
+            raise _invalid("vector staging batch is missing")
+        dimension, rows = batch
+        seen = set(rows)
+        for document in rows_to_add:
+            _validate_document(document, dimension)
+            if document.evidence_id in seen:
+                raise _invalid("duplicate vector document")
+            seen.add(document.evidence_id)
+        original_rows = dict(rows)
+        try:
+            # Calling the single-row hook preserves test/local subclasses while
+            # the snapshot guarantees an all-or-nothing in-memory batch.
+            for document in rows_to_add:
+                self.add(index_id, index_version, document)
+        except Exception:
+            rows.clear()
+            rows.update(original_rows)
+            raise
+
+    def discard(self, index_id: str, index_version: str) -> None:
+        self._staging.pop((index_id, index_version), None)
 
     def publish(
         self,
@@ -183,12 +252,19 @@ class PgVectorStore:
 
     def begin(self, index_id: str, index_version: str, *, dimension: int) -> None:
         _validate_identity(index_id, index_version)
-        if type(dimension) is not int or dimension < 1:
-            raise _invalid("vector dimension is invalid")
+        _validate_dimension(dimension)
         self.assert_available()
         try:
             with self._pool.connection() as connection:
                 with connection.transaction():
+                    current = connection.execute(
+                        "SELECT dimension, status FROM m2_vector_indexes WHERE index_id = %s AND index_version = %s FOR UPDATE",
+                        (index_id, index_version),
+                    ).fetchone()
+                    if current is not None and current.get("status") == "ready":
+                        raise _invalid("ready vector index is immutable")
+                    if current is not None and int(current["dimension"]) != dimension:
+                        raise _invalid("vector index dimension conflicts")
                     connection.execute(
                         "DELETE FROM m2_vector_documents WHERE index_id = %s AND index_version = %s",
                         (index_id, index_version),
@@ -207,25 +283,77 @@ class PgVectorStore:
             raise DomainError(code="VECTOR_STORE_UNAVAILABLE", module="m2", message="pgvector store is unavailable", recoverable=True) from None
 
     def add(self, index_id: str, index_version: str, document: VectorDocument) -> None:
-        dimension = self._dimension(index_id, index_version)
-        _validate_document(document, dimension)
-        vector = "[" + ",".join(format(value, ".17g") for value in document.vector) + "]"
+        self.add_many(index_id, index_version, [document])
+
+    def add_many(
+        self,
+        index_id: str,
+        index_version: str,
+        documents: Sequence[VectorDocument],
+    ) -> None:
+        _validate_identity(index_id, index_version)
+        rows = _validated_batch(documents)
         try:
             with self._pool.connection() as connection:
-                connection.execute(
-                    "INSERT INTO m2_vector_documents(index_id,index_version,evidence_id,chunk_id,text_checksum,dimension,embedding) VALUES (%s,%s,%s,%s,%s,%s,%s::vector)",
-                    (
-                        index_id,
-                        index_version,
-                        document.evidence_id,
-                        document.chunk_id,
-                        document.text_checksum,
-                        dimension,
-                        vector,
-                    ),
-                )
+                with connection.transaction():
+                    current = connection.execute(
+                        "SELECT dimension,status FROM m2_vector_indexes WHERE index_id=%s AND index_version=%s FOR UPDATE",
+                        (index_id, index_version),
+                    ).fetchone()
+                    if not current or current.get("status") != "staging":
+                        raise _invalid("vector index is not ready")
+                    dimension = int(current["dimension"])
+                    for document in rows:
+                        _validate_document(document, dimension)
+                    if len({document.evidence_id for document in rows}) != len(rows):
+                        raise _invalid("duplicate vector document")
+                    existing = connection.execute(
+                        "SELECT evidence_id FROM m2_vector_documents WHERE index_id=%s AND index_version=%s AND evidence_id = ANY(%s)",
+                        (
+                            index_id,
+                            index_version,
+                            [document.evidence_id for document in rows],
+                        ),
+                    ).fetchall()
+                    if existing:
+                        raise _invalid("duplicate vector document")
+                    insert_statement = "INSERT INTO m2_vector_documents(index_id,index_version,evidence_id,chunk_id,text_checksum,dimension,embedding) VALUES (%s,%s,%s,%s,%s,%s,%s::vector)"
+                    insert_parameters = [
+                        (
+                            index_id,
+                            index_version,
+                            document.evidence_id,
+                            document.chunk_id,
+                            document.text_checksum,
+                            dimension,
+                            "[" + ",".join(
+                                format(value, ".17g") for value in document.vector
+                            ) + "]",
+                        )
+                        for document in rows
+                    ]
+                    with connection.cursor() as cursor:
+                        cursor.executemany(insert_statement, insert_parameters)
+        except DomainError:
+            raise
         except Exception:
             raise DomainError(code="VECTOR_STORE_WRITE_FAILED", module="m2", message="vector document could not be stored") from None
+
+    def discard(self, index_id: str, index_version: str) -> None:
+        _validate_identity(index_id, index_version)
+        try:
+            with self._pool.connection() as connection:
+                with connection.transaction():
+                    connection.execute(
+                        "DELETE FROM m2_vector_documents WHERE index_id = %s AND index_version = %s AND EXISTS (SELECT 1 FROM m2_vector_indexes WHERE index_id = %s AND index_version = %s AND status = 'staging')",
+                        (index_id, index_version, index_id, index_version),
+                    )
+                    connection.execute(
+                        "DELETE FROM m2_vector_indexes WHERE index_id = %s AND index_version = %s AND status = 'staging'",
+                        (index_id, index_version),
+                    )
+        except Exception:
+            raise DomainError(code="VECTOR_STORE_WRITE_FAILED", module="m2", message="vector staging cleanup failed") from None
 
     def publish(
         self,
@@ -283,9 +411,13 @@ class PgVectorStore:
             raise _invalid("vector top-k is invalid")
         vector = "[" + ",".join(format(float(value), ".17g") for value in query_vector) + "]"
         try:
+            search_statement = build_pgvector_exact_search_sql(dimension)
+        except ValueError as error:
+            raise _invalid(str(error)) from None
+        try:
             with self._pool.connection() as connection:
                 rows = connection.execute(
-                    "SELECT evidence_id,chunk_id,text_checksum,1-(embedding <=> %s::vector) AS score FROM m2_vector_documents WHERE index_id=%s AND index_version=%s ORDER BY embedding <=> %s::vector,evidence_id LIMIT %s",
+                    search_statement,
                     (vector, index_id, index_version, vector, top_k),
                 ).fetchall()
         except Exception:
@@ -334,9 +466,29 @@ def _validate_document(document: VectorDocument, dimension: int) -> None:
     _validate_checksum(document.text_checksum)
 
 
+def _validated_batch(documents: Sequence[VectorDocument]) -> tuple[VectorDocument, ...]:
+    if not isinstance(documents, Sequence):
+        raise _invalid("vector batch is invalid")
+    rows = tuple(documents)
+    if not 1 <= len(rows) <= MAX_VECTOR_BATCH_SIZE:
+        raise _invalid(
+            f"vector batch size must be between 1 and {MAX_VECTOR_BATCH_SIZE}"
+        )
+    return rows
+
+
 def _validate_vector(vector: Sequence[float], dimension: int) -> None:
     if len(vector) != dimension or any(type(value) not in {int, float} or not math.isfinite(float(value)) for value in vector):
         raise _invalid("vector is invalid")
+
+
+def _validate_dimension(dimension: object) -> None:
+    if (
+        type(dimension) is not int
+        or dimension < 1
+        or dimension > MAX_PGVECTOR_DIMENSION
+    ):
+        raise _invalid("vector dimension is invalid")
 
 
 def _validate_identity(index_id: str, index_version: str) -> None:
@@ -383,11 +535,15 @@ def _invalid(message: str) -> DomainError:
 
 
 __all__ = [
+    "M2_VECTOR_DOCUMENTS_TABLE",
+    "MAX_PGVECTOR_DIMENSION",
     "InMemoryVectorStore",
+    "MAX_VECTOR_BATCH_SIZE",
     "PgVectorStore",
     "VectorDocument",
     "VectorIndexMetadata",
     "VectorMatch",
     "VectorStore",
+    "build_pgvector_exact_search_sql",
     "cosine_similarity",
 ]

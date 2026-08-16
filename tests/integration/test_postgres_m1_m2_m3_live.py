@@ -12,6 +12,7 @@ from typing import Iterator
 
 import pytest
 
+from course_insight.application.retrieval import retrieve_for_application
 from course_insight.contracts.course import (
     CoursePackage,
 )
@@ -317,15 +318,21 @@ def test_real_postgres_pgvector_http_embedding_retrieval_audit_and_restore(
         "evidence_live_chunk_1",
     ]
 
-    restored_service = _service(postgres_pool, embedding_endpoint)
-    restored_index = restored_service.restore_vector_index(
-        course_package=package,
-        evidence_index_ref=index,
+    hybrid = retrieve_for_application(
+        service,
+        query,
+        index,
+        policy=RetrievalPolicy(
+            policy_id="live-hybrid-v1",
+            strategy="hybrid",
+            top_k=1,
+            lexical_weight=0.5,
+            vector_weight=0.5,
+            rerank=False,
+        ),
+        request_id="live-request-hybrid",
     )
-    second = restored_service.retrieve_with_policy(
-        query, restored_index, policy, request_id="live-request-2"
-    )
-    assert second.citation_ids() == first.citation_ids()
+    assert hybrid.citation_ids() == first.citation_ids()
 
     seeds = _write_m3_seeds(tmp_path, package)
     review_workflow = TeacherReviewWorkflow(RepositoryTeacherReviewRepository(repository))
@@ -377,23 +384,42 @@ def test_real_postgres_pgvector_http_embedding_retrieval_audit_and_restore(
 
     for seed in seeds.values():
         seed.unlink()
-    restored_package = PostgresM1M2M3Repository(postgres_pool).get_course_package(
-        package.course_package_id, package.package_version
+    recovery_pool = create_postgres_pool(
+        require_live_test_database_url(),
+        min_size=1,
+        max_size=4,
+        connect_timeout_seconds=5,
     )
-    assert restored_package is not None
-    fresh_m2 = _service(postgres_pool, embedding_endpoint, repository)
-    restored_index = fresh_m2.restore_vector_index(
-        course_package=restored_package,
-        evidence_index_ref=index,
-    )
-    fresh_m3 = M3KnowledgeBundleService(repository, None)
-    restored_bundle = fresh_m3.restore_knowledge_bundle(
-        course_package=restored_package,
-        knowledge_bundle_id=bundle.knowledge_bundle_id,
-        bundle_version=bundle.bundle_version,
-    )
-    assert restored_bundle == bundle
-    assert restored_index.course_package_checksum == restored_package.checksum
+    try:
+        recovery_repository = PostgresM1M2M3Repository(recovery_pool)
+        restored_package = recovery_repository.get_course_package(
+            package.course_package_id, package.package_version
+        )
+        assert restored_package is not None
+        recovery_service = _service(
+            recovery_pool,
+            embedding_endpoint,
+            recovery_repository,
+        )
+        restored_index = recovery_service.restore_vector_index(
+            course_package=restored_package,
+            evidence_index_ref=index,
+        )
+        second = recovery_service.retrieve_with_policy(
+            query, restored_index, policy, request_id="live-request-2"
+        )
+        assert second.citation_ids() == first.citation_ids()
+
+        recovery_m3 = M3KnowledgeBundleService(recovery_repository, None)
+        restored_bundle = recovery_m3.restore_knowledge_bundle(
+            course_package=restored_package,
+            knowledge_bundle_id=bundle.knowledge_bundle_id,
+            bundle_version=bundle.bundle_version,
+        )
+        assert restored_bundle == bundle
+        assert restored_index.course_package_checksum == restored_package.checksum
+    finally:
+        recovery_pool.close()
 
     with postgres_pool.connection() as connection:
         rows = connection.execute(
@@ -404,4 +430,4 @@ def test_real_postgres_pgvector_http_embedding_retrieval_audit_and_restore(
             ORDER BY status
             """
         ).fetchall()
-    assert {row["status"]: row["count"] for row in rows} == {"succeeded": 2}
+    assert {row["status"]: row["count"] for row in rows} == {"succeeded": 3}

@@ -42,7 +42,8 @@ report，被拒绝的 validation 也要保留对应的 seed snapshot/report。�
 `TeacherReviewWorkflow` 使用不可变记录和 compare-and-swap 版本，状态为
 `draft -> submitted -> approved|rejected -> recalled`。记录只含输入 checksum、验证报告
 引用、教师 pseudonym、理由、时间和历史，不含课程原文。生产组合根将 M3 绑定到
-PostgreSQL CAS 仓储；SQLite CAS 仅用于离线/测试。生产调用旧的无审批发布入口会返回
+PostgreSQL CAS 仓储，并在 approved 发布回调与 recall/其他状态迁移之间持有事务级 advisory lock；
+SQLite CAS 仅用于离线/测试。发布还会校验 review subject 与 CoursePackage ID 一致。生产调用旧的无审批发布入口会返回
 `M3_REVIEW_REQUIRED`。正式发布必须使用 `build_knowledge_bundle_after_approval`，
 并重新捕获 seed snapshot、校验 checksum、验证报告和 bundle 后才提交完整制品。
 M1—M3 的真实 PostgreSQL+pgvector live 用例已纳入

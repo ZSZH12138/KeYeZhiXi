@@ -211,14 +211,6 @@ class AppCoordinator:
     ) -> dict[str, ContractModel]:
         """Produce steps 1-3 from governed course files and teacher seeds."""
 
-        self._m0.initialize()
-        course_package = self._m1.import_course(
-            raw_course_files=raw_course_files,
-            course_metadata_path=course_metadata_path,
-            source_authorization_path=source_authorization_path,
-            output_dir=output_dir,
-        )
-        index_ref = self._m2.build_index(course_package=course_package)
         if (teacher_review_id is None) != (teacher_review_version is None):
             raise DomainError(
                 code="M3_REVIEW_INPUT_INVALID",
@@ -226,6 +218,28 @@ class AppCoordinator:
                 message="teacher review id and version must be supplied together",
                 recoverable=True,
             )
+        self._m0.initialize()
+        course_package = self._m1.import_course(
+            raw_course_files=raw_course_files,
+            course_metadata_path=course_metadata_path,
+            source_authorization_path=source_authorization_path,
+            output_dir=output_dir,
+        )
+        if self._retrieval_policy is not None and self._retrieval_policy.strategy in {
+            "vector",
+            "hybrid",
+        }:
+            build_vector_index = getattr(self._m2, "build_vector_index", None)
+            if not callable(build_vector_index):
+                raise DomainError(
+                    code="VECTOR_INDEX_BUILD_UNAVAILABLE",
+                    module="application",
+                    message="configured retrieval strategy cannot build a vector index",
+                    recoverable=True,
+                )
+            index_ref = build_vector_index(course_package=course_package)
+        else:
+            index_ref = self._m2.build_index(course_package=course_package)
         if teacher_review_id is None:
             knowledge_bundle = self._m3.build_knowledge_bundle(
                 course_package=course_package,

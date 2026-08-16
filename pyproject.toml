@@ -27,6 +27,9 @@ intent = [
     "scikit-learn>=1.5,<2",
     "joblib>=1.4,<2",
 ]
+performance = [
+    "numpy>=2,<3",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

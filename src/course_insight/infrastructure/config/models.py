@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 from pathlib import Path
 from typing import Annotated, Literal, Self
@@ -95,7 +96,7 @@ class EmbeddingSettings(_FrozenModel):
     api_key_env: str = "OPENAI_API_KEY"
     model_name: str | None = None
     model_version: str | None = None
-    dimension: int | None = Field(default=None, ge=1, le=1_000_000)
+    dimension: int | None = Field(default=None, ge=1, le=16_000)
     timeout_seconds: Annotated[FiniteFloat, Field(gt=0, le=300)] = 10.0
     max_retries: int = Field(default=2, ge=0, le=8)
     verify_tls: bool = True
@@ -159,6 +160,17 @@ class RetrievalSettings(_FrozenModel):
                 code="INVALID_RETRIEVAL_POLICY",
                 fields=("retrieval.lexical_weight", "retrieval.vector_weight"),
                 reason="strategy_signal_missing",
+            )
+        if self.strategy == "hybrid" and not math.isclose(
+            self.lexical_weight + self.vector_weight,
+            1.0,
+            rel_tol=0.0,
+            abs_tol=1e-12,
+        ):
+            raise ConfigurationError(
+                code="INVALID_RETRIEVAL_POLICY",
+                fields=("retrieval.lexical_weight", "retrieval.vector_weight"),
+                reason="hybrid_weights_must_sum_to_one",
             )
         return self
 
@@ -551,6 +563,13 @@ class PlatformSettings(BaseSettings):
             invalid_fields.append("web.secure_cookie")
         if self.logging.mode != "stdout":
             invalid_fields.append("logging.mode")
+        if (
+            self.retrieval.strategy in {"vector", "hybrid"}
+            and self.embedding.backend != "openai_compatible"
+        ):
+            invalid_fields.extend(
+                ("retrieval.strategy", "embedding.backend")
+            )
         if invalid_fields:
             raise ConfigurationError(
                 code="INSECURE_PRODUCTION_CONFIGURATION",

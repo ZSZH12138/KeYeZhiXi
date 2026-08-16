@@ -151,8 +151,11 @@ def _vector_service(
     audits: InMemoryRetrievalAuditStore,
     *,
     clock: object | None = None,
+    reranker: object | None = None,
 ) -> M2EvidenceRetrievalService:
     kwargs = {} if clock is None else {"clock": clock}
+    if reranker is not None:
+        kwargs["reranker"] = reranker
     return M2EvidenceRetrievalService(
         Path("runtime/test-vector-index"),
         "lexical",
@@ -227,6 +230,154 @@ def test_vector_and_hybrid_apply_required_and_min_relevance_contract(
     )
 
     assert bundle.citation_ids() == ["evidence_chunk_a", "evidence_chunk_c"]
+
+
+def test_vector_index_version_binds_course_package_version() -> None:
+    repository = _MemoryArtifactRepository()
+    audits = InMemoryRetrievalAuditStore()
+    service = _vector_service(repository, audits)
+
+    first = service.build_vector_index(_package(version="1.0.0"))
+    second = service.build_vector_index(_package(version="2.0.0"))
+
+    assert first.index_id == second.index_id
+    assert first.index_version != second.index_version
+    assert "1.0.0" in first.index_version
+    assert "2.0.0" in second.index_version
+
+
+def test_failed_vector_build_discards_staging_batch() -> None:
+    repository = _MemoryArtifactRepository()
+    audits = InMemoryRetrievalAuditStore()
+
+    class FailingVectorStore(InMemoryVectorStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.add_count = 0
+
+        def add(self, index_id: str, index_version: str, document: object) -> None:
+            self.add_count += 1
+            if self.add_count == 2:
+                raise DomainError(
+                    code="VECTOR_STORE_WRITE_FAILED",
+                    module="m2",
+                    message="vector document could not be stored",
+                )
+            super().add(index_id, index_version, document)  # type: ignore[arg-type]
+
+    vector_store = FailingVectorStore()
+    service = M2EvidenceRetrievalService(
+        Path("runtime/test-vector-cleanup"),
+        "lexical",
+        repository,
+        embedding_provider=_FixedEmbeddingProvider(),
+        vector_store=vector_store,
+        audit_store=audits,
+        production=True,
+    )
+
+    with pytest.raises(DomainError) as captured:
+        service.build_vector_index(_package())
+
+    assert captured.value.code == "VECTOR_STORE_WRITE_FAILED"
+    assert vector_store._staging == {}  # noqa: SLF001
+
+
+def test_policy_top_k_caps_query_supplements() -> None:
+    repository = _MemoryArtifactRepository()
+    package = _package()
+    service = _service(repository)
+    index = service.build_index(package)
+
+    bundle = service.retrieve_with_policy(
+        _query(package, top_k=3),
+        index,
+        RetrievalPolicy(
+            policy_id="top-k-cap",
+            strategy="lexical",
+            top_k=1,
+            lexical_weight=1.0,
+            vector_weight=0.0,
+            rerank=False,
+        ),
+    )
+
+    assert len(bundle.evidence_chunks) == 1
+
+
+def test_policy_retrieval_rejects_a_ref_with_the_same_key_but_different_identity() -> None:
+    repository = _MemoryArtifactRepository()
+    audits = InMemoryRetrievalAuditStore()
+    package = _package()
+    service = _vector_service(repository, audits)
+    index = service.build_vector_index(package)
+    forged_ref = index.model_copy(update={"storage_ref": "pgvector:other-index"})
+
+    with pytest.raises(DomainError) as captured:
+        service.retrieve_with_policy(
+            _query(package),
+            forged_ref,
+            _policy("vector"),
+        )
+
+    assert captured.value.code == "INDEX_NOT_READY"
+
+
+@pytest.mark.parametrize("strategy", ["vector", "hybrid"])
+def test_policy_rerank_requires_an_explicit_bound_reranker(strategy: str) -> None:
+    repository = _MemoryArtifactRepository()
+    audits = InMemoryRetrievalAuditStore()
+    package = _package()
+    service = _vector_service(repository, audits)
+    index = service.build_vector_index(package)
+
+    with pytest.raises(DomainError) as captured:
+        service.retrieve_with_policy(
+            _query(package),
+            index,
+            RetrievalPolicy(
+                policy_id=f"rerank-required-{strategy}",
+                strategy=strategy,
+                top_k=1,
+                lexical_weight=1.0 if strategy == "lexical" else 0.5,
+                vector_weight=1.0 if strategy == "vector" else 0.5,
+                rerank=True,
+            ),
+        )
+
+    assert captured.value.code == "RETRIEVAL_RERANK_UNAVAILABLE"
+
+
+@pytest.mark.parametrize("strategy", ["vector", "hybrid"])
+def test_policy_rerank_is_applied_before_selection(strategy: str) -> None:
+    repository = _MemoryArtifactRepository()
+    audits = InMemoryRetrievalAuditStore()
+    package = _package()
+
+    def reranker(candidate: object) -> float:
+        evidence_id = candidate.evidence_id  # type: ignore[attr-defined]
+        return {
+            "evidence_chunk_a": 0.1,
+            "evidence_chunk_b": 0.2,
+            "evidence_chunk_c": 0.9,
+        }[evidence_id]
+
+    service = _vector_service(repository, audits, reranker=reranker)
+    index = service.build_vector_index(package)
+    bundle = service.retrieve_with_policy(
+        _query(package, top_k=1),
+        index,
+        RetrievalPolicy(
+            policy_id=f"rerank-{strategy}",
+            strategy=strategy,
+            top_k=1,
+            lexical_weight=1.0 if strategy == "lexical" else 0.5,
+            vector_weight=1.0 if strategy == "vector" else 0.5,
+            rerank=True,
+        ),
+    )
+
+    assert bundle.citation_ids() == ["evidence_chunk_c"]
 
 
 @pytest.mark.parametrize("strategy", ["lexical", "vector", "hybrid"])

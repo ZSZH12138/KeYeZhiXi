@@ -260,7 +260,7 @@ python -m course_insight.cli export-schemas
 | 类 | 声明字段 | 公开领域规则/用途 |
 |---|---|---|
 | `EmbeddingModelRef` | `provider:str; model_name:str; model_version:str; dimension:int\|None; status:empty\|configured` | configured 才允许维度；供 M2 索引版本绑定 |
-| `RetrievalPolicy` | `policy_id:str; strategy:lexical\|vector\|hybrid; top_k:int; lexical_weight/vector_weight:float; rerank:bool` | 至少启用一种检索信号 |
+| `RetrievalPolicy` | `policy_id:str; strategy:lexical\|vector\|hybrid; top_k:int; lexical_weight/vector_weight:float; rerank:bool` | 至少启用一种检索信号；hybrid 权重严格归一到 1；`top_k` 限制补充证据；rerank 必须绑定显式端口 |
 | `RetrievalAudit` | `audit_id:str; query_id:str; index_id:str; policy_id:str; retrieved_evidence_ids:list[str]; status:empty\|succeeded\|failed; created_at:datetime` | 证据 ID 唯一；空审计不能带证据 |
 | `LLMModelRef` | `provider:deepseek; model_name:str; model_version:str; api_key_env:DEEPSEEK_API_KEY; status:empty\|configured` | 将 LLM 供应商和密钥名固定为可检验契约 |
 | `LLMGenerationRequest` | `request_id:str; use_case:rubric_scoring\|student_feedback\|teacher_narrative; model_ref; prompt_template_id/version; evidence_ids; input_checksum; created_at` | 证据 ID 不可重复；不保存完整提示词 |

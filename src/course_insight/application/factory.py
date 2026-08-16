@@ -72,6 +72,7 @@ from course_insight.modules.m2_evidence_retrieval.lexical import (
 from course_insight.modules.m2_evidence_retrieval.service import (
     M2EvidenceRetrievalService,
 )
+from course_insight.modules.m2_evidence_retrieval.ranking import RetrievalCandidate
 from course_insight.modules.m2_evidence_retrieval.audit import (
     RepositoryRetrievalAuditStore,
 )
@@ -190,6 +191,7 @@ class ServiceOverrides:
     m0: M0PlatformService | None = None
     m1: M1CourseGovernanceService | None = None
     m2: M2EvidenceRetrievalService | None = None
+    reranker: Callable[[RetrievalCandidate], float] | None = None
     m3: M3KnowledgeBundleService | None = None
     m4: M4TaskOrchestrationService | None = None
     m5: M5StateService | None = None
@@ -448,6 +450,7 @@ def _assemble_application(
             vector_store=vector_store,
             audit_store=audit_store,
             production=settings.environment == "production",
+            reranker=service_overrides.reranker,
         )
         if service_overrides.m2 is None
         else service_overrides.m2

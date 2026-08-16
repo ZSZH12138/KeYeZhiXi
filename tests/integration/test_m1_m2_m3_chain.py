@@ -6,6 +6,7 @@ import shutil
 from datetime import datetime, timezone
 from pathlib import Path
 
+from course_insight.application.retrieval import retrieve_for_application
 from course_insight.contracts.evidence import EvidenceQuery, evidence_id_for_chunk
 from course_insight.contracts.errors import DomainError
 from course_insight.infrastructure.json_io import dumps_json
@@ -125,10 +126,11 @@ def test_m1_m2_m3_chain_preserves_identity_and_restores_without_inputs(
         vector_weight=0.5,
         rerank=False,
     )
-    vector_bundle = m2.retrieve_with_policy(
+    vector_bundle = retrieve_for_application(
+        m2,
         query,
         vector_ref,
-        RetrievalPolicy(
+        policy=RetrievalPolicy(
             policy_id="chain-vector",
             strategy="vector",
             top_k=1,
@@ -137,10 +139,11 @@ def test_m1_m2_m3_chain_preserves_identity_and_restores_without_inputs(
             rerank=False,
         ),
     )
-    hybrid_bundle = m2.retrieve_with_policy(
+    hybrid_bundle = retrieve_for_application(
+        m2,
         query,
         vector_ref,
-        hybrid_policy,
+        policy=hybrid_policy,
         request_id="chain-hybrid-request",
     )
     assert vector_bundle.evidence_chunks

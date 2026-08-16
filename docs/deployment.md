@@ -9,8 +9,9 @@ PostgreSQL+pgvector。仓库已提供真实 HTTP embedding + PostgreSQL/pgvector
 恢复链路的 live 用例；本机没有受保护测试数据库时仍会明确 skip，只有 CI job 通过
 后才能记录为联调验收通过。
 M5 的 DINA/BKT、M8 的 IRT/自适应选择以及 M7/M9 的 DeepSeek 网络调用仍是
-空实现；M2 的 embedding/pgvector 代码和真实 live 验收用例已经实现，但当前开发机
-未提供可执行的 PostgreSQL 测试环境。
+空实现；M2 的 embedding/pgvector 代码、性能验收 CLI 和真实 live 验收用例已经实现；
+当前开发机若未提供受保护的 PostgreSQL 测试环境，性能 CLI 会 fail closed，不能
+把未执行写成通过。
 
 M6 已实现 rules/shadow/active runtime、artifact 校验、奖励/OPE 与私有持久化，
 但默认是 `rules`、零 rollout、零探索。本阶段没有真实教学训练、线上 rollout 或
@@ -784,6 +785,77 @@ WHERE index_id = '<index_id>' AND index_version = '<index_version>';
 M2 PostgreSQL adapter 的查询也使用同一维度表达式，使该 partial index 可被规划器使用；
 创建后必须在目标规模上同时记录 P50/P95、索引构建时间、索引大小和召回率。没有这些
 实测数据时只能标记“功能可用、性能未验收”，不能把精确搜索或 ANN 参数写成生产 SLA。
+
+仓库提供 `python -m scripts.benchmark_m2_pgvector` 作为可执行的 exact-search
+性能门禁。它只读取 `COURSE_INSIGHT_TEST_DATABASE_URL` 和匹配的
+`COURSE_INSIGHT_TEST_DATABASE_NAME`，只允许名称含边界分隔 `test`、`ci` 或 `tmp`
+的 disposable 数据库。guard 配置缺失、名称不匹配、保留库名或 DSN 格式不安全时输出
+`status=blocked`、exit 2；guard 通过后，连接、migration、pgvector、benchmark 或
+cleanup 运行失败时输出 `status=failed`、exit 1，不会 skip，也不会读取生产
+`DATABASE_URL`。CLI 使用现有 migration、pool 和
+`PostgresPgVectorStore`，每次生成唯一安全 benchmark identity，finally 只删除该
+identity 的向量行和索引行。
+
+性能 CLI 使用可选依赖 `performance`：
+
+```shell
+python -m pip install -e ".[performance]"  # numpy>=2,<3
+```
+
+缺少或版本不满足的 NumPy 会输出 `status=blocked` 并以非零退出。合成向量和 query
+先量化为 NumPy `float32`；ground truth 使用分块矩阵乘法与 Top-K 合并，避免按
+`chunk * query * dimension` 做 Python 标量循环。写入沿用生产 `add_many` 批量能力，
+默认/上限为受治理的 bounded batch；`chunk_count * query_count * dimension` 另有工作量
+上限。`50,000 * 100 * 1,536 = 7.68e9` 的目标示例允许执行，超过组合上限的极端参数在
+连接数据库前 fail closed。
+
+目标规模验收必须在接近生产数据规模的 disposable clone 中显式执行，不能使用
+smoke 默认值代替。PowerShell 示例（数值必须按目标课程和已批准 SLA 替换）：
+
+```powershell
+$targetChunkCount = 50000
+$targetDimension = 1536
+$targetQueryCount = 100
+$targetTopK = 10
+$targetMaxP95Ms = 250
+$targetMinRecallAtK = 1.0
+$targetSeed = 20260815
+$targetBatchSize = 1024
+python -m scripts.benchmark_m2_pgvector `
+  --chunk-count $targetChunkCount `
+  --dimension $targetDimension `
+  --query-count $targetQueryCount `
+  --top-k $targetTopK `
+  --max-p95-ms $targetMaxP95Ms `
+  --min-recall-at-k $targetMinRecallAtK `
+  --seed $targetSeed `
+  --batch-size $targetBatchSize
+```
+
+stdout JSON 是默认输出，不写持久化过程报告。结果必须原样保存到 CI artifact/log，
+至少检查 `scale`（含 `batch_size`、`workload_units`）、`build_ms`、`p50_ms`、`p95_ms`、`recall_at_k`、
+`relation_bytes`、`index_bytes` 和完整 `explain`；只有 `passed=true` 且进程退出码为
+0 才能记录为目标规模性能通过。`build_ms` 表示 staging 数据装载与发布时间，不是
+ANN 构建时间；工具不自动创建 HNSW/IVFFlat，`index_bytes.existing` 只报告表上已有
+索引，`benchmark_ann_index_bytes` 为 `null`。如果 exact 门禁不达标，应根据 JSON
+证据另行评估已批准的按维度 ANN 方案，不得把失败隐藏。
+
+CI `live-m1-m3` job 在真实 `pgvector/pgvector` service 上额外运行一个有界 smoke：
+
+```bash
+python -m scripts.benchmark_m2_pgvector \
+  --chunk-count 64 --dimension 8 --query-count 12 --top-k 5 \
+  --max-p95-ms 1000 --min-recall-at-k 1.0 --seed 20260815
+```
+
+该 smoke 失败、退出非零或 guard/pgvector 不可用都会使 job 失败；smoke 只验证
+工具和 live PostgreSQL 链路，不替代目标规模生产验收。`VectorStore`、
+`InMemoryVectorStore`、`PgVectorStore` 和 `PostgresPgVectorStore` 的每个 bounded
+`add_many` 批次只使用一个 checkout/transaction，并通过一次 cursor `executemany`
+传输，校验失败原子回滚。cleanup 使用同一事务中的参数化 DELETE，并先重新校验
+`current_database()` 与 guard target；校验失败时不执行 DELETE。它会保留主失败分类、
+写入 `failure_reasons` 并使进程非零。CI smoke 的 JSON 只接收 stdout，
+stderr 保留在 Actions 日志，不与 JSON 合并。
 
 迁移使用 `export_manifest` / `import_manifest`：目标端会先验证每条记录、每个 payload
 checksum 和 manifest checksum，再在一个事务中发布；同身份同内容幂等，冲突或任一失败

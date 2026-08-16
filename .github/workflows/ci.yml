@@ -42,7 +42,7 @@ jobs:
         run: >-
           python -m pip install --disable-pip-version-check
           --constraint requirements/ci-constraints.txt
-          -e ".[dev,intent]"
+          -e ".[dev,intent,performance]"
 
       - name: Check installed dependencies
         run: python -m pip check
@@ -96,6 +96,8 @@ jobs:
           --health-retries 20
 
     env:
+      COURSE_INSIGHT_DATABASE__BACKEND: postgresql
+      COURSE_INSIGHT_DATABASE__URL_ENV: COURSE_INSIGHT_TEST_DATABASE_URL
       COURSE_INSIGHT_TEST_DATABASE_URL: postgresql://postgres:postgres@localhost:5432/course_insight_test_ci
       COURSE_INSIGHT_TEST_DATABASE_NAME: course_insight_test_ci
 
@@ -118,13 +120,27 @@ jobs:
         run: >-
           python -m pip install --disable-pip-version-check
           --constraint requirements/ci-constraints.txt
-          -e ".[dev,intent]"
+          -e ".[dev,intent,performance]"
 
       - name: Run live M1-M3 PostgreSQL/pgvector acceptance
         shell: bash
         run: |
           set -o pipefail
-          python -m pytest -vv --tb=long tests/integration/test_postgres_m1_m2_m3_live.py 2>&1 | tee live-m1-m3.log
+          python -m pytest -vv --tb=long --junitxml=live-m1-m3.xml tests/unit/test_postgres_s1_s6_migration.py tests/integration/test_postgres_m1_m2_m3_live.py 2>&1 | tee live-m1-m3.log
+          python -c "import sys, xml.etree.ElementTree as ET; root = ET.parse('live-m1-m3.xml').getroot(); skipped = sum(int(node.attrib.get('skipped', '0')) for node in root.iter('testsuite')); sys.exit('live acceptance cannot pass with skipped tests' if skipped else 0)"
+
+      - name: Run bounded M2 pgvector performance smoke
+        shell: bash
+        run: |
+          set -o pipefail
+          python -m scripts.benchmark_m2_pgvector \
+            --chunk-count 64 \
+            --dimension 8 \
+            --query-count 12 \
+            --top-k 5 \
+            --max-p95-ms 1000 \
+            --min-recall-at-k 1.0 \
+            --seed 20260815 | tee m2-pgvector-smoke.json
 
       - name: Publish live acceptance diagnostics
         if: failure()
@@ -136,6 +152,14 @@ jobs:
             cat live-m1-m3.log
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+          if [ -f m2-pgvector-smoke.json ]; then
+            {
+              echo "## M2 pgvector performance smoke"
+              echo '```json'
+              cat m2-pgvector-smoke.json
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Check whitespace
         run: git diff --check

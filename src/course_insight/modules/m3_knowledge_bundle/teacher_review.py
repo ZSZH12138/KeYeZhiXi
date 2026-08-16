@@ -5,6 +5,9 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import threading
+from contextlib import contextmanager
+from collections.abc import Iterator
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -174,6 +177,17 @@ class RepositoryTeacherReviewRepository:
 
     def __init__(self, repository: object) -> None:
         self._repository = repository
+        self._local_lock = threading.RLock()
+
+    @contextmanager
+    def lock(self, review_id: str) -> Iterator[None]:
+        method = getattr(self._repository, "lock_teacher_review", None)
+        if callable(method):
+            with method(review_id):
+                yield
+            return
+        with self._local_lock:
+            yield
 
     def get(self, review_id: str) -> TeacherReviewRecord | None:
         method = getattr(self._repository, "get_teacher_review", None)
@@ -201,6 +215,7 @@ class TeacherReviewWorkflow:
 
     def __init__(self, repository: TeacherReviewRepository) -> None:
         self._repository = repository
+        self._local_lock = threading.RLock()
 
     def create_draft(
         self,
@@ -345,10 +360,44 @@ class TeacherReviewWorkflow:
     ) -> object:
         """Run a publisher only after the current record is approved."""
 
-        self.require_approved(review_id, expected_version)
-        return publisher()
+        with self._review_lock(review_id):
+            self.require_approved(review_id, expected_version)
+            return publisher()
+
+    @contextmanager
+    def _review_lock(self, review_id: str) -> Iterator[None]:
+        _validate_identity(review_id)
+        method = getattr(self._repository, "lock", None)
+        if callable(method):
+            with method(review_id):
+                yield
+            return
+        with self._local_lock:
+            yield
 
     def _transition(
+        self,
+        review_id: str,
+        *,
+        reviewer_pseudonym: str,
+        reason: str,
+        expected_version: int,
+        now: datetime,
+        target: ReviewState,
+        allowed: set[ReviewState],
+    ) -> TeacherReviewRecord:
+        with self._review_lock(review_id):
+            return self._transition_locked(
+                review_id,
+                reviewer_pseudonym=reviewer_pseudonym,
+                reason=reason,
+                expected_version=expected_version,
+                now=now,
+                target=target,
+                allowed=allowed,
+            )
+
+    def _transition_locked(
         self,
         review_id: str,
         *,

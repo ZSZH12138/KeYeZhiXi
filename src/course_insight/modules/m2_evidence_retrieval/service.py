@@ -41,10 +41,13 @@ from course_insight.modules.m2_evidence_retrieval.lexical import (
 )
 from course_insight.modules.m2_evidence_retrieval.repository import M2Repository
 from course_insight.modules.m2_evidence_retrieval.ranking import (
+    RetrievalCandidate,
+    rank_candidates,
     rank_hybrid,
     validate_strategy_dependencies,
 )
 from course_insight.modules.m2_evidence_retrieval.vector_store import (
+    MAX_VECTOR_BATCH_SIZE,
     VectorDocument,
     VectorIndexMetadata,
     VectorStore,
@@ -76,6 +79,7 @@ class M2EvidenceRetrievalService:
         audit_store: RetrievalAuditStore | None = None,
         production: bool = False,
         clock: Callable[[], int] | None = None,
+        reranker: Callable[[RetrievalCandidate], float] | None = None,
     ) -> None:
         self._index_dir = index_dir
         self._tokenizer_or_embedding_adapter = tokenizer_or_embedding_adapter
@@ -85,6 +89,7 @@ class M2EvidenceRetrievalService:
         self._audit_store = audit_store
         self._production = production
         self._clock = clock or time.monotonic_ns
+        self._reranker = reranker
         self._indexed_packages: dict[tuple[str, str], CoursePackage] = {}
         self._index_refs: dict[tuple[str, str], EvidenceIndexRef] = {}
         self._snapshots: dict[tuple[str, str], LexicalIndexSnapshot] = {}
@@ -338,7 +343,9 @@ class M2EvidenceRetrievalService:
         package = self._validated_package(course_package)
         provider = self._embedding_provider
         model = provider.model_ref
-        version = index_version or model.model_version
+        version = index_version or (
+            f"{package.package_version}__{model.model_version}"
+        )
         index_id = f"{package.course_package_id}_vector_index"
         texts = [chunk.text for chunk in package.content_chunks]
         try:
@@ -351,11 +358,13 @@ class M2EvidenceRetrievalService:
                 "course package is not ready for retrieval indexing",
                 recoverable=True,
             ) from None
+        staging_started = False
         try:
             vectors = provider.embed_documents(texts)
             if len(vectors) != len(texts):
                 raise ValueError
             self._vector_store.begin(index_id, version, dimension=model.dimension)
+            staging_started = True
             rows = []
             for chunk, vector in zip(package.content_chunks, vectors):
                 rows.append(
@@ -366,8 +375,12 @@ class M2EvidenceRetrievalService:
                         text_checksum=chunk.sha256,
                     )
                 )
-            for row in rows:
-                self._vector_store.add(index_id, version, row)
+            for start in range(0, len(rows), MAX_VECTOR_BATCH_SIZE):
+                self._vector_store.add_many(
+                    index_id,
+                    version,
+                    rows[start : start + MAX_VECTOR_BATCH_SIZE],
+                )
             checksum = hashlib.sha256(
                 json.dumps(
                     [
@@ -404,9 +417,14 @@ class M2EvidenceRetrievalService:
                     built_at=built_at,
                 ),
             )
+            staging_started = False
         except DomainError:
+            if staging_started:
+                self._discard_vector_staging(index_id, version)
             raise
         except Exception:
+            if staging_started:
+                self._discard_vector_staging(index_id, version)
             raise _error(
                 "VECTOR_INDEX_BUILD_FAILED",
                 "vector index could not be built",
@@ -434,6 +452,17 @@ class M2EvidenceRetrievalService:
             ref=ref,
             snapshot=lexical_snapshot,
         )
+
+    def _discard_vector_staging(self, index_id: str, index_version: str) -> None:
+        discard = getattr(self._vector_store, "discard", None)
+        if not callable(discard):
+            return
+        try:
+            discard(index_id, index_version)
+        except Exception as error:
+            _LOGGER.error(
+                "vector staging cleanup failed (%s)", type(error).__name__
+            )
 
     def restore_vector_index(
         self,
@@ -570,6 +599,7 @@ class M2EvidenceRetrievalService:
         query: EvidenceQuery,
         package: CoursePackage,
         ranked: Sequence[tuple[str, float]],
+        top_k: int | None = None,
     ) -> tuple[tuple[str, float], ...]:
         """Apply the shared required/min-relevance/top-k retrieval contract."""
 
@@ -598,6 +628,7 @@ class M2EvidenceRetrievalService:
 
         required_ids = {evidence_id for evidence_id, _ in required}
         minimum = Decimal(str(query.min_relevance))
+        supplement_limit = query.top_k if top_k is None else min(query.top_k, top_k)
         supplements: list[tuple[str, float]] = []
         seen: set[str] = set(required_ids)
         for evidence_id, raw_score in ranked:
@@ -607,7 +638,7 @@ class M2EvidenceRetrievalService:
             if raw_score > 0 and Decimal(str(relevance)) >= minimum:
                 supplements.append((evidence_id, relevance))
                 seen.add(evidence_id)
-                if len(supplements) >= query.top_k:
+                if len(supplements) >= supplement_limit:
                     break
         return tuple([*required, *supplements])
 
@@ -705,6 +736,10 @@ class M2EvidenceRetrievalService:
             raise
         except Exception:
             raise _error("EVIDENCE_QUERY_INVALID", "evidence query or index is invalid") from None
+        if policy.top_k < evidence_query.top_k:
+            evidence_query = evidence_query.model_copy(
+                update={"top_k": policy.top_k}
+            )
         key = self._key(evidence_index_ref)
         package = self._indexed_packages.get(key)
         ref = self._index_refs.get(key)
@@ -746,8 +781,29 @@ class M2EvidenceRetrievalService:
             )
             raise
         try:
+            if policy.rerank and self._reranker is None:
+                raise _error(
+                    "RETRIEVAL_RERANK_UNAVAILABLE",
+                    "retrieval reranker is unavailable",
+                    recoverable=True,
+                )
+            if (
+                ref is None
+                or ref.model_dump(mode="json")
+                != evidence_index_ref.model_dump(mode="json")
+            ):
+                raise _error(
+                    "INDEX_NOT_READY",
+                    "evidence index is not loaded",
+                    recoverable=True,
+                )
             if policy.strategy == "lexical":
-                bundle = self.retrieve(evidence_query, evidence_index_ref)
+                bundle = self.retrieve(
+                    evidence_query,
+                    evidence_index_ref,
+                    reranker=self._reranker if policy.rerank else None,
+                    retrieved_at=retrieved_at,
+                )
             else:
                 if (
                     package is None
@@ -799,8 +855,20 @@ class M2EvidenceRetrievalService:
                     )
                 } if snapshot is not None else {}
                 if policy.strategy == "vector":
+                    ranked_candidates = rank_candidates(
+                        tuple(
+                            RetrievalCandidate(
+                                evidence_id=evidence_id,
+                                vector_score=score,
+                                final_score=score,
+                            )
+                            for evidence_id, score in vector_scores.items()
+                        ),
+                        rerank=self._reranker if policy.rerank else None,
+                    )
                     ranked = tuple(
-                        sorted(vector_scores.items(), key=lambda item: (-item[1], item[0]))
+                        (candidate.evidence_id, candidate.final_score)
+                        for candidate in ranked_candidates
                     )
                 else:
                     ranked_candidates = rank_hybrid(
@@ -808,6 +876,7 @@ class M2EvidenceRetrievalService:
                         vector_scores,
                         lexical_weight=policy.lexical_weight,
                         vector_weight=policy.vector_weight,
+                        rerank=self._reranker if policy.rerank else None,
                     )
                     ranked = tuple(
                         (candidate.evidence_id, candidate.final_score)
@@ -817,6 +886,7 @@ class M2EvidenceRetrievalService:
                     query=evidence_query,
                     package=package,
                     ranked=ranked,
+                    top_k=policy.top_k,
                 )
                 now = retrieved_at or datetime.now(timezone.utc)
                 chunks = {
@@ -919,7 +989,12 @@ class M2EvidenceRetrievalService:
         )
 
     def retrieve(
-        self, evidence_query: EvidenceQuery, evidence_index_ref: EvidenceIndexRef
+        self,
+        evidence_query: EvidenceQuery,
+        evidence_index_ref: EvidenceIndexRef,
+        *,
+        reranker: Callable[[RetrievalCandidate], float] | None = None,
+        retrieved_at: datetime | None = None,
     ) -> EvidenceBundle:
         """Query only an already-loaded lexical snapshot; never rebuild it."""
 
@@ -959,10 +1034,24 @@ class M2EvidenceRetrievalService:
             )
         except Exception:
             raise _error("EVIDENCE_QUERY_INVALID", "evidence query is invalid") from None
+        ranked_candidates = rank_candidates(
+            tuple(
+                RetrievalCandidate(
+                    evidence_id=row.evidence_id,
+                    lexical_score=row.relevance,
+                    final_score=row.relevance,
+                )
+                for row in ranked
+            ),
+            rerank=reranker,
+        )
         selected = self._select_ranked_results(
             query=query,
             package=package,
-            ranked=tuple((row.evidence_id, row.relevance) for row in ranked),
+            ranked=tuple(
+                (candidate.evidence_id, candidate.final_score)
+                for candidate in ranked_candidates
+            ),
         )
         rows = {
             row.evidence_id: row
@@ -981,5 +1070,5 @@ class M2EvidenceRetrievalService:
                 )
                 for evidence_id, relevance in selected
             ],
-            retrieved_at=stored_ref.built_at,
+            retrieved_at=retrieved_at or datetime.now(timezone.utc),
         )

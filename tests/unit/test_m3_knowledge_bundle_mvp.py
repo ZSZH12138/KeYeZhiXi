@@ -136,6 +136,54 @@ def test_teacher_review_api_binds_seed_checksum_before_production_publication(
     )
 
 
+def test_teacher_review_cannot_publish_against_a_different_course_package(
+    tmp_path: Path,
+) -> None:
+    package = _package()
+    paths = _paths(tmp_path, _roles(package))
+    workflow = TeacherReviewWorkflow(InMemoryTeacherReviewRepository())
+    service = M3KnowledgeBundleService(
+        _MemoryM3Repository(),
+        None,
+        review_workflow=workflow,
+        require_teacher_approval=True,
+    )
+    draft = service.create_teacher_review_draft(
+        review_id="review-subject-binding",
+        subject_id=package.course_package_id,
+        validation_report_ref="report-subject-binding",
+        now=NOW,
+        concept_seed_path=paths["concept"],
+        item_seed_path=paths["item"],
+        rubric_seed_path=paths["rubric"],
+        blueprint_seed_path=paths["blueprint"],
+        prerequisite_seed_path=paths["prerequisite"],
+        misconception_seed_path=paths["misconception"],
+    )
+    submitted = service.submit_teacher_review(
+        "review-subject-binding", "teacher-1", "checked", draft.version, NOW
+    )
+    approved = service.approve_teacher_review(
+        "review-subject-binding", "teacher-1", "approved", submitted.version, NOW
+    )
+
+    other_package = package.model_copy(update={"course_package_id": "other-package"})
+    with pytest.raises(DomainError) as captured:
+        service.build_knowledge_bundle_after_approval(
+            review_id="review-subject-binding",
+            review_version=approved.version,
+            course_package=other_package,
+            concept_seed_path=paths["concept"],
+            item_seed_path=paths["item"],
+            rubric_seed_path=paths["rubric"],
+            blueprint_seed_path=paths["blueprint"],
+            prerequisite_seed_path=paths["prerequisite"],
+            misconception_seed_path=paths["misconception"],
+        )
+
+    assert captured.value.code == "M3_REVIEW_SUBJECT_MISMATCH"
+
+
 class _RecordingRepository(_MemoryM3Repository):
     def __init__(self) -> None:
         super().__init__()

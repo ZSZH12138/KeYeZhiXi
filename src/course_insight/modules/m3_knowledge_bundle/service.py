@@ -272,6 +272,13 @@ class M3KnowledgeBundleService:
             misconception_seed_path=misconception_seed_path,
         )
         review = workflow.require_approved(review_id, review_version)
+        if review.subject_id != course_package.course_package_id:
+            raise DomainError(
+                code="M3_REVIEW_SUBJECT_MISMATCH",
+                module="m3",
+                message="approved review is bound to a different course package",
+                recoverable=True,
+            )
         if review.input_checksum != snapshot.checksum:
             raise DomainError(
                 code="M3_REVIEW_INPUT_MISMATCH",

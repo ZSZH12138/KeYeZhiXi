@@ -27,6 +27,7 @@ from course_insight.infrastructure.config import ConfigurationError
 
 EmbeddingVector = tuple[float, ...]
 EmbeddingBatch = tuple[EmbeddingVector, ...]
+MAX_VECTOR_DIMENSION = 16_000
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,7 +50,7 @@ class EmbeddingModelIdentity:
             isinstance(self.dimension, bool)
             or not isinstance(self.dimension, int)
             or self.dimension < 1
-            or self.dimension > 1_000_000
+            or self.dimension > MAX_VECTOR_DIMENSION
         ):
             raise ValueError("dimension must be a positive bounded integer")
 

@@ -6,6 +6,8 @@ import os
 
 import pytest
 
+from tests.integration._postgres_live import require_live_test_database_url
+
 from course_insight.infrastructure.postgresql.migration_runner import (
     CORE_TABLES,
     SCHEMA_VERSION,
@@ -52,18 +54,18 @@ def test_s1_s6_migration_is_transaction_safe_and_parameterized_by_runner() -> No
 
 
 @pytest.mark.skipif(
-    not os.getenv("COURSE_INSIGHT_POSTGRES_DSN"),
+    not os.getenv("COURSE_INSIGHT_TEST_DATABASE_URL"),
     reason="live PostgreSQL/pgvector is not configured",
 )
 def test_live_postgres_s1_s6_migration_is_explicitly_opt_in() -> None:
-    """The live check runs only when an operator supplies a real DSN."""
+    """The live check runs only against the confirmed disposable test DB."""
 
     from course_insight.infrastructure.postgresql.m1_m2_m3_repository import (
         PostgresM1M2M3Repository,
     )
     from course_insight.infrastructure.postgresql.pool import create_postgres_pool
 
-    pool = create_postgres_pool(os.environ["COURSE_INSIGHT_POSTGRES_DSN"])
+    pool = create_postgres_pool(require_live_test_database_url())
     try:
         PostgresM1M2M3Repository(pool).initialize()
     finally:

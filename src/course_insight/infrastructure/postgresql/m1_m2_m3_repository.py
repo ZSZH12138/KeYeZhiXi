@@ -23,6 +23,9 @@ import hashlib
 import json
 import math
 import re
+from contextlib import contextmanager
+from collections.abc import Iterator
+from contextvars import ContextVar
 from typing import Any, Callable, ClassVar, TypeVar
 import weakref
 
@@ -54,9 +57,12 @@ from course_insight.modules.m2_evidence_retrieval.lexical import (
     LexicalIndexSnapshot,
 )
 from course_insight.modules.m2_evidence_retrieval.vector_store import (
+    MAX_PGVECTOR_DIMENSION,
+    MAX_VECTOR_BATCH_SIZE,
     VectorDocument,
     VectorIndexMetadata,
     VectorMatch,
+    build_pgvector_exact_search_sql,
 )
 from course_insight.modules.m3_knowledge_bundle.seed_snapshot import (
     M3SeedSnapshot,
@@ -493,6 +499,27 @@ class PostgresM1M2M3Repository:
 
     def __init__(self, pool: object) -> None:
         self._pool = pool
+        if not hasattr(self, "_active_connection"):
+            self._active_connection: ContextVar[Any | None] = ContextVar(
+                f"postgres_m1_m2_m3_connection_{id(self)}",
+                default=None,
+            )
+
+    @contextmanager
+    def _connection(self) -> Iterator[Any]:
+        """Reuse the current transaction connection within this repository."""
+
+        active_connection = self._active_connection.get()
+        if active_connection is not None:
+            yield active_connection
+            return
+
+        with self._pool.connection() as connection:  # type: ignore[attr-defined]
+            token = self._active_connection.set(connection)
+            try:
+                yield connection
+            finally:
+                self._active_connection.reset(token)
 
     def initialize(self) -> None:
         """Apply the checksum-locked PostgreSQL migration chain."""
@@ -762,7 +789,7 @@ class PostgresM1M2M3Repository:
 
     def export_manifest(self) -> dict[str, Any]:
         def operation() -> dict[str, Any]:
-            with self._pool.connection() as connection:  # type: ignore[attr-defined]
+            with self._connection() as connection:
                 rows = connection.execute(
                     f"""
                     SELECT {_ARTIFACT_COLUMNS}
@@ -836,7 +863,7 @@ class PostgresM1M2M3Repository:
         object_version: str,
     ) -> dict[str, Any] | None:
         def operation() -> dict[str, Any] | None:
-            with self._pool.connection() as connection:  # type: ignore[attr-defined]
+            with self._connection() as connection:
                 row = connection.execute(
                     f"""
                     SELECT {_ARTIFACT_COLUMNS}
@@ -867,7 +894,7 @@ class PostgresM1M2M3Repository:
             raise PostgresOperationError(_INTEGRITY_ERROR) from None
 
         def operation() -> None:
-            with self._pool.connection() as connection:  # type: ignore[attr-defined]
+            with self._connection() as connection:
                 with connection.transaction():
                     for record in prepared:
                         self._insert_or_replay(connection, record)
@@ -965,7 +992,7 @@ class PostgresM1M2M3Repository:
             ) from None
 
         def operation() -> None:
-            with self._pool.connection() as connection:  # type: ignore[attr-defined]
+            with self._connection() as connection:
                 with connection.transaction():
                     existing = connection.execute(
                         """
@@ -1013,7 +1040,7 @@ class PostgresM1M2M3Repository:
         )
 
         def operation() -> object | None:
-            with self._pool.connection() as connection:  # type: ignore[attr-defined]
+            with self._connection() as connection:
                 row = connection.execute(
                     """
                     SELECT payload, payload_checksum
@@ -1047,7 +1074,7 @@ class PostgresM1M2M3Repository:
         review_id = payload["review_id"]
 
         def operation() -> None:
-            with self._pool.connection() as connection:  # type: ignore[attr-defined]
+            with self._connection() as connection:
                 with connection.transaction():
                     existing = connection.execute(
                         """
@@ -1105,7 +1132,7 @@ class PostgresM1M2M3Repository:
 
     def load_teacher_review(self, review_id: str) -> object | None:
         def operation() -> object | None:
-            with self._pool.connection() as connection:  # type: ignore[attr-defined]
+            with self._connection() as connection:
                 row = connection.execute(
                     """
                     SELECT payload, payload_checksum
@@ -1135,7 +1162,7 @@ class PostgresM1M2M3Repository:
             raise PostgresOperationError(_INTEGRITY_ERROR)
 
         def operation() -> bool:
-            with self._pool.connection() as connection:  # type: ignore[attr-defined]
+            with self._connection() as connection:
                 with connection.transaction():
                     current = connection.execute(
                         """
@@ -1201,6 +1228,50 @@ class PostgresM1M2M3Repository:
         record: object,
     ) -> bool:
         return self.compare_and_swap(review_id, expected_version, record)
+
+    @contextmanager
+    def lock_teacher_review(self, review_id: str) -> Iterator[None]:
+        """Hold a transaction-scoped lock across review publish callbacks."""
+
+        if not _safe_identity(review_id):
+            raise PostgresOperationError("review identity is invalid")
+
+        callback_error: BaseException | None = None
+        try:
+            with self._connection() as connection:
+                with connection.transaction():
+                    connection.execute(
+                        "SELECT pg_advisory_xact_lock(hashtextextended(%s, 0))",
+                        (f"course-insight:m3-review:{review_id}",),
+                    )
+                    try:
+                        yield
+                    except BaseException as error:
+                        # Keep the publisher's exception as the primary error
+                        # even if transaction cleanup also reports a driver
+                        # failure while rolling it back.
+                        callback_error = error
+                        raise
+        except DomainError:
+            raise
+        except PostgresError:
+            raise
+        except (psycopg.OperationalError, psycopg.InterfaceError):
+            if callback_error is not None and not isinstance(
+                callback_error, psycopg.Error
+            ):
+                raise callback_error
+            raise PostgresConnectionError(
+                "PostgreSQL connection is unavailable"
+            ) from None
+        except psycopg.Error:
+            if callback_error is not None and not isinstance(
+                callback_error, psycopg.Error
+            ):
+                raise callback_error
+            raise PostgresOperationError(
+                "teacher review lock is unavailable"
+            ) from None
 
 
 class PostgresPgVectorStore:
@@ -1284,20 +1355,63 @@ class PostgresPgVectorStore:
         index_version: str,
         document: VectorDocument,
     ) -> None:
-        dimension = self._dimension(index_id, index_version, staging_only=True)
-        _validate_vector_document(document, dimension)
-        vector = _vector_literal(document.vector)
+        self.add_many(index_id, index_version, [document])
+
+    def add_many(
+        self,
+        index_id: str,
+        index_version: str,
+        documents: Sequence[VectorDocument],
+    ) -> None:
+        """Write one bounded batch in one checkout and one transaction."""
+
+        _validate_vector_identity(index_id, index_version)
+        rows = _validated_vector_batch(documents)
 
         def operation() -> None:
             with self._pool.connection() as connection:  # type: ignore[attr-defined]
                 with connection.transaction():
-                    connection.execute(
+                    current = connection.execute(
                         """
+                        SELECT dimension, status
+                        FROM m2_vector_indexes
+                        WHERE index_id = %s AND index_version = %s
+                        FOR UPDATE
+                        """,
+                        (index_id, index_version),
+                    ).fetchone()
+                    if current is None or current.get("status") != "staging":
+                        raise PostgresOperationError("vector index is not ready")
+                    dimension = int(current["dimension"])
+                    _validate_dimension(dimension)
+                    seen: set[str] = set()
+                    for document in rows:
+                        _validate_vector_document(document, dimension)
+                        if document.evidence_id in seen:
+                            raise PostgresOperationError("duplicate vector document")
+                        seen.add(document.evidence_id)
+                    existing = connection.execute(
+                        """
+                        SELECT evidence_id
+                        FROM m2_vector_documents
+                        WHERE index_id = %s AND index_version = %s
+                          AND evidence_id = ANY(%s)
+                        """,
+                        (
+                            index_id,
+                            index_version,
+                            [document.evidence_id for document in rows],
+                        ),
+                    ).fetchall()
+                    if existing:
+                        raise PostgresOperationError("duplicate vector document")
+                    insert_statement = """
                         INSERT INTO m2_vector_documents(
                             index_id, index_version, evidence_id,
                             chunk_id, text_checksum, dimension, embedding
                         ) VALUES (%s, %s, %s, %s, %s, %s, %s::vector)
-                        """,
+                        """
+                    insert_parameters = [
                         (
                             index_id,
                             index_version,
@@ -1305,8 +1419,43 @@ class PostgresPgVectorStore:
                             document.chunk_id,
                             document.text_checksum,
                             dimension,
-                            vector,
-                        ),
+                            _vector_literal(document.vector),
+                        )
+                        for document in rows
+                    ]
+                    with connection.cursor() as cursor:
+                        cursor.executemany(insert_statement, insert_parameters)
+
+        _run_vector(operation)
+
+    def discard(self, index_id: str, index_version: str) -> None:
+        """Delete only staging rows; published vector indexes are immutable."""
+
+        _validate_vector_identity(index_id, index_version)
+
+        def operation() -> None:
+            with self._pool.connection() as connection:  # type: ignore[attr-defined]
+                with connection.transaction():
+                    connection.execute(
+                        """
+                        DELETE FROM m2_vector_documents
+                        WHERE index_id = %s AND index_version = %s
+                          AND EXISTS (
+                              SELECT 1
+                              FROM m2_vector_indexes
+                              WHERE index_id = %s AND index_version = %s
+                                AND status = 'staging'
+                          )
+                        """,
+                        (index_id, index_version, index_id, index_version),
+                    )
+                    connection.execute(
+                        """
+                        DELETE FROM m2_vector_indexes
+                        WHERE index_id = %s AND index_version = %s
+                          AND status = 'staging'
+                        """,
+                        (index_id, index_version),
                     )
 
         _run_vector(operation)
@@ -1450,18 +1599,15 @@ class PostgresPgVectorStore:
         if type(top_k) is not int or top_k < 1:
             raise PostgresOperationError("vector top-k is invalid")
         vector = _vector_literal(query_vector)
+        try:
+            search_statement = build_pgvector_exact_search_sql(dimension)
+        except ValueError as error:
+            raise PostgresOperationError(str(error)) from None
 
         def operation() -> tuple[VectorMatch, ...]:
             with self._pool.connection() as connection:  # type: ignore[attr-defined]
                 rows = connection.execute(
-                    f"""
-                    SELECT evidence_id, chunk_id, text_checksum,
-                           1 - (embedding::vector({dimension}) <=> %s::vector) AS score
-                    FROM m2_vector_documents
-                    WHERE index_id = %s AND index_version = %s
-                    ORDER BY embedding::vector({dimension}) <=> %s::vector, evidence_id
-                    LIMIT %s
-                    """,
+                    search_statement,
                     (vector, index_id, index_version, vector, top_k),
                 ).fetchall()
             matches: list[VectorMatch] = []
@@ -1545,7 +1691,7 @@ def _validate_dimension(dimension: object) -> None:
     if (
         type(dimension) is not int
         or dimension < 1
-        or dimension > 16_000
+        or dimension > MAX_PGVECTOR_DIMENSION
     ):
         raise PostgresOperationError("vector dimension is invalid")
 
@@ -1569,6 +1715,19 @@ def _validate_vector_document(document: VectorDocument, dimension: int) -> None:
         raise PostgresOperationError("vector document is invalid")
     if not _is_sha256(document.text_checksum):
         raise PostgresOperationError("vector document checksum is invalid")
+
+
+def _validated_vector_batch(
+    documents: Sequence[VectorDocument],
+) -> tuple[VectorDocument, ...]:
+    if not isinstance(documents, Sequence):
+        raise PostgresOperationError("vector batch is invalid")
+    rows = tuple(documents)
+    if not 1 <= len(rows) <= MAX_VECTOR_BATCH_SIZE:
+        raise PostgresOperationError(
+            f"vector batch size must be between 1 and {MAX_VECTOR_BATCH_SIZE}"
+        )
+    return rows
 
 
 def _vector_literal(vector: Sequence[float]) -> str:
