@@ -289,13 +289,15 @@ def test_real_postgres_pgvector_http_embedding_retrieval_audit_and_restore(
     package = _import_package(tmp_path, repository)
     service = _service(postgres_pool, embedding_endpoint, repository)
     index = service.build_vector_index(package)
+    preferred_evidence_id = evidence_id_for_chunk(package.content_chunks[0].chunk_id)
+    required_evidence_id = evidence_id_for_chunk(package.content_chunks[1].chunk_id)
     query = EvidenceQuery(
         query_id="live-query",
         course_package_id=package.course_package_id,
         course_package_checksum=package.checksum,
         query_text="unmatched",
         concept_ids=[],
-        required_evidence_ids=["evidence_live_chunk_2"],
+        required_evidence_ids=[required_evidence_id],
         item_id=None,
         use_case="qa",
         top_k=1,
@@ -314,8 +316,8 @@ def test_real_postgres_pgvector_http_embedding_retrieval_audit_and_restore(
         query, index, policy, request_id="live-request-1"
     )
     assert first.citation_ids() == [
-        "evidence_live_chunk_2",
-        "evidence_live_chunk_1",
+        required_evidence_id,
+        preferred_evidence_id,
     ]
 
     hybrid = retrieve_for_application(
