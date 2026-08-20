@@ -53,6 +53,9 @@ from course_insight.modules.m7_local_model.privacy_reviewer import (
     PrivacyReviewResult,
 )
 from course_insight.modules.m7_local_model.repository import M7ModelAuditRecord
+from course_insight.modules.m7_local_model.review_selection import (
+    ReviewSelectionDecision,
+)
 from course_insight.modules.m7_local_model.service import M7LocalModelService
 from course_insight.modules.m8_assessment_scoring.service import (
     M8AssessmentService,
@@ -258,17 +261,30 @@ def _service(
     response: DeepSeekHTTPResponse,
     output_validator: Any = _accept_output,
     privacy_reviewer: Any = _ALLOW_PRIVACY_REVIEWER,
+    policy: M7ExecutionPolicy | None = None,
+    review_selector: Any = None,
 ) -> tuple[M7LocalModelService, _Repository]:
+    policy = policy or M7ExecutionPolicy()
     transport = _Transport(response)
     repository = _Repository(transport)
     client = DeepSeekClient(
+        model_name=policy.model_name,
+        model_version=policy.model_version,
+        max_tokens=policy.max_tokens,
+        thinking_enabled=policy.thinking_enabled,
+        temperature=policy.temperature,
         transport=transport,
         sleep=lambda _: None,
         monotonic=lambda: 1.0,
         clock=lambda: NOW,
     )
     service = M7LocalModelService(
-        DeepSeekM7Adapter(client, privacy_reviewer=privacy_reviewer),
+        DeepSeekM7Adapter(
+            client,
+            policy=policy,
+            privacy_reviewer=privacy_reviewer,
+            review_selector=review_selector,
+        ),
         repository,  # type: ignore[arg-type]
         output_validator,
     )
@@ -395,7 +411,7 @@ def _valid_score_json() -> dict[str, Any]:
         "total_score": 2.0,
         "confidence": 0.9,
         "missing_concept_ids": [],
-        "review_flags": ["teacher_review_required"],
+        "review_flags": [],
         "citation_ids": ["evidence_1"],
     }
 
@@ -597,14 +613,14 @@ def test_scoring_prompt_separates_untrusted_instructions_from_policy() -> None:
         use_case="rubric_scoring",
     )
 
-    assert prompt.prompt_version == SCORING_PROMPT_VERSION == "4.0.0"
+    assert prompt.prompt_version == SCORING_PROMPT_VERSION == "5.0.0"
     assert injected not in system_message["content"]
     assert payload["student_answer"] == injected
     assert "不可信" in system_message["content"]
-    assert "teacher_review_required" in system_message["content"]
+    assert "review_flags 必须恰好为空列表" in system_message["content"]
     assert "messages" not in safe_record
     assert injected not in json.dumps(safe_record, ensure_ascii=False)
-    assert safe_record["execution_policy_version"] == "m7-governed-v1"
+    assert safe_record["execution_policy_version"] == "m7-governed-v2"
 
 
 @pytest.mark.parametrize(
@@ -641,9 +657,50 @@ def test_governed_score_is_accepted_by_completed_m8_boundary(
     M8AssessmentService._validate_rubric_result(task, result)
 
 
+class _AcceptReviewSelector:
+    selector_id = "test-selective-v1"
+
+    def select(self, *, task, evidence_bundle, result, privacy):
+        del task, evidence_bundle, result, privacy
+        return ReviewSelectionDecision(
+            configured_mode="selective",
+            effective_mode="selective",
+            require_teacher_review=False,
+            review_flags=(),
+            audit_flags=(
+                "review_selector_selective",
+                "review_selector_accepted",
+            ),
+            reason_code="test_accept",
+            selector_id=self.selector_id,
+            raw_risk=0.1,
+            calibrated_risk=0.0,
+            acceptance_error_upper_bound=0.01,
+            candidate_accepted=True,
+        )
+
+
+def test_program_selector_can_return_not_required_without_model_deciding(
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "private-test-key")
+    service, repository = _service(
+        _response(_valid_score_json()),
+        policy=M7ExecutionPolicy(review_selection_mode="selective"),
+        review_selector=_AcceptReviewSelector(),
+    )
+
+    result = service.score_subjective_answer(_scoring_task(), _evidence())
+
+    assert result.review_flags == []
+    audit = repository.execution_audits[0]
+    assert "review_selector_accepted" in audit.safety_flags
+    assert audit.validation_status == "passed"
+
+
 @pytest.mark.parametrize(
     "review_flags",
-    [[], ["teacher_review_required", "model_selected_extra_flag"]],
+    [["teacher_review_required"], ["model_selected_extra_flag"]],
 )
 def test_governed_scoring_rejects_model_selected_review_policy(
     monkeypatch,

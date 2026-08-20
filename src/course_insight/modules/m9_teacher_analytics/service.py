@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from course_insight.contracts.analytics import (
-    ReviewQueueItem,
     TeacherAnalyticsBundle,
     TeacherReviewDecision,
 )
@@ -43,7 +42,17 @@ from course_insight.modules.m9_teacher_analytics.repository import (
 from course_insight.modules.m9_teacher_analytics.reports import (
     build_class_report,
     build_individual_report,
-    latest_audits,
+)
+from course_insight.modules.m9_teacher_analytics.quality import (
+    DEFAULT_M9_QUALITY_GATE_POLICY,
+    M9QualityGatePolicy,
+    TechnicalQualityExpectation,
+    evaluate_technical_quality_evidence,
+)
+from course_insight.modules.m9_teacher_analytics.review_sampling import (
+    DEFAULT_REVIEW_SAMPLING_POLICY,
+    ReviewSamplingPolicy,
+    build_review_queue,
 )
 from course_insight.modules.m9_teacher_analytics.suggestions import (
     TeacherThresholdPolicy,
@@ -99,6 +108,36 @@ class M9TeacherAnalyticsService:
         self._statistics_engine = statistics_engine
         self._suggestion_rule_engine = suggestion_rule_engine
         self._narrative_adapter: GovernedM9NarrativeAdapter | None = None
+        self._review_sampling_policy = DEFAULT_REVIEW_SAMPLING_POLICY
+        self._review_sampling_hmac_key: bytes | None = None
+        self._review_sampling_configured = False
+
+    def configure_review_sampling(
+        self,
+        policy: ReviewSamplingPolicy,
+        *,
+        hmac_key: bytes | bytearray | None = None,
+    ) -> None:
+        """Configure deterministic low-risk audits exactly once.
+
+        Pending reviews never depend on this key.  A key is required only when
+        a non-zero completed-score sampling rate is enabled, and is retained
+        in memory without being written to reports or repositories.
+        """
+
+        if not isinstance(policy, ReviewSamplingPolicy):
+            raise TypeError("policy must be a ReviewSamplingPolicy")
+        if self._review_sampling_configured:
+            raise RuntimeError("M9 review sampling is already configured")
+        if policy.requires_hmac_key() and (
+            not isinstance(hmac_key, (bytes, bytearray)) or len(hmac_key) < 32
+        ):
+            raise ValueError("enabled review sampling requires a 32-byte HMAC key")
+        self._review_sampling_policy = policy
+        self._review_sampling_hmac_key = (
+            None if hmac_key is None else bytes(hmac_key)
+        )
+        self._review_sampling_configured = True
 
     def configure_teacher_interpreter(
         self,
@@ -257,6 +296,25 @@ class M9TeacherAnalyticsService:
             generated_at=requested_at,
         )
 
+    def build_llm_quality_report(
+        self,
+        evidence_path: Path | str,
+        *,
+        expected_file_sha256: str,
+        expectation: TechnicalQualityExpectation,
+        requested_at: datetime,
+        gate_policy: M9QualityGatePolicy = DEFAULT_M9_QUALITY_GATE_POLICY,
+    ) -> ModelQualityReport:
+        """Evaluate frozen M9 candidate evidence without publishing a model."""
+
+        return evaluate_technical_quality_evidence(
+            evidence_path,
+            expected_file_sha256=expected_file_sha256,
+            expectation=expectation,
+            requested_at=requested_at,
+            gate_policy=gate_policy,
+        )
+
     def build_teacher_analytics(
         self,
         knowledge_bundle: KnowledgeBundle,
@@ -397,24 +455,11 @@ class M9TeacherAnalyticsService:
                     misconception_threshold=policy.misconception_threshold,
                 )
             ]
-        queue = [
-            ReviewQueueItem(
-                audit_id=record.audit_id,
-                audit_version=record.audit_version,
-                learner_id=scoring_result_bundle.learner_id,
-                item_instance_id=record.item_instance_id,
-                recommended_score=record.total_score,
-                confidence=record.confidence,
-                review_reasons=(
-                    list(record.review_reason)
-                    if record.review_reason
-                    else ["review_required"]
-                ),
-            )
-            for record in latest_audits(scoring_result_bundle)
-            if record.needs_review() and not record.is_rejected()
-        ]
-        queue.sort(key=lambda item: item.priority_key())
+        queue = build_review_queue(
+            scoring_result_bundle,
+            policy=self._review_sampling_policy,
+            hmac_key=self._review_sampling_hmac_key,
+        )
         report_id = teacher_analytics_report_id(
             course_id=knowledge_bundle.course_id,
             class_state_snapshot_id=(

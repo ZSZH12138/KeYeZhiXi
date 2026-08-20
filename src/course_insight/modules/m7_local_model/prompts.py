@@ -24,7 +24,7 @@ from course_insight.modules.m7_local_model.privacy_reviewer import PrivacyReview
 
 
 SCORING_PROMPT_ID = "m7-rubric-scoring-json"
-SCORING_PROMPT_VERSION = "4.0.0"
+SCORING_PROMPT_VERSION = "5.0.0"
 FEEDBACK_PROMPT_ID = "m7-deterministic-feedback"
 FEEDBACK_PROMPT_VERSION = "1.0.0"
 
@@ -289,11 +289,11 @@ _SCORING_SYSTEM_PROMPT = """
 6. total_score 必须严格等于所有 score 之和，且不得超过 rubric.total_score。
 7. confidence 只表示“量规、学生引文和课程证据是否足以支持本次判断”：证据直接且无歧义可接近 0.9，存在局部歧义约 0.7，证据严重不足不高于 0.5。它不是正确率承诺。
 8. missing_concept_ids 只能取自 item.concept_ids，且只列出学生答案证据不足的概念。
-9. review_flags 必须恰好为 ["teacher_review_required"]；其他复核标记由程序计算。
+9. review_flags 必须恰好为空列表 []；所有复核标记由本地程序计算，模型无权决定是否送审。
 10. citation_ids 必须恰好等于 criterion_scores 中所有非 null course_evidence_id 的去重列表，按首次出现顺序排列。
 
 只返回一个 JSON 对象，不要 Markdown、代码围栏或额外文字。字段必须完整且不得增加字段。JSON 示例：
-{"criterion_scores":[{"criterion_id":"criterion_id","score":0.0,"student_evidence":"","course_evidence_id":null,"reason":"简短的证据判断"}],"total_score":0.0,"confidence":0.5,"missing_concept_ids":[],"review_flags":["teacher_review_required"],"citation_ids":[]}
+{"criterion_scores":[{"criterion_id":"criterion_id","score":0.0,"student_evidence":"","course_evidence_id":null,"reason":"简短的证据判断"}],"total_score":0.0,"confidence":0.5,"missing_concept_ids":[],"review_flags":[],"citation_ids":[]}
 """.strip()
 
 

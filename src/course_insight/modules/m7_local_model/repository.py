@@ -38,6 +38,18 @@ _M7_AUDIT_SAFETY_FLAGS = frozenset(
         "redaction_meaning_loss",
         "provider_content_filter",
         "invalid_model_output",
+        "low_confidence",
+        "review_selector_fallback",
+        "review_selector_hard_defer",
+        "review_selector_insufficient_data",
+        "review_selector_ood",
+        "review_selector_risk_limit",
+        "review_selector_shadow",
+        "review_selector_all_review",
+        "review_selector_deferred",
+        "review_selector_candidate_accepted",
+        "review_selector_selective",
+        "review_selector_accepted",
     }
 )
 _M7_AUDIT_ERROR_CODES = frozenset(

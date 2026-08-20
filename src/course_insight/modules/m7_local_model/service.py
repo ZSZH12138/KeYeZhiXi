@@ -169,6 +169,12 @@ class M7LocalModelService:
                     if outcome is None
                     else outcome.student_answer_for_validation
                 ),
+                require_teacher_review=(outcome is None),
+                expected_review_flags=(
+                    None
+                    if outcome is None
+                    else outcome.review_selection.review_flags
+                ),
             )
         except DomainError:
             if outcome is not None:
@@ -389,6 +395,8 @@ class M7LocalModelService:
         result: Any,
         *,
         student_answer: str,
+        require_teacher_review: bool,
+        expected_review_flags: tuple[str, ...] | None,
     ) -> None:
         if not isinstance(result, RubricScoringResult):
             raise DomainError(
@@ -407,7 +415,14 @@ class M7LocalModelService:
             }
             != task.criterion_ids()
             or result.total_score > task.max_score() + 1e-9
-            or "teacher_review_required" not in result.review_flags
+            or (
+                require_teacher_review
+                and "teacher_review_required" not in result.review_flags
+            )
+            or (
+                expected_review_flags is not None
+                and tuple(result.review_flags) != expected_review_flags
+            )
         ):
             raise DomainError(
                 code="INVALID_MODEL_JSON",
