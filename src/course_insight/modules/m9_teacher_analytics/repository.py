@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import datetime
 import hashlib
@@ -21,6 +22,54 @@ from course_insight.contracts.intelligence import (
 
 _REVIEW_TABLE = "m9_teacher_reviews"
 _LOWER_HEX = frozenset("0123456789abcdef")
+
+
+def analytics_learner_scope(
+    bundle: TeacherAnalyticsBundle,
+    learner_scope_ids: Sequence[str] | None = None,
+) -> tuple[str, ...]:
+    """Validate the private learner index, including rejection tombstones.
+
+    The public v1 contract cannot put a null score in ``IndividualReport``.
+    A pending-rescore report therefore omits individual reports and keeps its
+    affected learner only in M9-owned persistence metadata.  This private
+    tombstone makes learner-scoped latest-report reads stop at the rejection
+    instead of falling back to an older provisional score.
+    """
+
+    if not isinstance(bundle, TeacherAnalyticsBundle):
+        raise TypeError("bundle must be a TeacherAnalyticsBundle")
+    individual_ids = tuple(
+        sorted(report.learner_id for report in bundle.individual_reports)
+    )
+    if learner_scope_ids is None:
+        normalized = individual_ids
+    else:
+        if isinstance(learner_scope_ids, (str, bytes, bytearray)):
+            raise TypeError("learner_scope_ids must be a sequence of identifiers")
+        values = tuple(learner_scope_ids)
+        if any(
+            type(value) is not str
+            or not value.strip()
+            or value != value.strip()
+            for value in values
+        ):
+            raise ValueError("M9 learner scope identifiers are invalid")
+        normalized = tuple(sorted(values))
+        if len(normalized) != len(set(normalized)):
+            raise ValueError("M9 learner scope identifiers must be unique")
+
+    pending_rescore = bundle.class_report.evidence_status == "pending_rescore"
+    if pending_rescore:
+        if (
+            bundle.individual_reports
+            or len(normalized) != 1
+            or "_rejected_" not in bundle.report_id
+        ):
+            raise ValueError("M9 pending-rescore learner tombstone is invalid")
+    elif normalized != individual_ids:
+        raise ValueError("M9 learner scope does not match individual reports")
+    return normalized
 
 
 class M9ReviewDecisionConflict(RuntimeError):
@@ -309,8 +358,9 @@ class M9Repository(Protocol):
         bundle: TeacherAnalyticsBundle,
         *,
         course_id: str,
+        learner_scope_ids: Sequence[str] | None = None,
     ) -> TeacherAnalyticsBundle:
-        """Persist one scoped report or return its identical winner."""
+        """Persist one scoped report and its private learner tombstone."""
 
     def get_analytics(
         self,
@@ -383,4 +433,5 @@ __all__ = [
     "M9ModelAuditRecord",
     "M9Repository",
     "M9ReviewDecisionConflict",
+    "analytics_learner_scope",
 ]

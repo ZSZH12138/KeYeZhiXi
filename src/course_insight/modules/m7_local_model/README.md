@@ -15,7 +15,8 @@ M7 现在提供两条明确分离的运行路径：
 
 - 默认路径使用 `PlaceholderRubricAdapter` 和 `EmptyDeepSeekAdapter`，不读密钥、
   不访问网络，架构空示例保持 `status=empty`；
-- 显式构造 `DeepSeekClient` 与 `DeepSeekM7Adapter` 后，才允许真实评分请求；
+- 显式构造 `DeepSeekClient`、本地隐私复核器与 `DeepSeekM7Adapter` 后，才允许
+  真实评分请求；任何复核器缺失、损坏、异常或结果不确定都会在网络前失败关闭；
   学生反馈始终由本地模板生成，不读取密钥、不访问网络。客户端仅接受
   `deepseek-v4-flash` 或 `deepseek-v4-pro`；冻结的
   `m7-governed-v1` 策略固定使用 Flash、非思考模式、`temperature=0` 和
@@ -36,7 +37,8 @@ M7 现在提供两条明确分离的运行路径：
   `EvidenceBundle`，短期只携带来源与定位，不携带证据原文；所有学生可见文字
   必须通过答案泄露检查；
 - DeepSeek 的 `LLMGenerationResult` 只在适配器内瞬时解析，不交给仓储；
-  M7 将安全提示元数据、调用状态、安全判定和隐私判定合并成一份原子审计。
+  M7 将安全提示元数据、调用状态、安全判定和隐私判定合并成一份审计记录，
+  并以仓储事务幂等写入；这不表示外部 HTTP 请求与数据库写入具有原子性。
   最终 `RubricScoringResult` 仍由 M8 的评分流程负责审计。
 
 评分提示使用 `m7-rubric-scoring-json@4.0.0`；反馈模板使用
@@ -44,10 +46,22 @@ M7 现在提供两条明确分离的运行路径：
 课程证据全部位于 user JSON，并被 system 规则声明为不可信数据，不能改变角色、
 评分规则或输出格式。
 
-学生答案在任何提示消息构造前执行 `m7-outbound-privacy-v1`：邮箱、手机号、
-校验通过的中国居民身份证号和带明确标签的学号使用固定占位符脱敏；明确的姓名、
-详细地址、健康或家庭自由文本失败关闭。若答案主要由被脱敏标识符构成，系统也会
-以 `redaction_meaning_loss` 阻断，转入人工或本地处理。没有默认绕过开关。
+学生答案在任何提示消息构造前执行 `m7-outbound-privacy-v2`。边界明确的邮箱、
+手机号、校验通过的中国居民身份证号和带明确标签的学号先由确定性层替换为固定
+占位符；经过治理的文本随后必须通过本地 `PrivacyReviewer`。推荐组合是
+Presidio + `zh_core_web_sm` 的中文实体识别，以及经审批、SHA-256 钉住的轻量
+scikit-learn 语义分类器，用于识别自由文本身份、地址、健康和家庭披露。只有所有
+启用的复核器都返回 `allow` 才能构造 DeepSeek prompt；`review`、`block`、缺依赖、
+模型损坏、置信不足和运行异常均阻断。若脱敏破坏了主要评分语义，也以
+`redaction_meaning_loss` 阻断。该机制不再依赖不断扩张的自由文本关键词表，也没有
+默认绕过开关。
+
+Presidio/spaCy 与语义分类器是进程内专用检测组件，不是生成式 LLM。可选依赖通过
+`pip install -e '.[privacy]'` 安装；中文 spaCy 模型与 sklearn 工件必须由可信管理员
+在隔离环境中部署并钉住版本/校验和，应用运行时不得联网下载。数据与工件准入见
+`data/m7_privacy/README.md`。结合本项目最低版本，真实隐私运行时只批准 Python
+3.11–3.13；使用 Python 3.14 的开发环境只能验证失败关闭和假后端，不得据此宣称
+真实中文链路已联调。
 
 ## 显式启用
 
@@ -58,13 +72,25 @@ from course_insight.infrastructure.deepseek import DeepSeekClient
 from course_insight.modules.m7_local_model import (
     DeepSeekM7Adapter,
     M7LocalModelService,
+    build_required_m7_privacy_reviewer,
 )
 
 client = DeepSeekClient(
     model_name="deepseek-v4-flash",
     model_version="runtime-api",
 )
-adapter = DeepSeekM7Adapter(client)
+privacy_reviewer = build_required_m7_privacy_reviewer(
+    runtime_dir=runtime_dir,
+    model_dir=runtime_dir / "m7_privacy" / "privacy-model",
+    expected_presidio_version="2.2.364",
+    expected_spacy_version="3.8.13",
+    expected_spacy_model_version="3.8.0",
+    expected_semantic_model_id="m7-semantic-privacy",
+    expected_semantic_model_version="1",
+    expected_semantic_model_sha256=approved_model_sha256,
+    expected_semantic_manifest_sha256=approved_manifest_sha256,
+)
+adapter = DeepSeekM7Adapter(client, privacy_reviewer=privacy_reviewer)
 service = M7LocalModelService(adapter, m7_repository, output_validator)
 ```
 
@@ -74,7 +100,26 @@ service = M7LocalModelService(adapter, m7_repository, output_validator)
 - `generate_student_feedback(feedback_generation_task, evidence_bundle)`。
 
 如果没有 `DEEPSEEK_API_KEY`，主观评分在网络请求前以
-`MODEL_ADAPTER_UNCONFIGURED` 失败关闭；确定性反馈不受影响。
+`MODEL_ADAPTER_UNCONFIGURED` 失败关闭；如果没有可用且通过完整性校验的本地隐私
+复核器，则以 `MODEL_INPUT_PRIVACY_BLOCKED` 失败关闭。确定性反馈不受影响。
+
+Presidio 达到阈值的任何实体（包括 `DATE_TIME`、`ORGANIZATION`、`NRP`）都会阻断，
+且没有可由调用方配置的忽略列表。这样会保守地误拦一部分课程日期和组织名，但不会用
+不断扩张的邻近关键词规则把实体静默改判为安全。未来只有在固定版本的 typed-entity 特征、
+语义分类器和独立回归集完成校准后，才能以新策略版本降低误拦；当前语义模型不能覆盖
+Presidio 的确定性阻断。全角字符或零宽格式字符若使直接标识符只能在规范化后被识别，
+系统不会尝试改写原文，而是以通用隐私标记在网络前阻断。
+
+sklearn 工件启用时，模型文件和 manifest 必须分别由部署配置钉住 SHA-256；manifest
+声明的 Python、scikit-learn 与 joblib 版本必须与运行时完全一致，所有校验均在
+`joblib` 反序列化前完成。普通 SHA-256 只提供已审批字节的一致性校验，不替代签名、
+发布权限或运行目录隔离。
+
+残余审计风险：外部 HTTP 调用与 SQLite/PostgreSQL 写入无法在一个原子事务中提交。
+当前实现会在审计写失败时拒绝返回评分，但请求可能已经到达 DeepSeek。部署必须对
+审计写失败告警并停用真实适配器；若未来要求“无持久审计绝不出站”，需要公共仓储/
+编排契约增加调用前 reservation 与调用后终结状态，不能用一次可用性探测伪装成
+原子保证。
 
 ## 安全与校验
 
@@ -114,11 +159,25 @@ M7 测试全部使用可注入假传输，不消耗真实 API：
 ```shell
 python -m pytest -q \
   tests/unit/test_deepseek_client.py \
-  tests/unit/test_m7_deepseek.py
+  tests/unit/test_m7_deepseek.py \
+  tests/unit/test_m7_privacy_reviewer.py \
+  tests/unit/test_m7_citation_safety.py
 ```
+
+部署真实调用前，还必须在安装了钉住版本的 Presidio、spaCy 与
+`zh_core_web_sm` 的 Python 3.11–3.13 目标环境运行显式 smoke：
+
+```shell
+M7_PRESIDIO_ZH_SMOKE=1 python -m pytest -q \
+  tests/integration/test_m7_privacy_runtime_smoke.py
+```
+
+该 smoke 未显式启用时会跳过；跳过或在 Python 3.14 只运行假后端单测，都不能作为
+真实中文链路跑通的证据。
 
 ## 禁止事项
 
-不得接入 DeepSeek 以外的 LLM、把 DeepSeek 用于学生反馈、加载本地模型权重、
+不得接入 DeepSeek 以外的生成式 LLM、把 DeepSeek 用于学生反馈、加载未经审批或
+未钉住校验和的本地模型权重、
 硬编码密钥、默认联网、保存完整模型响应、接受不匹配证据、引用不存在证据、
 绕过教师复核、绕过出站隐私治理，或在学生反馈中泄漏答案/证据原文。

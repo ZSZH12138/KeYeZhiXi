@@ -1,0 +1,35 @@
+{
+  "schema_version": "1",
+  "model_id": "replace-with-approved-model-id",
+  "model_version": "replace-with-approved-model-version",
+  "adapter_type": "sklearn_privacy",
+  "labels": [
+    "SAFE",
+    "SELF_ADDRESS",
+    "SELF_FAMILY",
+    "SELF_HEALTH",
+    "SELF_IDENTITY"
+  ],
+  "normalization_version": "m7-privacy-normalization-v1",
+  "training_dataset_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "model_artifact_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+  "library_versions": {
+    "python": "replace-with-exact-runtime-version",
+    "scikit_learn": "replace-with-exact-runtime-version",
+    "joblib": "replace-with-exact-runtime-version"
+  },
+  "created_at": "2026-08-16T00:00:00+00:00",
+  "vectorizer": {
+    "type": "TfidfVectorizer",
+    "analyzer": "char"
+  },
+  "classifier": {
+    "type": "LogisticRegression",
+    "class_weight": "balanced"
+  },
+  "training_provenance": {
+    "dataset_manifest_sha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "seed": 0,
+    "approval_reference": "replace-with-approval-reference"
+  }
+}

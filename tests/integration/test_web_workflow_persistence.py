@@ -36,6 +36,7 @@ from course_insight.contracts.tasking import TaskPlan
 from course_insight.contracts.platform import TeacherReviewSubmission
 from course_insight.contracts.tutoring import (
     EvidenceCitation,
+    STUDENT_CITATION_QUOTE_PLACEHOLDER,
     StudentFeedbackPackage,
 )
 from course_insight.infrastructure.json_io import dumps_json
@@ -414,6 +415,7 @@ def _feedback() -> StudentFeedbackPackage:
                 evidence_id="evidence_1",
                 source_id="source_1",
                 locator="p.1",
+                quote=STUDENT_CITATION_QUOTE_PLACEHOLDER,
             )
         ],
         next_practice_item_ids=[],
@@ -450,6 +452,37 @@ def _analytics(
         review_queue=[],
         teaching_suggestions=[],
         generated_at=generated_at,
+    )
+
+
+def _pending_rescore_analytics(
+    *,
+    generated_at: datetime = NOW + timedelta(seconds=1),
+) -> TeacherAnalyticsBundle:
+    base = _analytics(
+        report_id="report_1_rejected_checksum",
+        generated_at=generated_at,
+    )
+    return base.model_copy(
+        update={
+            "class_report": base.class_report.model_copy(
+                update={
+                    "coverage_rate": 0.0,
+                    "concept_summaries": [],
+                    "misconception_summaries": [],
+                    "score_statistics": {
+                        "audit_count": 0.0,
+                        "score_total": 0.0,
+                    },
+                    "evidence_status": "pending_rescore",
+                },
+                deep=True,
+            ),
+            "individual_reports": [],
+            "review_queue": [],
+            "teaching_suggestions": [],
+        },
+        deep=True,
     )
 
 
@@ -1118,6 +1151,60 @@ def test_m9_latest_analytics_orders_mixed_offsets_by_actual_time(
         )
         == newer
     )
+
+
+def test_m9_latest_learner_report_stops_at_pending_rescore_tombstone(
+    tmp_path: Path,
+) -> None:
+    database_path = tmp_path / "workflow.db"
+    repository = _repository(SQLiteM9Repository, database_path)
+    provisional = _analytics()
+    rejected = _pending_rescore_analytics()
+    repository.insert_or_get_analytics(provisional, course_id="course_1")
+    with pytest.raises(ValueError, match="tombstone"):
+        repository.insert_or_get_analytics(
+            rejected,
+            course_id="course_1",
+        )
+    repository.insert_or_get_analytics(
+        rejected,
+        course_id="course_1",
+        learner_scope_ids=["learner_1"],
+    )
+
+    assert (
+        repository.get_latest_analytics(
+            course_id="course_1",
+            class_id="class_1",
+            learner_id="learner_1",
+        )
+        == rejected
+    )
+    connection = connect_sqlite(database_path)
+    try:
+        row = connection.execute(
+            "SELECT learner_ids FROM m9_teacher_analytics WHERE report_id = ?",
+            (rejected.report_id,),
+        ).fetchone()
+    finally:
+        connection.close()
+    assert row is not None
+    assert row["learner_ids"] == dumps_json(["learner_1"])
+
+    connection = connect_sqlite(database_path)
+    try:
+        connection.execute(
+            "UPDATE m9_teacher_analytics SET learner_ids = ? WHERE report_id = ?",
+            (dumps_json([]), rejected.report_id),
+        )
+    finally:
+        connection.close()
+    with pytest.raises(RuntimeError, match="learner scope"):
+        repository.get_latest_analytics(
+            course_id="course_1",
+            class_id="class_1",
+            learner_id="learner_1",
+        )
 
 
 def test_m9_service_builds_course_scoped_report_ids_for_shared_class_versions(

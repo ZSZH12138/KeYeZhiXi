@@ -9,7 +9,7 @@ from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
 
 
-def test_intent_packages_are_only_declared_for_intent_extra() -> None:
+def test_ml_packages_are_only_declared_for_approved_extras() -> None:
     requirements = [
         Requirement(value)
         for value in metadata.requires("course-insight") or ()
@@ -26,11 +26,15 @@ def test_intent_packages_are_only_declared_for_intent_extra() -> None:
     optional_names = {"scikit-learn", "joblib"}
     assert optional_names.isdisjoint(enabled_names(""))
     assert optional_names <= enabled_names("intent")
+    assert optional_names <= enabled_names("privacy")
     for requirement in requirements:
         if canonicalize_name(requirement.name) in optional_names:
             assert requirement.marker is not None
-            assert requirement.marker.evaluate({"extra": "intent"})
             assert not requirement.marker.evaluate({"extra": ""})
+            assert any(
+                requirement.marker.evaluate({"extra": extra})
+                for extra in ("intent", "privacy")
+            )
 
 
 def test_rules_import_does_not_import_optional_packages() -> None:

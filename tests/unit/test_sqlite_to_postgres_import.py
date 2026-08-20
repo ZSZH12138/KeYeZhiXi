@@ -12,6 +12,9 @@ from typing import Any
 import pytest
 from psycopg.types.json import Jsonb
 
+from course_insight.contracts.tutoring import (
+    STUDENT_CITATION_QUOTE_PLACEHOLDER,
+)
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.contracts.events import LearningEvent
 from course_insight.infrastructure.postgresql.sqlite_import import (
@@ -42,7 +45,11 @@ from course_insight.modules.m7_local_model.repository import M7ModelAuditRecord
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
 )
-from tests.integration.test_web_workflow_persistence import _analytics, _feedback
+from tests.integration.test_web_workflow_persistence import (
+    _analytics,
+    _feedback,
+    _pending_rescore_analytics,
+)
 
 
 NOW = datetime(2026, 7, 25, 8, 0, tzinfo=timezone.utc)
@@ -839,6 +846,34 @@ def test_sqlite_to_postgres_import_preserves_m9_model_audit(
     assert "reasoning_content" not in prepared.value_for("payload")
 
 
+def test_sqlite_to_postgres_import_preserves_m9_rejection_tombstone(
+    tmp_path: Path,
+) -> None:
+    source = _source_with_plans(tmp_path / "source.sqlite3", "")
+    rejected = _pending_rescore_analytics()
+    repository = SQLiteM9Repository(source)
+    repository.initialize()
+    repository.insert_or_get_analytics(
+        rejected,
+        course_id="course_1",
+        learner_scope_ids=["learner_1"],
+    )
+    destination = _MemoryDestination()
+
+    SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=destination,
+    ).run(mode="apply")
+
+    prepared = destination.rows[
+        ("m9_teacher_analytics", (rejected.report_id,))
+    ]
+    assert prepared.value_for("learner_ids") == '["learner_1"]'
+    payload = json.loads(prepared.value_for("payload"))
+    assert payload["individual_reports"] == []
+    assert payload["class_report"]["evidence_status"] == "pending_rescore"
+
+
 def test_sqlite_to_postgres_import_preserves_m7_model_audit(
     tmp_path: Path,
 ) -> None:
@@ -871,8 +906,10 @@ def test_sqlite_to_postgres_import_preserves_m7_model_audit(
     assert "prompt" not in payload
 
 
-def test_sqlite_to_postgres_import_strips_legacy_feedback_quotes(
+@pytest.mark.parametrize("legacy_shape", ["quoted", "pre_quote"])
+def test_sqlite_to_postgres_import_normalizes_legacy_feedback_quotes(
     tmp_path: Path,
+    legacy_shape: str,
 ) -> None:
     source = _source_with_plans(tmp_path / "source.sqlite3", "")
     repository = SQLiteM7Repository(source)
@@ -880,9 +917,13 @@ def test_sqlite_to_postgres_import_strips_legacy_feedback_quotes(
     feedback = _feedback()
     repository.save_feedback(feedback)
     legacy_payload = feedback.to_dict()
-    legacy_payload["evidence_citations"][0]["quote"] = (
-        "Historical course evidence that is no longer student-visible."
-    )
+    if legacy_shape == "quoted":
+        legacy_payload["evidence_citations"][0]["quote"] = (
+            "Historical course evidence that is no longer student-visible."
+        )
+    else:
+        for citation in legacy_payload["evidence_citations"]:
+            citation.pop("quote")
     with connect_sqlite(source) as connection:
         connection.execute(
             "UPDATE m7_student_feedback SET payload = ? WHERE feedback_id = ?",
@@ -911,7 +952,10 @@ def test_sqlite_to_postgres_import_strips_legacy_feedback_quotes(
         ("m7_student_feedback", (feedback.feedback_id,))
     ]
     payload = json.loads(prepared.value_for("payload"))
-    assert "quote" not in payload["evidence_citations"][0]
+    assert (
+        payload["evidence_citations"][0]["quote"]
+        == STUDENT_CITATION_QUOTE_PLACEHOLDER
+    )
     assert prepared.value_for("payload_checksum") == feedback.content_checksum()
 
 
@@ -1811,24 +1855,15 @@ def test_internal_scope_columns_do_not_require_nonexistent_public_fields() -> No
         },
         paper,
     )
-    generated_at = NOW
-    analytics = SimpleNamespace(
-        report_id="report_1",
-        class_report=SimpleNamespace(class_id="class_1"),
-        individual_reports=[
-            SimpleNamespace(learner_id="learner_b"),
-            SimpleNamespace(learner_id="learner_a"),
-        ],
-        generated_at=generated_at,
-    )
+    analytics = _analytics()
     _validate_contract_identity(
         "m9_teacher_analytics",
         {
-            "report_id": "report_1",
+            "report_id": analytics.report_id,
             "course_id": "course_1",
-            "class_id": "class_1",
-            "generated_at": generated_at.isoformat(),
-            "learner_ids": '["learner_a","learner_b"]',
+            "class_id": analytics.class_report.class_id,
+            "generated_at": analytics.generated_at.isoformat(),
+            "learner_ids": '["learner_1"]',
         },
         analytics,
     )

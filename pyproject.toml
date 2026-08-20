@@ -24,6 +24,12 @@ intent = [
     "scikit-learn>=1.5,<2",
     "joblib>=1.4,<2",
 ]
+privacy = [
+    "presidio-analyzer>=2.2,<3",
+    "spacy>=3.8,<4",
+    "scikit-learn>=1.5,<2",
+    "joblib>=1.4,<2",
+]
 
 [tool.setuptools.packages.find]
 where = ["src"]

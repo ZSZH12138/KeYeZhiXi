@@ -228,7 +228,7 @@ python -m course_insight.cli export-schemas
 | 类 | 声明字段 | 公开领域方法 |
 |---|---|---|
 | `ClassReport` | `class_id:str; coverage_rate:float; concept_summaries:list[ClassConceptStatus]; misconception_summaries:list[ClassMisconceptionSummary]; score_statistics:dict[str,float]; evidence_status:str` | `is_actionable` |
-| `IndividualReport` | `learner_id:str; overall_mastery:float; weak_concept_ids:list[str]; active_misconception_ids:list[str]; recent_score:float\|null; review_required_count:int` | 驳回待重评时 `recent_score=null`；`needs_follow_up` |
+| `IndividualReport` | `learner_id:str; overall_mastery:float; weak_concept_ids:list[str]; active_misconception_ids:list[str]; recent_score:float; review_required_count:int` | `needs_follow_up`；驳回待重评时不生成个人报告，不以 `null`/零分改写 v1 |
 | `ReviewQueueItem` | `audit_id:str; audit_version:int; learner_id:str; item_instance_id:str; recommended_score:float; confidence:float; review_reasons:list[str]` | `priority_key` |
 | `TeachingSuggestion` | `suggestion_id:str; action_type:str; concept_ids:list[str]; content:str; trigger_metrics:dict[str,float]; affected_count:int; affected_rate:float; coverage_rate:float; confidence:float; evidence_ids:list[str]; status:str` | `is_actionable` |
 | `CriterionOverride` | `criterion_id:str; previous_score:float; new_score:float; reason:str` | `delta` |
@@ -415,8 +415,9 @@ repository: M6Repository, policy_runtime: PolicyRuntime|None = None)`。
 源码：[service.py](src/course_insight/modules/m7_local_model/service.py)。构造：
 `M7LocalModelService(local_model_adapter, prompt_repository,
 output_validator)`。
-类名保留以维持已有公开接口；LLM 方向只允许 DeepSeek API，不再扩展
-为其他供应商或本地权重推理。
+类名保留以维持已有公开接口；生成式 LLM 方向只允许 DeepSeek API，不再扩展
+为其他供应商或本地生成式权重推理。经审批、版本和 SHA-256 钉住的本地专用
+PII/NER 与语义分类器只用于 DeepSeek 出站前隐私复核，不生成评分或反馈。
 
 - `invoke_deepseek(request: LLMGenerationRequest) -> LLMGenerationResult`：
   legacy 架构脚手架默认调用 DeepSeek 空适配器，不读取密钥或访问网络；
@@ -648,7 +649,8 @@ Repository，以及显式 SQLite→PostgreSQL 导入 CLI。SQLite 仍是完整�
 | `m9_model_invocation_audits` | M9 | invocation_id、request_id、来源报告和通过校验的教师解读 |
 
 M7 的持久表保存学生反馈及 180 天管理员可读的隐私最小化调用审计，不保存
-DeepSeek 密钥、完整提示词、学生答案、模型响应或本地模型权重。每个仓储只访问
+DeepSeek 密钥、完整提示词、学生答案、模型响应或本地模型权重；隐私检测工件仅由
+可信管理员放入运行目录并经清单/SHA 校验。每个仓储只访问
 本模块前缀。教师确认的 JSON 是只读输入；`runtime/`
 保存数据库、JSON 快照、索引、日志和运行清单。运行产物不得回写 `data/` 或
 `contracts/`。
@@ -703,7 +705,7 @@ M0 Web 已是真实基础设施；本 legacy 入口仍不需要 pgvector、DeepS
 | M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 84 个公开契约、`TaskPlan` 和八字段业务身份 |
 | M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
 | M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline |
-| M7 | 默认评分占位且零网络；显式 `DeepSeekM7Adapter` 仅支持 V4 主观评分、出站脱敏/阻断、JSON 校验、有限重试、180 天最小化审计和强制教师复核；反馈按 M6 动作确定性生成 | 在目标环境提供 `DEEPSEEK_API_KEY`，以假传输/沙箱及隐私阻断用例验收后再显式启用评分 |
+| M7 | 默认评分占位且零网络；显式 `DeepSeekM7Adapter` 仅支持 V4 主观评分、确定性标识符脱敏、本地 Presidio/spaCy + 可选 sklearn 语义隐私复核、JSON 校验、有限重试、180 天最小化审计和强制教师复核；反馈按 M6 动作确定性生成 | 在目标环境部署经审批且校验和钉住的隐私检测工件并提供 `DEEPSEEK_API_KEY`，以假传输/沙箱及隐私阻断用例验收后再显式启用评分 |
 | M8 | 固定 anchor/规则评分；IRT 标定与自适应选题为 `empty` | 足量数据下实现 IRT shadow 标定，经 M9 质量/教师审核后启用 |
 | M9 | 阈值统计/规则建议与 `insufficient_data` 质量报告；legacy 叙述入口零网络；显式 `DeepSeekM9NarrativeAdapter` 仅解读达到门槛的匿名班级聚合事实 | 在目标环境以假传输/沙箱验收后再显式启用教师主动触发的解读；模型指标与标定审核仍待实现 |
 
@@ -719,7 +721,7 @@ M6 私有 OPE/approval 尚未正式接入 M9；当前 M9 公共质量入口只�
 - 禁止跨模块读表、改变权威契约名或把契约转成临时字典跨模块传递。
 - 禁止核心内部 HTTP、路由装饰器、网络客户端和绕过 `AppCoordinator` 的编排。
 - 禁止真实姓名、学号、邮箱、电话、身份映射、密钥和真实 `.env`。
-- 禁止 DeepSeek 以外的 LLM、本地模型权重、硬编码 `DEEPSEEK_API_KEY`，以及未经教师审核的高风险自动评分。
+- 禁止 DeepSeek 以外的生成式 LLM、未经审批或未钉住校验和的本地模型权重、硬编码 `DEEPSEEK_API_KEY`，以及未经发布门批准的高风险自动评分；允许仅用于出站前隐私检测的受控本地 PII/NER 与判别式分类器。
 - 智能空实现禁止访问模型网络、连接 pgvector、读取 DeepSeek 密钥或伪造
   DINA/BKT/IRT/模型质量指标；M0 仅按显式配置连接 SQLite/PostgreSQL。
 - 禁止把数据库、日志、索引、快照、模型文件或真实课程资料写入受管数据目录。

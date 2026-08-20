@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import sqlite3
+from collections.abc import Sequence
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -17,9 +18,23 @@ from course_insight.infrastructure.json_io import dumps_json
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
     M9ReviewDecisionConflict,
+    analytics_learner_scope,
 )
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.sqlite.migrations import migrate
+
+
+def _analytics_learner_scope_from_row(
+    row: sqlite3.Row,
+    bundle: TeacherAnalyticsBundle,
+) -> tuple[str, ...]:
+    try:
+        raw_scope = json.loads(str(row["learner_ids"]))
+        if type(raw_scope) is not list:
+            raise ValueError
+        return analytics_learner_scope(bundle, raw_scope)
+    except Exception:
+        raise RuntimeError("M9 analytics learner scope is invalid") from None
 
 
 class SQLiteM9Repository:
@@ -166,12 +181,14 @@ class SQLiteM9Repository:
         bundle: TeacherAnalyticsBundle,
         *,
         course_id: str,
+        learner_scope_ids: Sequence[str] | None = None,
     ) -> TeacherAnalyticsBundle:
         if not course_id.strip():
             raise ValueError("M9 analytics course scope must not be blank")
         class_id = bundle.class_report.class_id
-        learner_ids = sorted(
-            report.learner_id for report in bundle.individual_reports
+        learner_ids = analytics_learner_scope(
+            bundle,
+            learner_scope_ids,
         )
         payload = dumps_json(bundle.to_dict())
         connection = connect_sqlite(self._database_path)
@@ -195,7 +212,7 @@ class SQLiteM9Repository:
                     course_id,
                     class_id,
                     bundle.generated_at.astimezone(timezone.utc).isoformat(),
-                    dumps_json(learner_ids),
+                    dumps_json(list(learner_ids)),
                     payload,
                 ),
             )
@@ -208,7 +225,12 @@ class SQLiteM9Repository:
                 (bundle.report_id,),
             ).fetchone()
             stored = self._analytics_from_row(row)
-            if stored != bundle or str(row["course_id"]) != course_id:
+            if (
+                stored != bundle
+                or str(row["course_id"]) != course_id
+                or _analytics_learner_scope_from_row(row, stored)
+                != learner_ids
+            ):
                 raise RuntimeError("M9 analytics report identity conflict")
             connection.execute("COMMIT")
             return stored.model_copy(deep=True)
@@ -296,10 +318,8 @@ class SQLiteM9Repository:
             ).fetchall()
             for row in rows:
                 bundle = self._analytics_from_row(row)
-                if learner_id is None or any(
-                    report.learner_id == learner_id
-                    for report in bundle.individual_reports
-                ):
+                learner_scope = _analytics_learner_scope_from_row(row, bundle)
+                if learner_id is None or learner_id in learner_scope:
                     return bundle.model_copy(deep=True)
             return None
         finally:
@@ -412,6 +432,7 @@ class SQLiteM9Repository:
             or bundle.class_report.class_id != str(row["class_id"])
         ):
             raise RuntimeError("M9 analytics row identity mismatch")
+        _analytics_learner_scope_from_row(row, bundle)
         return bundle
 
     @staticmethod

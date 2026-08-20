@@ -104,10 +104,7 @@ class IndividualReport(ContractModel):
     overall_mastery: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
     weak_concept_ids: list[str]
     active_misconception_ids: list[str]
-    recent_score: float | None = Field(
-        ge=0.0,
-        allow_inf_nan=False,
-    )
+    recent_score: float = Field(ge=0.0, allow_inf_nan=False)
     review_required_count: int = Field(ge=0)
 
     def validate_business_rules(self) -> None:

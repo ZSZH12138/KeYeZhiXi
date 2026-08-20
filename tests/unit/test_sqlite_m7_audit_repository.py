@@ -6,6 +6,9 @@ import json
 
 import pytest
 
+from course_insight.contracts.tutoring import (
+    STUDENT_CITATION_QUOTE_PLACEHOLDER,
+)
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.m7_repository import SQLiteM7Repository
@@ -137,14 +140,7 @@ def test_m7_audit_rejects_free_text_flags_and_error_details() -> None:
         replace(audit, error_code="provider said learner@example.com")
 
 
-def test_sqlite_m7_strips_legacy_feedback_quotes_on_read(tmp_path) -> None:
-    database_path = tmp_path / "m7.sqlite3"
-    repository = SQLiteM7Repository(database_path)
-    repository.initialize()
-    feedback = _feedback()
-    payload = feedback.to_dict()
-    payload["evidence_citations"][0]["quote"] = "legacy answer text"
-
+def _insert_feedback_payload(database_path, feedback, payload) -> None:
     connection = connect_sqlite(database_path)
     try:
         connection.execute(
@@ -167,6 +163,57 @@ def test_sqlite_m7_strips_legacy_feedback_quotes_on_read(tmp_path) -> None:
     finally:
         connection.close()
 
+
+def test_sqlite_m7_normalizes_legacy_feedback_quotes_on_read(tmp_path) -> None:
+    database_path = tmp_path / "m7.sqlite3"
+    repository = SQLiteM7Repository(database_path)
+    repository.initialize()
+    feedback = _feedback()
+    payload = feedback.to_dict()
+    payload["evidence_citations"][0]["quote"] = "legacy answer text"
+    _insert_feedback_payload(database_path, feedback, payload)
+
     loaded = repository.get_feedback(feedback.feedback_id)
     assert loaded == feedback
+    assert (
+        loaded.evidence_citations[0].quote
+        == STUDENT_CITATION_QUOTE_PLACEHOLDER
+    )
     assert "legacy answer text" not in loaded.to_json()
+
+
+def test_sqlite_m7_normalizes_pre_quote_feedback_on_read(tmp_path) -> None:
+    database_path = tmp_path / "m7.sqlite3"
+    repository = SQLiteM7Repository(database_path)
+    repository.initialize()
+    feedback = _feedback()
+    payload = feedback.to_dict()
+    for citation in payload["evidence_citations"]:
+        citation.pop("quote")
+    _insert_feedback_payload(database_path, feedback, payload)
+
+    loaded = repository.get_feedback(feedback.feedback_id)
+    assert loaded == feedback
+    assert (
+        loaded.evidence_citations[0].quote
+        == STUDENT_CITATION_QUOTE_PLACEHOLDER
+    )
+
+
+def test_sqlite_m7_rejects_mixed_feedback_quote_shape(tmp_path) -> None:
+    database_path = tmp_path / "m7.sqlite3"
+    repository = SQLiteM7Repository(database_path)
+    repository.initialize()
+    feedback = _feedback()
+    payload = feedback.to_dict()
+    payload["evidence_citations"].append(
+        {
+            "evidence_id": "evidence_2",
+            "source_id": "source_2",
+            "locator": "p.2",
+        }
+    )
+    _insert_feedback_payload(database_path, feedback, payload)
+
+    with pytest.raises(RuntimeError, match="feedback payload is invalid"):
+        repository.get_feedback(feedback.feedback_id)

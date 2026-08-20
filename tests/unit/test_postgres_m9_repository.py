@@ -17,6 +17,7 @@ from course_insight.infrastructure.postgresql.base import (
 from tests.integration.test_web_workflow_persistence import (
     NOW,
     _analytics,
+    _pending_rescore_analytics,
     _review,
 )
 from tests.unit._postgres_repository_fakes import (
@@ -37,14 +38,20 @@ except ModuleNotFoundError:
     PostgresM9Repository = None  # type: ignore[assignment,misc]
 
 
-def _analytics_row(bundle: Any) -> dict[str, Any]:
+def _analytics_row(
+    bundle: Any,
+    *,
+    learner_scope_ids: list[str] | None = None,
+) -> dict[str, Any]:
     return {
         "report_id": bundle.report_id,
         "course_id": "course_1",
         "class_id": bundle.class_report.class_id,
         "generated_at": bundle.generated_at,
-        "learner_ids": sorted(
-            report.learner_id for report in bundle.individual_reports
+        "learner_ids": (
+            sorted(report.learner_id for report in bundle.individual_reports)
+            if learner_scope_ids is None
+            else learner_scope_ids
         ),
         "payload": bundle.to_dict(),
         "payload_checksum": bundle.content_checksum(),
@@ -251,9 +258,76 @@ def test_postgres_m9_persists_timestamptz_scope_and_unique_reviews() -> None:
         if "FROM m9_teacher_analytics" in statement
         and "learner_ids" in statement
         and "ORDER BY generated_at DESC" in statement
-        and "@>" in statement
     )
-    assert "@>" in learner_query
+    assert "learner_ids @>" not in learner_query
+
+
+def test_postgres_m9_latest_learner_report_uses_rejection_tombstone() -> None:
+    provisional = _analytics()
+    rejected = _pending_rescore_analytics()
+    rejected_row = _analytics_row(
+        rejected,
+        learner_scope_ids=["learner_1"],
+    )
+
+    def respond(statement: str, _parameters: tuple[Any, ...]):
+        if "FROM m9_teacher_analytics" in statement:
+            return rejected_row
+        return None
+
+    connection = FakeConnection(respond)
+    repository = PostgresM9Repository(FakePool(connection))
+
+    assert repository.insert_or_get_analytics(
+        rejected,
+        course_id="course_1",
+        learner_scope_ids=["learner_1"],
+    ) == rejected
+    assert repository.get_latest_analytics(
+        course_id="course_1",
+        class_id="class_1",
+        learner_id="learner_1",
+    ) == rejected
+
+    analytics_insert = next(
+        parameters
+        for statement, parameters in connection.executions
+        if "INSERT INTO m9_teacher_analytics" in statement
+    )
+    assert ["learner_1"] in [
+        value.obj
+        for value in analytics_insert
+        if isinstance(value, Jsonb)
+    ]
+    latest_statement, latest_parameters = next(
+        (statement, parameters)
+        for statement, parameters in connection.executions
+        if "ORDER BY generated_at DESC" in statement
+    )
+    assert "learner_ids @>" not in latest_statement
+    assert latest_parameters == ("course_1", "class_1")
+
+    corrupt_rejected_row = {
+        **rejected_row,
+        "learner_ids": [],
+    }
+    corrupt_repository = PostgresM9Repository(
+        FakePool(
+            FakeConnection(
+                lambda statement, _parameters: (
+                    [corrupt_rejected_row, _analytics_row(provisional)]
+                    if "ORDER BY generated_at DESC" in statement
+                    else None
+                )
+            )
+        )
+    )
+    with pytest.raises(PostgresOperationError, match="integrity check"):
+        corrupt_repository.get_latest_analytics(
+            course_id="course_1",
+            class_id="class_1",
+            learner_id="learner_1",
+        )
 
 
 @pytest.mark.skipif(

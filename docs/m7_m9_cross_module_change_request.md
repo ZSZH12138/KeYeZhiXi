@@ -26,11 +26,11 @@
 请全局审核 Codex 确认：
 
 - 现有 M2/M7 接口是否允许 M7 不向学生返回 `EvidenceChunk.text`；
-- `EvidenceCitation.quote` 改为可空/删除，或者新增 locator-only 展示模型时，哪一方
-  拥有契约修改权；
-- 本 PR 对带旧 `quote` 的 SQLite/PostgreSQL 数据执行“先校验受限旧形状、再删除
-  quote”的兼容读取/导入，但公共契约仍沿用 `1.0.0`；删除原公共必填字段是否必须
-  升级契约版本，或由兼容策略即可覆盖；
+- 公共 v1 的 `EvidenceCitation.quote: str` 保持必填；M7 只写精确的安全占位值，
+  SQLite/PostgreSQL 读回和导入把受支持的旧 quote 形状规范化为同一占位值，M0
+  locator-only 视图不显示它；
+- 当前只认可 M1 的 `paragraph:<正整数>` 与仓库已有数字型 `section`/`p.` legacy
+  格式；其他 locator 在结构化 typed locator v2 发布前失败关闭；
 - 如果公共契约不能在本 PR 中改变，是否应由 M7/M0 通过专用学生视图模型隐藏原文。
 
 ### CR-M2-02：未来恢复安全短摘录（非本轮阻断项）
@@ -70,6 +70,11 @@ M9 报表行为。因此该项存在实际跨模块影响。
 当前候选实现已经做到：M8 把驳回版本标为 `rejected_pending_rescore`，M5 拒绝再次
 消费该 rejected bundle，M9 分数统计和学生页面隐藏该分数，应用复核路径也不会再
 用驳回版本追加一次 M5 更新。
+
+公共 v1 的 `IndividualReport.recent_score` 已恢复为非 nullable；rejected 报告省略
+个人报告，并用 M9 私有 learner-scope tombstone 阻止查询回退旧报告。曾写入
+`recent_score=null` 的实现只存在于未合并草稿，确认没有生产数据，因此不做会改写
+报告/审计校验和的生产迁移；本地草稿库必须隔离重建，读回和导入失败关闭。
 
 但这**还不等于完整清除 M5 影响**。现有 `submit_assessment(...)` 在教师作出决定前
 已经无条件用初始模型评分更新 M5，并让 M6/M9 消费该状态；复核时仅复用该状态，
@@ -168,5 +173,5 @@ M9-05 需要 M8 提供真实 shadow 标定结果、样本量、指标、模型/�
 4. CR-M8-02 何时具备启动条件；
 5. `docs/m7_m9_remediation_decisions.md` 中记录的 checksum 剩余风险是否需要升级为
    防篡改审计任务（该结论同时适用于 M7 与 M9）。
-6. 删除 `EvidenceCitation.quote` 是否必须升级公共契约版本。
+6. 公共契约负责人何时定义并发布结构化 typed locator v2 及 v1 单向迁移。
 7. M0 是否需要为未来的管理员审计读取建立基于认证主体/grant 的 RBAC 入口。

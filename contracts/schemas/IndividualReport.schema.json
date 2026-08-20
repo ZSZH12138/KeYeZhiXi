@@ -21,16 +21,9 @@
       "type": "number"
     },
     "recent_score": {
-      "anyOf": [
-        {
-          "minimum": 0.0,
-          "type": "number"
-        },
-        {
-          "type": "null"
-        }
-      ],
-      "title": "Recent Score"
+      "minimum": 0.0,
+      "title": "Recent Score",
+      "type": "number"
     },
     "review_required_count": {
       "minimum": 0,
