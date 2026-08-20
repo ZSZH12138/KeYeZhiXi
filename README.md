@@ -424,8 +424,9 @@ PII/NER 与语义分类器只用于 DeepSeek 出站前隐私复核，不生成�
   教师叙述等越界用例返回 `LLM_USE_CASE_INVALID`。
 - `score_subjective_answer(rubric_scoring_task: RubricScoringTask,
   evidence_bundle: EvidenceBundle) -> RubricScoringResult`：任务来自 M8、证据来自
-  M2；显式注入 `DeepSeekM7Adapter` 后使用 DeepSeek V4 JSON Output，结果固定
-  进入教师复核；模型响应只在适配器内瞬时解析，不写入 M7 审计仓。错误
+  M2；显式注入 `DeepSeekM7Adapter` 后使用 DeepSeek V4 JSON Output。默认结果全部
+  进入教师复核；只有 SHA/身份固定且通过课程域校准门的本地选择器可选择性免审，M8
+  低置信门仍独立生效。模型响应只在适配器内瞬时解析，不写入 M7 审计仓。错误
   `EVIDENCE_REQUIRED`、`MODEL_ADAPTER_UNCONFIGURED`、
   `MODEL_API_UNAVAILABLE`、`MODEL_OUTPUT_BLOCKED`、`INVALID_MODEL_JSON`。
 - `generate_student_feedback(feedback_generation_task: FeedbackGenerationTask,
@@ -479,6 +480,9 @@ suggestion_rule_engine: Any)`。
   不访问网络；其他用例返回 `LLM_USE_CASE_INVALID`。
 - `configure_teacher_interpreter(adapter)`：不改变三参数构造签名，一次性显式启用
   M9 DeepSeek 解读；默认应用工厂不配置。
+- `configure_review_sampling(policy, hmac_key=...)`：一次性启用可重放的低风险质量抽检；
+  默认比例为 0，pending 仍全部入队。
+- `build_llm_quality_report(...)`：读取 SHA 固定的汇总证据并执行技术 shadow 门，不产生发布副作用。
 - `interpret_teacher_analytics(actor_context: ActorContext,
   analytics_bundle: TeacherAnalyticsBundle) -> LLMGenerationResult`：只允许授权教师
   在授权课程与班级内解读同一 M9 repository 中的权威报告；只向模型发送达到首版
@@ -705,9 +709,9 @@ M0 Web 已是真实基础设施；本 legacy 入口仍不需要 pgvector、DeepS
 | M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 84 个公开契约、`TaskPlan` 和八字段业务身份 |
 | M5 | 现有可解释更新；DINA/BKT 契约返回空概率 | 数据质量门槛后在 M5 实现可版本化 DINA/BKT 引擎 |
 | M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline |
-| M7 | 默认评分占位且零网络；显式 `DeepSeekM7Adapter` 仅支持 V4 主观评分、确定性标识符脱敏、本地 Presidio/spaCy + 可选 sklearn 语义隐私复核、JSON 校验、有限重试、180 天最小化审计和强制教师复核；反馈按 M6 动作确定性生成 | 在目标环境部署经审批且校验和钉住的隐私检测工件并提供 `DEEPSEEK_API_KEY`，以假传输/沙箱及隐私阻断用例验收后再显式启用评分 |
+| M7 | 默认评分占位且零网络；显式 `DeepSeekM7Adapter` 支持 V4 四组合候选、隐私复核、JSON 校验、有限重试、最小化审计，以及默认全审/影子/校准选择性审核；反馈确定性生成 | 当前仍默认全审；真实选择性审核必须使用课程域教师标签、独立 test、固定 SHA 证据和可核验 provider identity 批准，公开数据及当前 `runtime-api` 审计只能进入 shadow |
 | M8 | 固定 anchor/规则评分；IRT 标定与自适应选题为 `empty` | 足量数据下实现 IRT shadow 标定，经 M9 质量/教师审核后启用 |
-| M9 | 阈值统计/规则建议与 `insufficient_data` 质量报告；legacy 叙述入口零网络；显式 `DeepSeekM9NarrativeAdapter` 仅解读达到门槛的匿名班级聚合事实 | 在目标环境以假传输/沙箱验收后再显式启用教师主动触发的解读；模型指标与标定审核仍待实现 |
+| M9 | 阈值统计/规则建议、低风险确定性抽检、SHA 固定技术质量门；叙述候选默认关闭且无教师标签时 `insufficient_data` | 先在 shadow 中验证教师接受率、事实/引用正确性与零不安全输出，再由负责人显式批准；`ready` 不自动发布 |
 
 M6 私有 OPE/approval 尚未正式接入 M9；当前 M9 公共质量入口只接收 M8
 `CalibrationRunResult`。公共 84 个 schema、`decide_next_action(...)` 四输入签名

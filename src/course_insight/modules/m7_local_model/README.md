@@ -15,12 +15,12 @@ M7 现在提供两条明确分离的运行路径：
 
 - 默认路径使用 `PlaceholderRubricAdapter` 和 `EmptyDeepSeekAdapter`，不读密钥、
   不访问网络，架构空示例保持 `status=empty`；
-- 显式构造 `DeepSeekClient`、本地隐私复核器与 `DeepSeekM7Adapter` 后，才允许
+- 通过 `build_deepseek_m7_adapter` 显式构造客户端、本地隐私复核器与适配器后，才允许
   真实评分请求；任何复核器缺失、损坏、异常或结果不确定都会在网络前失败关闭；
   学生反馈始终由本地模板生成，不读取密钥、不访问网络。客户端仅接受
   `deepseek-v4-flash` 或 `deepseek-v4-pro`；冻结的
-  `m7-governed-v1` 策略固定使用 Flash、非思考模式、`temperature=0` 和
-  4096 最大输出 token。
+  `m7-governed-v2` 默认使用 Flash、非思考模式、`temperature=0` 和 4096 最大输出
+  token；Flash/Pro × 思考/非思考四组合只作为版本化候选，未凭空指定优胜模型。
 
 ## 输入来源
 
@@ -31,8 +31,10 @@ M7 现在提供两条明确分离的运行路径：
 
 ## 输出
 
-- `RubricScoringResult` 返回 M8，并强制加入
-  `teacher_review_required`，不能直接成为无人审核的最终评分；
+- `RubricScoringResult` 返回 M8；默认 `all_review` 强制加入
+  `teacher_review_required`。只有身份/SHA 完全匹配且通过课程域校准门的 `selective`
+  选择器才能返回空标记，M8 自己的低置信门仍可重新要求复核；当前公共 DeepSeek
+  审计尚不暴露 provider fingerprint，因此本 PR 的证据只批准 `shadow`，不自动打开生产免审；
 - `StudentFeedbackPackage` 返回 M0 学生外层，引用只能来自当前
   `EvidenceBundle`，短期只携带来源与定位，不携带证据原文；所有学生可见文字
   必须通过答案泄露检查；
@@ -41,7 +43,8 @@ M7 现在提供两条明确分离的运行路径：
   并以仓储事务幂等写入；这不表示外部 HTTP 请求与数据库写入具有原子性。
   最终 `RubricScoringResult` 仍由 M8 的评分流程负责审计。
 
-评分提示使用 `m7-rubric-scoring-json@4.0.0`；反馈模板使用
+评分提示使用 `m7-rubric-scoring-json@5.0.0`；模型必须返回空 `review_flags`，复核路由
+只由本地程序决定。反馈模板使用
 `m7-deterministic-feedback@1.0.0`。评分输入的题干、学生答案、量规文字和
 课程证据全部位于 user JSON，并被 system 规则声明为不可信数据，不能改变角色、
 评分规则或输出格式。
@@ -68,17 +71,12 @@ Presidio/spaCy 与语义分类器是进程内专用检测组件，不是生成�
 默认应用工厂仍使用占位适配器。需要真实调用时，在运行时显式注入：
 
 ```python
-from course_insight.infrastructure.deepseek import DeepSeekClient
 from course_insight.modules.m7_local_model import (
-    DeepSeekM7Adapter,
     M7LocalModelService,
+    build_deepseek_m7_adapter,
     build_required_m7_privacy_reviewer,
 )
 
-client = DeepSeekClient(
-    model_name="deepseek-v4-flash",
-    model_version="runtime-api",
-)
 privacy_reviewer = build_required_m7_privacy_reviewer(
     runtime_dir=runtime_dir,
     model_dir=runtime_dir / "m7_privacy" / "privacy-model",
@@ -90,7 +88,7 @@ privacy_reviewer = build_required_m7_privacy_reviewer(
     expected_semantic_model_sha256=approved_model_sha256,
     expected_semantic_manifest_sha256=approved_manifest_sha256,
 )
-adapter = DeepSeekM7Adapter(client, privacy_reviewer=privacy_reviewer)
+adapter = build_deepseek_m7_adapter(privacy_reviewer=privacy_reviewer)
 service = M7LocalModelService(adapter, m7_repository, output_validator)
 ```
 
@@ -125,10 +123,10 @@ sklearn 工件启用时，模型文件和 manifest 必须分别由部署配置�
 
 - HTTPS 目标固定为 `https://api.deepseek.com/chat/completions`；
 - 使用非流式 JSON Output、有限超时、有限指数退避和响应大小上限；
-- v1 执行策略固定使用 V4 Flash、非思考模式和零温度，不接受自定义主机或密钥变量名；
+- 默认策略使用 V4 Flash、非思考模式和零温度；候选矩阵绑定版本，不接受自定义主机或密钥变量名；
 - 评分必须完整且仅覆盖冻结量规分项，正分必须引用学生原文和允许的课程证据，
-  单项/总分不能越界；`teacher_review_required` 同时在适配器和 M7 服务边界强制，
-  所有评分都进入教师复核；
+  单项/总分不能越界；模型无权输出复核标记，默认全部复核，`shadow` 仍全部复核，
+  `selective` 只有校准风险上界、样本门和 OOD 门同时通过才允许自动接受；
 - 反馈根据 M6 `action_type` 选择固定模板，只引用当前证据包，缺失概念必须属于
   M6 目标；该路径不会消费任何模型生成文本；
 - 只对 429、可恢复 5xx、超时、空 JSON content 和资源不足做有限重试；内容
@@ -180,4 +178,7 @@ M7_PRESIDIO_ZH_SMOKE=1 python -m pytest -q \
 不得接入 DeepSeek 以外的生成式 LLM、把 DeepSeek 用于学生反馈、加载未经审批或
 未钉住校验和的本地模型权重、
 硬编码密钥、默认联网、保存完整模型响应、接受不匹配证据、引用不存在证据、
-绕过教师复核、绕过出站隐私治理，或在学生反馈中泄漏答案/证据原文。
+绕过本地选择器/教师复核门、绕过出站隐私治理，或在学生反馈中泄漏答案/证据原文。
+
+选择性审核、数据切分、公开数据边界、M9 抽检和 live 评测安全要求见
+[`docs/M7_M9_SELECTIVE_REVIEW_EVALUATION.md`](../../../../docs/M7_M9_SELECTIVE_REVIEW_EVALUATION.md)。

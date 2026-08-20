@@ -11,6 +11,7 @@ M9 负责四类结果：
 - 用确定性程序构建班级报告、个体报告和教师复核队列；
 - 用确定性规则生成有证据门槛的教学建议；
 - 记录教师对 M8 评分审计的确认、覆盖或拒绝；
+- 对 `not_required` 的最新 M7 本地模型评分执行默认关闭、HMAC 假名化且可重放的分层抽检；
 - 可选地使用 DeepSeek 帮助教师理解已经形成的班级聚合事实和既有建议。
 
 DeepSeek 是教师辅助解读器，不是评分器、统计引擎、学生画像器或决策引擎。
@@ -165,6 +166,12 @@ M8 当前空标定只有零样本和空指标，因此
 `build_model_quality_report(...)` 继续返回 `insufficient_data`。
 `ready` 只能表示“技术上可送交教师审核”，不等于教师批准或参数发布。
 M9 不直接修改 M8 参数集。
+
+M9 另提供 SHA-256 固定的候选技术质量证据门。它核对数据、split、模型、模式、提示词和
+策略身份；`ready` 只表示可以进入 shadow/人工批准，不会自动启用模型。解释候选评估在
+没有教师标签时明确返回 `insufficient_data`，候选默认关闭。`configure_review_sampling`
+只对 `local_model + not_required` 评分抽样；pending 始终入队，rule/teacher override 不抽样，
+rejected 不重入。
 
 ## 长期任务冻结门
 

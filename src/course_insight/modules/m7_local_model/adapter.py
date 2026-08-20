@@ -42,6 +42,13 @@ from course_insight.modules.m7_local_model.privacy_reviewer import (
     DenyAllPrivacyReviewer,
     PrivacyReviewer,
 )
+from course_insight.modules.m7_local_model.review_selection import (
+    AllReviewSelector,
+    IsotonicReviewSelector,
+    ReviewSelectionDecision,
+    ReviewSelector,
+    select_teacher_review,
+)
 
 
 @dataclass(frozen=True)
@@ -53,6 +60,7 @@ class M7ScoringOutcome:
     safety: SafetyCheckResult
     prompt_record: dict[str, Any]
     student_answer_for_validation: str
+    review_selection: ReviewSelectionDecision
 
 
 class M7InvocationFailure(Exception):
@@ -130,6 +138,7 @@ class DeepSeekM7Adapter:
             DEFAULT_M7_OUTBOUND_PRIVACY_POLICY
         ),
         privacy_reviewer: PrivacyReviewer | None = None,
+        review_selector: ReviewSelector | None = None,
     ) -> None:
         client_policy = client.policy
         if (
@@ -153,6 +162,38 @@ class DeepSeekM7Adapter:
                 reviewer_id="privacy-unconfigured",
             )
         )
+        self._review_selector = (
+            review_selector
+            if review_selector is not None
+            else AllReviewSelector(
+                configured_mode=policy.review_selection_mode,
+                fallback=policy.review_selection_mode != "all_review",
+            )
+        )
+        if isinstance(self._review_selector, IsotonicReviewSelector):
+            binding = self._review_selector.binding
+            expected = (
+                policy.model_name,
+                policy.model_version,
+                policy.model_candidate.thinking_mode,
+                SCORING_PROMPT_ID,
+                SCORING_PROMPT_VERSION,
+                policy.policy_version,
+                privacy_policy.policy_version,
+                policy.review_feature_schema_version,
+            )
+            actual = (
+                binding.model_name,
+                binding.model_version,
+                binding.thinking_mode,
+                binding.prompt_id,
+                binding.prompt_version,
+                binding.execution_policy_version,
+                binding.privacy_policy_version,
+                binding.feature_schema_version,
+            )
+            if actual != expected:
+                raise ValueError("review selector binding does not match M7 runtime")
 
     def score_governed(
         self,
@@ -213,6 +254,18 @@ class DeepSeekM7Adapter:
                 model_version=self._client.model_version,
                 policy=self._policy,
             )
+            review_selection = select_teacher_review(
+                self._review_selector,
+                task=governed_task,
+                evidence_bundle=evidence_bundle,
+                result=result,
+                privacy=prepared.privacy,
+                configured_mode=self._policy.review_selection_mode,
+            )
+            result = result.model_copy(
+                update={"review_flags": list(review_selection.review_flags)},
+                deep=True,
+            )
         except (DomainError, ValidationError, TypeError, ValueError) as error:
             self._invalid_output(
                 request=request,
@@ -222,10 +275,20 @@ class DeepSeekM7Adapter:
                 privacy_flags=privacy_flags,
                 cause=error,
             )
+        prompt_record.update(review_selection.safe_record())
+        safety_flags = list(
+            dict.fromkeys(
+                [
+                    *result.review_flags,
+                    *review_selection.audit_flags,
+                    *privacy_flags,
+                ]
+            )
+        )
         safety = SafetyCheckResult(
             request_id=request.request_id,
             status="passed",
-            flags=["teacher_review_required", *privacy_flags],
+            flags=safety_flags,
             checked_at=invocation.result.generated_at,
         )
         return M7ScoringOutcome(
@@ -234,6 +297,7 @@ class DeepSeekM7Adapter:
             safety=safety,
             prompt_record=prompt_record,
             student_answer_for_validation=governed_task.student_answer,
+            review_selection=review_selection,
         )
 
     def _request(
@@ -512,15 +576,8 @@ def _parse_scoring_result(
     if not set(missing_ids) <= set(task.item_instance.concept_ids):
         raise ValueError
     review_flags = _text_list(data["review_flags"])
-    if policy.require_teacher_review_for_all_scores and review_flags != [
-        "teacher_review_required"
-    ]:
+    if review_flags:
         raise ValueError
-    if (
-        confidence < task.rubric.review_policy.low_confidence_threshold
-        and "low_confidence" not in review_flags
-    ):
-        review_flags.append("low_confidence")
 
     return RubricScoringResult(
         scoring_task_id=task.scoring_task_id,
