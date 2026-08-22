@@ -330,6 +330,15 @@ ASSESSMENT_RUNS_V11_SQL = ASSESSMENT_RUNS_V9_SQL.replace(
         )
     ),""",
 )
+ASSESSMENT_RUNS_V18_SQL = ASSESSMENT_RUNS_V11_SQL.replace(
+    "status IN ('pending', 'running', 'failed', 'completed')",
+    "status IN ('pending', 'running', 'failed', 'completed', "
+    "'awaiting_review', 'awaiting_rescore')",
+)
+ASSESSMENT_RUNS_V19_SQL = ASSESSMENT_RUNS_V18_SQL.replace(
+    "operation IN ('start', 'submit', 'review')",
+    "operation IN ('start', 'submit', 'review', 'rescore')",
+)
 ASSESSMENT_RUNS_SUBMIT_INDEX_SQL = """
 CREATE UNIQUE INDEX m0_one_submit_per_paper
 ON m0_assessment_runs(paper_id)
@@ -339,6 +348,11 @@ ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL = """
 CREATE UNIQUE INDEX m0_one_nonterminal_review_per_paper
 ON m0_assessment_runs(paper_id)
 WHERE operation = 'review' AND status <> 'completed'
+"""
+ASSESSMENT_RUNS_NONTERMINAL_RESCORE_INDEX_SQL = """
+CREATE UNIQUE INDEX m0_one_nonterminal_rescore_per_paper
+ON m0_assessment_runs(paper_id)
+WHERE operation = 'rescore' AND status <> 'completed'
 """
 
 _REFERENCE_COLUMNS = {
@@ -522,3 +536,111 @@ def migrate_workflow_v10_to_v11(connection: sqlite3.Connection) -> None:
     connection.execute("DROP TABLE m0_assessment_runs_v10")
     connection.execute(ASSESSMENT_RUNS_SUBMIT_INDEX_SQL)
     connection.execute(ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL)
+
+
+def migrate_workflow_v17_to_v18(connection: sqlite3.Connection) -> None:
+    """Allow teacher waiting-room statuses without rewriting earlier ledgers."""
+
+    connection.execute(
+        "DROP INDEX IF EXISTS m0_one_nonterminal_review_per_paper"
+    )
+    connection.execute("DROP INDEX IF EXISTS m0_one_submit_per_paper")
+    connection.execute(
+        "ALTER TABLE m0_assessment_runs RENAME TO m0_assessment_runs_v17"
+    )
+    connection.execute(ASSESSMENT_RUNS_V18_SQL)
+    names = ", ".join(
+        (
+            *_COPY_COLUMNS[:12],
+            *_REFERENCE_COLUMNS_IN_ORDER,
+            "knowledge_bundle_id",
+            "knowledge_bundle_version",
+            "knowledge_bundle_checksum",
+            "course_package_id",
+            "evidence_index_id",
+            "evidence_index_version",
+            "evidence_index_checksum",
+            "state_policy_checksum",
+            "teacher_policy_checksum",
+            "previous_state_frozen",
+            "previous_learner_snapshot_id",
+            "previous_learner_state_version",
+            "previous_class_snapshot_id",
+            "previous_class_state_version",
+            "policy_id",
+            "adapter_id",
+            "adapter_version",
+            "artifact_sha256",
+            "feature_schema_version",
+            "action_space_version",
+            "gate_policy_version",
+            *_COPY_COLUMNS[12:],
+        )
+    )
+    connection.execute(
+        f"""
+        INSERT INTO m0_assessment_runs({names})
+        SELECT {names}
+        FROM m0_assessment_runs_v17
+        """
+    )
+    connection.execute("DROP TABLE m0_assessment_runs_v17")
+    connection.execute(ASSESSMENT_RUNS_SUBMIT_INDEX_SQL)
+    connection.execute(ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL)
+
+
+_WORKFLOW_COPY_NAMES = ", ".join(
+    (
+        *_COPY_COLUMNS[:12],
+        *_REFERENCE_COLUMNS_IN_ORDER,
+        "knowledge_bundle_id",
+        "knowledge_bundle_version",
+        "knowledge_bundle_checksum",
+        "course_package_id",
+        "evidence_index_id",
+        "evidence_index_version",
+        "evidence_index_checksum",
+        "state_policy_checksum",
+        "teacher_policy_checksum",
+        "previous_state_frozen",
+        "previous_learner_snapshot_id",
+        "previous_learner_state_version",
+        "previous_class_snapshot_id",
+        "previous_class_state_version",
+        "policy_id",
+        "adapter_id",
+        "adapter_version",
+        "artifact_sha256",
+        "feature_schema_version",
+        "action_space_version",
+        "gate_policy_version",
+        *_COPY_COLUMNS[12:],
+    )
+)
+
+
+def migrate_workflow_v18_to_v19(connection: sqlite3.Connection) -> None:
+    """Allow the model rescore operation without rewriting earlier ledgers."""
+
+    connection.execute(
+        "DROP INDEX IF EXISTS m0_one_nonterminal_review_per_paper"
+    )
+    connection.execute(
+        "DROP INDEX IF EXISTS m0_one_nonterminal_rescore_per_paper"
+    )
+    connection.execute("DROP INDEX IF EXISTS m0_one_submit_per_paper")
+    connection.execute(
+        "ALTER TABLE m0_assessment_runs RENAME TO m0_assessment_runs_v18"
+    )
+    connection.execute(ASSESSMENT_RUNS_V19_SQL)
+    connection.execute(
+        f"""
+        INSERT INTO m0_assessment_runs({_WORKFLOW_COPY_NAMES})
+        SELECT {_WORKFLOW_COPY_NAMES}
+        FROM m0_assessment_runs_v18
+        """
+    )
+    connection.execute("DROP TABLE m0_assessment_runs_v18")
+    connection.execute(ASSESSMENT_RUNS_SUBMIT_INDEX_SQL)
+    connection.execute(ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL)
+    connection.execute(ASSESSMENT_RUNS_NONTERMINAL_RESCORE_INDEX_SQL)

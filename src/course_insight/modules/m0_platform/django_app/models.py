@@ -126,6 +126,7 @@ class ActorGrant(models.Model):
             ("view_class_analytics", "Can view class analytics"),
             ("view_student_report", "Can view student reports"),
             ("review_score", "Can review assessment scores"),
+            ("configure_deepseek", "Can configure the DeepSeek API"),
             ("manage_course_roles", "Can manage course roles"),
             ("manage_platform", "Can manage the platform"),
         ]

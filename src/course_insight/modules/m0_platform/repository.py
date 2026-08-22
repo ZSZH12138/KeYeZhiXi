@@ -95,6 +95,9 @@ class M0Repository(Protocol):
     ) -> AssessmentRun | None:
         """Load one exact workflow row as an isolated immutable value."""
 
+    def list_assessment_runs(self) -> tuple[AssessmentRun, ...]:
+        """Load every workflow row for offline legacy inventory."""
+
     def get_assessment_run_by_paper(
         self,
         paper_id: str,
@@ -192,3 +195,44 @@ class M0Repository(Protocol):
         now: datetime,
     ) -> AssessmentRun:
         """Fail a workflow at its last checkpoint and release its lease."""
+
+    def finish_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        now: datetime,
+        scoring_result_checksum: str | None = None,
+        state_version: int | None = None,
+        feedback_id: str | None = None,
+        report_id: str | None = None,
+    ) -> AssessmentRun:
+        """Complete a waiting or intermediate workflow without extra posting."""
+
+    def park_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        status: str,
+        now: datetime,
+        previous_state_frozen: bool | None = None,
+        previous_learner_snapshot_id: str | None = None,
+        previous_learner_state_version: int | None = None,
+        previous_class_snapshot_id: str | None = None,
+        previous_class_state_version: int | None = None,
+        scoring_result_checksum: str | None = None,
+    ) -> AssessmentRun:
+        """Release the lease into a teacher-waiting room without posting."""
+
+    def resume_parked_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> AssessmentRun:
+        """Reclaim one waiting-room row so accepted scores can be posted."""

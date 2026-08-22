@@ -19,4 +19,11 @@
       <button type="submit">查看知识包</button>
     </form>
   </div>
+  {% if can_configure_deepseek %}
+  <div class="card">
+    <h2>DeepSeek 接口</h2>
+    <p class="muted">填写官方 API 密钥。密钥不会在页面回显，环境变量优先于本页保存的文件。</p>
+    <p><a href="{% url 'teacher-deepseek-settings' %}">打开 DeepSeek 配置</a></p>
+  </div>
+  {% endif %}
 {% endblock %}

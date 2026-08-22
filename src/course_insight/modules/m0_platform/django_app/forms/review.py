@@ -78,6 +78,8 @@ class TeacherReviewForm(forms.Form):
         self._reviewer_id = reviewer_id
         self._criterion_caps = MappingProxyType(normalized_caps)
         super().__init__(data=data, **kwargs)
+        if self._audit.is_rejected():
+            self.fields["decision"].choices = (("override", "改分"),)
         for criterion in self._audit.criterion_scores:
             self.fields[self.score_field_name(criterion.criterion_id)] = (
                 forms.FloatField(

@@ -153,6 +153,41 @@ CREATE TABLE IF NOT EXISTS m9_teacher_analytics (
 )
 """
 
+M9_MODEL_INVOCATION_AUDITS_SQL = """
+CREATE TABLE IF NOT EXISTS m9_model_invocation_audits (
+    invocation_id TEXT PRIMARY KEY CHECK (length(invocation_id) > 0),
+    request_id TEXT NOT NULL UNIQUE CHECK (length(request_id) > 0),
+    source_report_id TEXT NOT NULL CHECK (length(source_report_id) > 0),
+    source_report_checksum TEXT NOT NULL CHECK (
+        length(source_report_checksum) = 64
+        AND source_report_checksum NOT GLOB '*[^0-9a-f]*'
+    ),
+    scope TEXT NOT NULL CHECK (scope = 'class_aggregate'),
+    provider TEXT NOT NULL CHECK (provider = 'deepseek'),
+    model_name TEXT NOT NULL CHECK (length(model_name) > 0),
+    provider_status TEXT NOT NULL CHECK (
+        provider_status IN ('not_run', 'succeeded', 'failed', 'blocked')
+    ),
+    validation_status TEXT NOT NULL CHECK (
+        validation_status IN ('not_run', 'passed', 'blocked')
+    ),
+    created_at TEXT NOT NULL CHECK (length(created_at) > 0),
+    payload TEXT NOT NULL CHECK (
+        CASE WHEN json_valid(payload)
+            THEN json(payload) = payload
+            ELSE 0
+        END
+    ),
+    payload_checksum TEXT NOT NULL CHECK (
+        length(payload_checksum) = 64
+        AND payload_checksum NOT GLOB '*[^0-9a-f]*'
+    ),
+    FOREIGN KEY (source_report_id)
+        REFERENCES m9_teacher_analytics(report_id)
+        ON DELETE RESTRICT
+)
+"""
+
 MODULE_RECOVERY_TABLES = (
     ("m5_state_updates", M5_STATE_UPDATES_SQL),
     ("m7_student_feedback", M7_FEEDBACK_SQL),

@@ -41,6 +41,7 @@ ROLE_PERMISSIONS: Final[Mapping[str, frozenset[str]]] = {
             "view_class_analytics",
             "view_student_report",
             "review_score",
+            "configure_deepseek",
         }
     ),
     RoleName.COURSE_ADMIN: frozenset(
@@ -49,6 +50,7 @@ ROLE_PERMISSIONS: Final[Mapping[str, frozenset[str]]] = {
             "view_student_report",
             "review_score",
             "manage_course_roles",
+            "configure_deepseek",
         }
     ),
     RoleName.SYSTEM_ADMIN: frozenset(
@@ -62,6 +64,7 @@ ROLE_PERMISSIONS: Final[Mapping[str, frozenset[str]]] = {
             "review_score",
             "manage_course_roles",
             "manage_platform",
+            "configure_deepseek",
         }
     ),
 }
@@ -153,6 +156,43 @@ def authorize_scope(
         role=role,
         course_ids=[] if course_id is None else [course_id],
         class_ids=[] if class_id is None else [class_id],
+        issued_at=moment,
+    )
+
+
+def authorize_deepseek_config(user: User | AnonymousUser) -> ActorContext:
+    """Authorize platform-wide DeepSeek configuration without a class target."""
+
+    moment = _validated_moment(None)
+    if (
+        not getattr(user, "is_authenticated", False)
+        or not getattr(user, "is_active", False)
+        or getattr(user, "pk", None) is None
+    ):
+        raise PermissionDenied
+    if not user.has_perm(f"{_APP_LABEL}.configure_deepseek"):
+        raise PermissionDenied
+    grants = tuple(
+        ActorGrant.objects.filter(
+            user_id=user.pk,
+            is_active=True,
+            revoked_at__isnull=True,
+            valid_from__lte=moment,
+        )
+        .filter(Q(valid_until__isnull=True) | Q(valid_until__gt=moment))
+        .order_by("role", "course_id", "class_id", "pk")
+    )
+    roles = {grant.role for grant in grants}
+    if len(roles) != 1:
+        raise PermissionDenied
+    role = next(iter(roles))
+    if "configure_deepseek" not in ROLE_PERMISSIONS.get(role, frozenset()):
+        raise PermissionDenied
+    return ActorContext(
+        actor_id=user.actor_id,
+        role=role,
+        course_ids=[],
+        class_ids=[],
         issued_at=moment,
     )
 

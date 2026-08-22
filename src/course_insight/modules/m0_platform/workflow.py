@@ -9,8 +9,18 @@ from typing import Literal
 from course_insight.contracts.errors import DomainError
 
 
-WorkflowOperation = Literal["start", "submit", "review"]
-WorkflowStatus = Literal["pending", "running", "failed", "completed"]
+WorkflowOperation = Literal["start", "submit", "review", "rescore"]
+WorkflowStatus = Literal[
+    "pending",
+    "running",
+    "failed",
+    "completed",
+    "awaiting_review",
+    "awaiting_rescore",
+]
+WAITING_WORKFLOW_STATUSES = frozenset(
+    {"awaiting_review", "awaiting_rescore"}
+)
 
 _CHECKPOINTS: dict[WorkflowOperation, tuple[str, ...]] = {
     "start": ("pending", "claimed", "task_saved", "paper_saved", "completed"),
@@ -36,6 +46,12 @@ _CHECKPOINTS: dict[WorkflowOperation, tuple[str, ...]] = {
         "state_inputs_frozen",
         "state_saved",
         "analytics_saved",
+        "completed",
+    ),
+    "rescore": (
+        "pending",
+        "claimed",
+        "scoring_saved",
         "completed",
     ),
 }
@@ -109,6 +125,7 @@ _POST_STATE_CHECKPOINTS = {
         }
     ),
     "review": frozenset({"state_saved", "analytics_saved", "completed"}),
+    "rescore": frozenset(),
 }
 
 
@@ -261,13 +278,17 @@ class AssessmentRun:
             self.target_audit_version is None
         )
         completed_refs_missing = self.status == "completed" and (
-            self.operation in {"submit", "review"}
+            self.operation == "submit"
             and (
                 self.scoring_result_checksum is None
                 or self.state_version is None
                 or self.report_id is None
+                or self.feedback_id is None
             )
-            or self.operation == "submit" and self.feedback_id is None
+            or self.operation == "review"
+            and self.scoring_result_checksum is None
+            or self.operation == "rescore"
+            and self.scoring_result_checksum is None
         )
         if (
             any(not value for value in required)
@@ -277,9 +298,9 @@ class AssessmentRun:
             or policy_identity_invalid
             or frozen_state_invalid
             or target_pair_invalid
-            or self.operation == "review"
+            or self.operation in {"review", "rescore"}
             and self.target_audit_id is None
-            or self.operation != "review"
+            or self.operation not in {"review", "rescore"}
             and self.target_audit_id is not None
             or completed_refs_missing
             or self.target_audit_version is not None
@@ -492,7 +513,11 @@ def _replay_conflict(operation: WorkflowOperation) -> DomainError:
         code=(
             "REVIEW_SUBMISSION_CONFLICT"
             if operation == "review"
-            else "ASSESSMENT_SUBMISSION_CONFLICT"
+            else (
+                "RESCORE_REQUEST_CONFLICT"
+                if operation == "rescore"
+                else "ASSESSMENT_SUBMISSION_CONFLICT"
+            )
         ),
         module="m0",
         message="assessment workflow replay payload does not match",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hmac
+import json
 import sqlite3
 
 from course_insight.infrastructure.sqlite.m5_m8_model_runtime_schema import (
@@ -9,11 +11,16 @@ from course_insight.infrastructure.sqlite.m5_m8_model_runtime_schema import (
     LEARNING_OBSERVATION_AUDIT_TABLE as _LEARNING_OBSERVATION_AUDIT_TABLE,
     MODEL_RUNTIME_TABLES as _M5_M8_MODEL_RUNTIME_TABLES,
 )
+from course_insight.infrastructure.sqlite.m7_audit_schema import (
+    M7_MODEL_INVOCATION_AUDITS_CREATED_AT_INDEX_SQL,
+    M7_MODEL_INVOCATION_AUDITS_SQL,
+)
 from course_insight.infrastructure.sqlite.module_recovery_schema import (
     M5_CLASS_STATES_SQL as _M5_CLASS_STATES_SQL,
     M5_CLASS_STATES_V4_SQL as _M5_CLASS_STATES_V4_SQL,
     M5_LEARNER_STATES_SQL as _M5_LEARNER_STATES_SQL,
     M5_LEARNER_STATES_V4_SQL as _M5_LEARNER_STATES_V4_SQL,
+    M9_MODEL_INVOCATION_AUDITS_SQL as _M9_MODEL_INVOCATION_AUDITS_SQL,
     MODULE_RECOVERY_TABLES as _MODULE_RECOVERY_TABLES,
 )
 from course_insight.infrastructure.sqlite.outbox_migration import (
@@ -26,21 +33,44 @@ from course_insight.infrastructure.sqlite.outbox_migration import (
 )
 from course_insight.infrastructure.sqlite.workflow_migration import (
     ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL as _M0_ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL,
+    ASSESSMENT_RUNS_NONTERMINAL_RESCORE_INDEX_SQL as _M0_ASSESSMENT_RUNS_NONTERMINAL_RESCORE_INDEX_SQL,
     ASSESSMENT_RUNS_V5_SQL as _M0_ASSESSMENT_RUNS_V5_SQL,
     ASSESSMENT_RUNS_V6_SQL as _M0_ASSESSMENT_RUNS_V6_SQL,
     ASSESSMENT_RUNS_V11_SQL as _M0_ASSESSMENT_RUNS_SQL,
+    ASSESSMENT_RUNS_V18_SQL as _M0_ASSESSMENT_RUNS_V18_SQL,
+    ASSESSMENT_RUNS_V19_SQL as _M0_ASSESSMENT_RUNS_V19_SQL,
     ASSESSMENT_RUNS_V9_SQL as _M0_ASSESSMENT_RUNS_V9_SQL,
     ASSESSMENT_RUNS_SUBMIT_INDEX_SQL as _M0_ASSESSMENT_RUNS_SUBMIT_INDEX_SQL,
     migrate_workflow_v5_to_v6,
     migrate_workflow_v7_to_v8,
     migrate_workflow_v8_to_v9,
     migrate_workflow_v10_to_v11,
+    migrate_workflow_v17_to_v18,
+    migrate_workflow_v18_to_v19,
 )
 from course_insight.infrastructure.sqlite.migrations_s1_s6 import (
     ensure_schema as _ensure_s1_s6_schema,
 )
 
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 19
+
+
+def _applied_assessment_runs_schema_version(applied_versions: set[int]) -> int:
+    """Select the CREATE SQL that matches the latest applied workflow rebuild."""
+
+    if 19 in applied_versions:
+        return 19
+    if 18 in applied_versions:
+        return 18
+    if 13 in applied_versions:
+        return 13
+    if 9 in applied_versions:
+        return 9
+    if 8 in applied_versions:
+        return 8
+    return min(max(applied_versions), 7)
+
+
 _INITIAL_MIGRATION_NAME = "initial_module_tables"
 _OUTBOX_MIGRATION_NAME = "m0_event_outbox"
 _M6_DECISION_MIGRATION_NAME = "m6_tutoring_decisions"
@@ -61,6 +91,10 @@ _M5_M8_MODEL_RUNTIME_MIGRATION_NAME = "m5_m8_model_runtime"
 _M5_LEARNING_OBSERVATION_AUDIT_MIGRATION_NAME = (
     "m5_learning_observation_audit_identity"
 )
+_M9_MODEL_AUDIT_MIGRATION_NAME = "m9_model_invocation_audits"
+_M7_MODEL_AUDIT_MIGRATION_NAME = "m7_model_invocation_audits"
+_M0_WAITING_ROOMS_MIGRATION_NAME = "m0_waiting_rooms"
+_M0_RESCORE_OPERATION_MIGRATION_NAME = "m0_rescore_operation"
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -635,6 +669,18 @@ def _normalize_create_table_sql(schema_sql: str) -> str:
     return normalized
 
 
+def _normalize_create_index_sql(schema_sql: str) -> str:
+    normalized = "".join(
+        character.casefold()
+        for character in _strip_sql_comments(schema_sql)
+        if not character.isspace()
+    ).removesuffix(";")
+    optional_prefix = "createindexifnotexists"
+    if normalized.startswith(optional_prefix):
+        return f"createindex{normalized[len(optional_prefix):]}"
+    return normalized
+
+
 def _normalized_table_schema_sql(
     connection: sqlite3.Connection,
     table_name: str,
@@ -645,6 +691,18 @@ def _normalized_table_schema_sql(
     ).fetchone()
     schema_sql = "" if row is None or row[0] is None else str(row[0])
     return _normalize_create_table_sql(schema_sql)
+
+
+def _normalized_index_schema_sql(
+    connection: sqlite3.Connection,
+    index_name: str,
+) -> str:
+    row = connection.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = ?",
+        (index_name,),
+    ).fetchone()
+    schema_sql = "" if row is None or row[0] is None else str(row[0])
+    return _normalize_create_index_sql(schema_sql)
 
 
 def validate_m0_schema(connection: sqlite3.Connection) -> None:
@@ -667,12 +725,20 @@ def _validate_assessment_workflow_schema(
     schema_version: int,
 ) -> None:
     expected_sql = (
-        _M0_ASSESSMENT_RUNS_SQL
-        if schema_version >= 13
+        _M0_ASSESSMENT_RUNS_V19_SQL
+        if schema_version >= 19
         else (
-            _M0_ASSESSMENT_RUNS_V9_SQL
-            if schema_version >= 9
-            else _M0_ASSESSMENT_RUNS_V6_SQL
+            _M0_ASSESSMENT_RUNS_V18_SQL
+            if schema_version >= 18
+            else (
+                _M0_ASSESSMENT_RUNS_SQL
+                if schema_version >= 13
+                else (
+                    _M0_ASSESSMENT_RUNS_V9_SQL
+                    if schema_version >= 9
+                    else _M0_ASSESSMENT_RUNS_V6_SQL
+                )
+            )
         )
     )
     if _normalized_table_schema_sql(
@@ -712,6 +778,24 @@ def _validate_assessment_workflow_schema(
     ):
         raise RuntimeError(
             "m0 assessment review linearity is incompatible"
+        )
+    if schema_version < 19:
+        return
+    rescore_index_row = connection.execute(
+        """
+        SELECT sql
+        FROM sqlite_master
+        WHERE type = 'index'
+          AND name = 'm0_one_nonterminal_rescore_per_paper'
+        """
+    ).fetchone()
+    if rescore_index_row is None or _normalize_create_table_sql(
+        str(rescore_index_row[0])
+    ) != _normalize_create_table_sql(
+        _M0_ASSESSMENT_RUNS_NONTERMINAL_RESCORE_INDEX_SQL
+    ):
+        raise RuntimeError(
+            "m0 assessment rescore linearity is incompatible"
         )
 
 
@@ -944,6 +1028,70 @@ def _validate_learning_observation_audit_schema(
         raise RuntimeError(f"{table_name} schema is incompatible")
 
 
+def _validate_m9_model_audit_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    actual_sql = _normalized_table_schema_sql(
+        connection,
+        "m9_model_invocation_audits",
+    ).replace('"m9_model_invocation_audits"', "m9_model_invocation_audits")
+    expected_sql = _normalize_create_table_sql(_M9_MODEL_INVOCATION_AUDITS_SQL)
+    if actual_sql != expected_sql:
+        raise RuntimeError(
+            "m9_model_invocation_audits schema is incompatible"
+        )
+    if connection.execute(
+        "PRAGMA foreign_key_check('m9_model_invocation_audits')"
+    ).fetchone() is not None:
+        raise RuntimeError("M9 model audit data violates foreign keys")
+    from course_insight.contracts.analytics import TeacherAnalyticsBundle
+
+    for row in connection.execute(
+        """
+        SELECT audits.source_report_checksum AS source_report_checksum,
+               reports.payload AS payload
+        FROM m9_model_invocation_audits AS audits
+        JOIN m9_teacher_analytics AS reports
+          ON reports.report_id = audits.source_report_id
+        """
+    ):
+        try:
+            payload = json.loads(str(row["payload"]))
+            bundle = TeacherAnalyticsBundle.model_validate(payload)
+            expected = bundle.content_checksum()
+        except Exception as error:
+            raise RuntimeError("source report checksum mismatch") from error
+        if not hmac.compare_digest(str(row["source_report_checksum"]), expected):
+            raise RuntimeError("source report checksum mismatch")
+
+
+def _validate_m7_model_audit_schema(
+    connection: sqlite3.Connection,
+) -> None:
+    actual_table_sql = _normalized_table_schema_sql(
+        connection,
+        "m7_model_invocation_audits",
+    )
+    expected_table_sql = _normalize_create_table_sql(
+        M7_MODEL_INVOCATION_AUDITS_SQL
+    )
+    if actual_table_sql != expected_table_sql:
+        raise RuntimeError(
+            "m7_model_invocation_audits schema is incompatible"
+        )
+    actual_index_sql = _normalized_index_schema_sql(
+        connection,
+        "m7_model_invocation_audits_created_at_idx",
+    )
+    expected_index_sql = _normalize_create_index_sql(
+        M7_MODEL_INVOCATION_AUDITS_CREATED_AT_INDEX_SQL
+    )
+    if actual_index_sql != expected_index_sql:
+        raise RuntimeError(
+            "m7_model_invocation_audits index is incompatible"
+        )
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     """Apply every pending migration in one explicit immediate transaction."""
 
@@ -1017,14 +1165,8 @@ def migrate(connection: sqlite3.Connection) -> None:
         else:
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=(
-                    13
-                    if 13 in applied_versions
-                    else (
-                        9
-                        if 9 in applied_versions
-                        else min(max(applied_versions), 7)
-                    )
+                schema_version=_applied_assessment_runs_schema_version(
+                    applied_versions
                 ),
             )
         if 7 not in applied_versions:
@@ -1039,10 +1181,8 @@ def migrate(connection: sqlite3.Connection) -> None:
             migrate_workflow_v7_to_v8(connection)
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=(
-                    13
-                    if 13 in applied_versions
-                    else 9 if 9 in applied_versions else 8
+                schema_version=_applied_assessment_runs_schema_version(
+                    applied_versions | {8}
                 ),
             )
             connection.execute(
@@ -1053,26 +1193,29 @@ def migrate(connection: sqlite3.Connection) -> None:
         else:
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=(
-                    13
-                    if 13 in applied_versions
-                    else 9 if 9 in applied_versions else 8
+                schema_version=_applied_assessment_runs_schema_version(
+                    applied_versions
                 ),
             )
         if 9 not in applied_versions:
             migrate_workflow_v8_to_v9(connection)
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=9,
+                schema_version=_applied_assessment_runs_schema_version(
+                    applied_versions | {9}
+                ),
             )
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
                 (9, _ASSESSMENT_WORKFLOW_RECOVERY_FREEZE_MIGRATION_NAME),
             )
+            applied_versions.add(9)
         else:
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=13 if 13 in applied_versions else 9,
+                schema_version=_applied_assessment_runs_schema_version(
+                    applied_versions
+                ),
             )
         if 10 not in applied_versions:
             connection.execute(_M4_INTENT_DECISION_V10_SQL)
@@ -1124,7 +1267,9 @@ def migrate(connection: sqlite3.Connection) -> None:
             migrate_workflow_v10_to_v11(connection)
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=13,
+                schema_version=_applied_assessment_runs_schema_version(
+                    applied_versions | {13}
+                ),
             )
             connection.execute(
                 "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
@@ -1134,7 +1279,9 @@ def migrate(connection: sqlite3.Connection) -> None:
         else:
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=13,
+                schema_version=_applied_assessment_runs_schema_version(
+                    applied_versions
+                ),
             )
         if 14 not in applied_versions:
             for _, statement in _M5_M8_MODEL_RUNTIME_TABLES:
@@ -1158,6 +1305,54 @@ def migrate(connection: sqlite3.Connection) -> None:
             applied_versions.add(15)
         else:
             _validate_learning_observation_audit_schema(connection)
+        if 16 not in applied_versions:
+            connection.execute(_M9_MODEL_INVOCATION_AUDITS_SQL)
+            _validate_m9_model_audit_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (16, _M9_MODEL_AUDIT_MIGRATION_NAME),
+            )
+            applied_versions.add(16)
+        else:
+            _validate_m9_model_audit_schema(connection)
+        if 17 not in applied_versions:
+            connection.execute(M7_MODEL_INVOCATION_AUDITS_SQL)
+            connection.execute(M7_MODEL_INVOCATION_AUDITS_CREATED_AT_INDEX_SQL)
+            _validate_m7_model_audit_schema(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (17, _M7_MODEL_AUDIT_MIGRATION_NAME),
+            )
+            applied_versions.add(17)
+        else:
+            _validate_m7_model_audit_schema(connection)
+        if 18 not in applied_versions:
+            migrate_workflow_v17_to_v18(connection)
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=18,
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (18, _M0_WAITING_ROOMS_MIGRATION_NAME),
+            )
+            applied_versions.add(18)
+        if 19 not in applied_versions:
+            migrate_workflow_v18_to_v19(connection)
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=19,
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (19, _M0_RESCORE_OPERATION_MIGRATION_NAME),
+            )
+            applied_versions.add(19)
+        else:
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=19,
+            )
         # M1-M3 S1-S6 owns an independent version ledger. Apply its artifact
         # tables in the same transaction without consuming platform versions.
         _ensure_s1_s6_schema(connection)

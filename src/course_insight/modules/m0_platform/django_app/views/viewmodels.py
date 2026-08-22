@@ -85,10 +85,11 @@ class FeedbackView:
 class StudentResultView:
     paper: PaperView
     attempt_id: str
-    total_score: float
+    total_score: float | None
     max_score: float
     audits: tuple[AuditView, ...]
-    feedback: FeedbackView
+    feedback: FeedbackView | None
+    score_pending_rescore: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,7 +127,7 @@ class AnalyticsView:
 class TeacherReviewView:
     paper: PaperView
     audit: AuditView
-    analytics: AnalyticsView
+    analytics: AnalyticsView | None
 
 
 def paper_view(paper: AssessmentPaper) -> PaperView:
@@ -204,13 +205,17 @@ def student_result_view(
     scoring: ScoringResultBundle,
     feedback: StudentFeedbackPackage,
 ) -> StudentResultView:
+    hidden = scoring.requires_teacher_review() or scoring.has_rejected_score()
     return StudentResultView(
         paper=paper_view(paper),
         attempt_id=scoring.attempt_id,
-        total_score=scoring.total_score,
+        total_score=None if hidden else scoring.total_score,
         max_score=scoring.max_score,
-        audits=tuple(audit_view(item) for item in _current_audits(scoring)),
-        feedback=feedback_view(feedback),
+        audits=() if hidden else tuple(
+            audit_view(item) for item in _current_audits(scoring)
+        ),
+        feedback=None if hidden else feedback_view(feedback),
+        score_pending_rescore=hidden,
     )
 
 
@@ -252,12 +257,12 @@ def analytics_view(analytics: TeacherAnalyticsBundle) -> AnalyticsView:
 def teacher_review_view(
     paper: AssessmentPaper,
     audit: ScoreAuditRecord,
-    analytics: TeacherAnalyticsBundle,
+    analytics: TeacherAnalyticsBundle | None,
 ) -> TeacherReviewView:
     return TeacherReviewView(
         paper=paper_view(paper),
         audit=audit_view(audit),
-        analytics=analytics_view(analytics),
+        analytics=None if analytics is None else analytics_view(analytics),
     )
 
 
