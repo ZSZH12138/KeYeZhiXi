@@ -34,7 +34,8 @@ def _objective_case():
         (7, "7", "7"),
         (2.5, "2.5", "2.5"),
         (True, "true", "true"),
-        ("  Yes  ", "yes", "Yes"),
+        ("  Yes  ", "Yes", "Yes"),
+        ("TCP  /IP", "TCP  /IP", "TCP  /IP"),
     ],
 )
 def test_rule_scorer_normalizes_supported_json_scalars(
@@ -76,6 +77,65 @@ def test_rule_scorer_rejects_misaligned_item_and_missing_answer_key() -> None:
             attempt_id="attempt_1",
             item_instance=instance,
             item=item.model_copy(update={"answer_key": {"max_score": 1.0}}),
+            raw_answer="yes",
+        )
+
+
+def test_rule_scorer_accepts_any_teacher_listed_string_answer() -> None:
+    item, instance = _objective_case()
+    item = item.model_copy(
+        update={
+            "answer_key": {
+                "answers": ["IPv6", "ipv6"],
+                "max_score": 1.0,
+            }
+        }
+    )
+
+    scorer = RuleScorer(FixedClock())
+    first = scorer.score(
+        attempt_id="attempt_1",
+        item_instance=instance,
+        item=item,
+        raw_answer="IPv6",
+    )
+    second = scorer.score(
+        attempt_id="attempt_1",
+        item_instance=instance,
+        item=item,
+        raw_answer="  ipv6  ",
+    )
+    missed = scorer.score(
+        attempt_id="attempt_1",
+        item_instance=instance,
+        item=item,
+        raw_answer="Ipv6",
+    )
+
+    assert first.total_score == 1.0
+    assert second.total_score == 1.0
+    assert missed.total_score == 0.0
+    assert missed.review_status == "not_required"
+
+
+def test_rule_scorer_rejects_empty_or_non_list_answers() -> None:
+    item, instance = _objective_case()
+    scorer = RuleScorer(FixedClock())
+
+    with pytest.raises(DomainError, match="answer key"):
+        scorer.score(
+            attempt_id="attempt_1",
+            item_instance=instance,
+            item=item.model_copy(update={"answer_key": {"answers": [], "max_score": 1.0}}),
+            raw_answer="yes",
+        )
+    with pytest.raises(DomainError, match="answer key"):
+        scorer.score(
+            attempt_id="attempt_1",
+            item_instance=instance,
+            item=item.model_copy(
+                update={"answer_key": {"answers": "yes", "max_score": 1.0}}
+            ),
             raw_answer="yes",
         )
 
