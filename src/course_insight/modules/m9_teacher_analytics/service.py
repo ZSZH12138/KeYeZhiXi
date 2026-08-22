@@ -11,6 +11,7 @@ from typing import Any
 from course_insight.contracts.analytics import (
     TeacherAnalyticsBundle,
     TeacherReviewDecision,
+    TeachingSuggestion,
 )
 from course_insight.contracts.assessment import ScoringResultBundle
 from course_insight.contracts.errors import DomainError
@@ -549,6 +550,68 @@ class M9TeacherAnalyticsService:
             learner_id=learner_id,
         )
         return None if bundle is None else bundle.model_copy(deep=True)
+
+    def apply_suggestion_decision(
+        self,
+        *,
+        report_id: str,
+        suggestion_id: str,
+        decision: str,
+        content: str | None = None,
+    ) -> TeacherAnalyticsBundle:
+        """Persist a teacher decision without deleting the supporting evidence."""
+
+        bundle = self.get_analytics(report_id)
+        if bundle is None:
+            raise DomainError(
+                code="REPORT_SCOPE_INVALID",
+                module="m9",
+                message="analytics report was not found for the suggestion decision",
+                details={"report_id": report_id},
+                recoverable=True,
+            )
+        normalized = " ".join(str(decision).split()).casefold()
+        if normalized not in {"confirmed", "modified", "ignored"}:
+            raise DomainError(
+                code="SUGGESTION_DECISION_INVALID",
+                module="m9",
+                message="suggestion decision must be confirmed, modified, or ignored",
+                details={"decision": decision},
+                recoverable=True,
+            )
+        rewritten = None if content is None else " ".join(str(content).split())
+        if normalized == "modified" and not rewritten:
+            raise DomainError(
+                code="SUGGESTION_DECISION_INVALID",
+                module="m9",
+                message="a rewritten suggestion requires non-empty content",
+                details={"suggestion_id": suggestion_id},
+                recoverable=True,
+            )
+        updated: list[TeachingSuggestion] = []
+        found = False
+        for item in bundle.teaching_suggestions:
+            if item.suggestion_id != suggestion_id:
+                updated.append(item.model_copy(deep=True))
+                continue
+            found = True
+            payload: dict[str, str] = {"status": normalized}
+            if rewritten is not None and normalized == "modified":
+                payload["content"] = rewritten
+            updated.append(item.model_copy(update=payload, deep=True))
+        if not found:
+            raise DomainError(
+                code="SUGGESTION_NOT_FOUND",
+                module="m9",
+                message="teaching suggestion was not found in the analytics report",
+                details={"suggestion_id": suggestion_id},
+                recoverable=True,
+            )
+        next_bundle = bundle.model_copy(update={"teaching_suggestions": updated})
+        saver = getattr(self._repository, "save_analytics", None)
+        if callable(saver):
+            saver(next_bundle.model_copy(deep=True))
+        return next_bundle
 
     def record_teacher_review(
         self,

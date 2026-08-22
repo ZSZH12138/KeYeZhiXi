@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import math
 from typing import Any
 
@@ -20,6 +21,7 @@ from course_insight.contracts.knowledge import (
 from course_insight.contracts.state import DiagnosisResult, LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m8_assessment_scoring.clock import Clock, SystemUTCClock
+from course_insight.modules.m8_assessment_scoring.rule_scorer import RuleScorer
 
 
 _SCORE_TOLERANCE = 1e-9
@@ -95,15 +97,30 @@ class PaperGenerator:
             )
 
         used_item_ids: set[str] = set()
+        section_count = len(blueprint.sections)
         sections = [
             self._build_section(
-                section,
+                (
+                    section
+                    if section.purpose is not None or section_count != 4
+                    else section.model_copy(
+                        update={
+                            "purpose": (
+                                "anchor",
+                                "uncertainty",
+                                "misconception",
+                                "remediation",
+                            )[index]
+                        }
+                    )
+                ),
                 knowledge_bundle,
                 used_item_ids,
                 learner_state_snapshot,
                 diagnosis_result,
+                task_plan.learner_id,
             )
-            for section in blueprint.sections
+            for index, section in enumerate(blueprint.sections)
         ]
         paper_payload: dict[str, Any] = {
             "paper_id": f"paper_{task_plan.task_id}",
@@ -173,6 +190,7 @@ class PaperGenerator:
         used_item_ids: set[str],
         learner_state_snapshot: LearnerStateSnapshot | None,
         diagnosis_result: DiagnosisResult | None,
+        learner_id: str,
     ) -> PaperSection:
         approved = [
             item
@@ -196,11 +214,13 @@ class PaperGenerator:
                 [item for item in remaining if item.is_objective()],
                 learner_state_snapshot,
                 diagnosis_result,
+                section.purpose,
             ),
             *self._personalize_candidates(
                 [item for item in remaining if not item.is_objective()],
                 learner_state_snapshot,
                 diagnosis_result,
+                section.purpose,
             ),
         ]
         if (
@@ -245,7 +265,7 @@ class PaperGenerator:
 
         used_item_ids.update(item.item_id for item in selected)
         instances = [
-            self._freeze_item(item, knowledge_bundle) for item in selected
+            self._freeze_item(item, knowledge_bundle, learner_id) for item in selected
         ]
         return PaperSection(
             section_id=section.section_id,
@@ -259,6 +279,7 @@ class PaperGenerator:
         candidates: list[ItemCard],
         learner_state_snapshot: LearnerStateSnapshot | None,
         diagnosis_result: DiagnosisResult | None,
+        purpose: str | None = None,
     ) -> list[ItemCard]:
         """Rank interchangeable items by current diagnosis and weakest mastery."""
 
@@ -280,11 +301,24 @@ class PaperGenerator:
                 else []
             )
         }
-        if not priority_ranks and not mastery:
+        active_misconceptions = {
+            item.misconception_id
+            for state in (
+                learner_state_snapshot.concept_states
+                if learner_state_snapshot is not None
+                else []
+            )
+            for item in state.misconceptions
+            if item.strength > 0.0
+        }
+        if not priority_ranks and not mastery and not active_misconceptions:
             return list(candidates)
         no_priority_rank = len(priority_ranks)
+        normalized_purpose = (
+            " ".join(purpose.split()).casefold() if purpose else ""
+        )
 
-        def personalization_key(item: ItemCard) -> tuple[int, float]:
+        def personalization_key(item: ItemCard) -> tuple[int, int, float]:
             item_priority_ranks = [
                 priority_ranks[concept_id]
                 for concept_id in item.concept_ids
@@ -295,9 +329,22 @@ class PaperGenerator:
                 for concept_id in item.concept_ids
                 if concept_id in mastery
             ]
+            misconception_hit = 0 if (
+                normalized_purpose == "misconception"
+                and any(
+                    tag in active_misconceptions for tag in item.misconception_ids
+                )
+            ) else 1
+            uncertainty = min(
+                (abs(value - 0.5) for value in item_mastery),
+                default=1.0,
+            )
             return (
+                misconception_hit if normalized_purpose == "misconception" else 0,
                 min(item_priority_ranks, default=no_priority_rank),
-                min(item_mastery, default=1.0),
+                uncertainty if normalized_purpose == "uncertainty" else min(
+                    item_mastery, default=1.0
+                ),
             )
 
         return sorted(candidates, key=personalization_key)
@@ -451,6 +498,7 @@ class PaperGenerator:
     def _freeze_item(
         item: ItemCard,
         knowledge_bundle: KnowledgeBundle,
+        learner_id: str,
     ) -> ItemInstance:
         prefix, separator, suffix = item.item_id.rpartition("_")
         instance_id = (
@@ -460,7 +508,7 @@ class PaperGenerator:
         )
         parameters: dict[str, Any] = {}
         for rule in item.parameter_rules:
-            value = PaperGenerator._fixed_parameter(rule)
+            value = PaperGenerator._learner_parameter(rule, learner_id, item.item_id)
             if not rule.accepts(value):
                 raise DomainError(
                     code="BLUEPRINT_UNSATISFIABLE",
@@ -470,17 +518,36 @@ class PaperGenerator:
                     recoverable=True,
                 )
             parameters = {**parameters, rule.name: value}
+        stem = item.stem
+        for name, value in parameters.items():
+            if name.startswith("_"):
+                continue
+            stem = stem.replace("{" + name + "}", str(value))
+        frozen_answers = (
+            _freeze_answers(item, parameters) if item.parameter_rules else []
+        )
+        if frozen_answers:
+            parameters = {**parameters, "_frozen_answers": frozen_answers}
         return ItemInstance(
             item_instance_id=instance_id,
             item_id=item.item_id,
             item_version=item.version,
-            stem=item.stem,
+            stem=stem,
             parameters=parameters,
             concept_ids=list(item.concept_ids),
             rubric_id=item.rubric_id,
             max_score=item.max_score(knowledge_bundle),
             source_evidence_ids=list(item.source_evidence_ids),
         )
+
+    @staticmethod
+    def _learner_parameter(rule: ParameterRule, learner_id: str, item_id: str) -> Any:
+        if len(rule.choices) > 1:
+            digest = hashlib.sha256(
+                f"{learner_id}\0{item_id}\0{rule.name}".encode("utf-8")
+            ).digest()
+            return rule.choices[int.from_bytes(digest[:8], "big") % len(rule.choices)]
+        return PaperGenerator._fixed_parameter(rule)
 
     @staticmethod
     def _fixed_parameter(rule: ParameterRule) -> Any:
@@ -517,6 +584,25 @@ class PaperGenerator:
             details={"task_id": task_plan.task_id},
             recoverable=True,
         )
+
+
+def _freeze_answers(item: ItemCard, parameters: dict[str, Any]) -> list[str]:
+    try:
+        accepted = RuleScorer._accepted_answers(item)
+    except DomainError:
+        return []
+    frozen: list[str] = []
+    for value in accepted:
+        if isinstance(value, str):
+            text = value
+            for name, parameter in parameters.items():
+                if name.startswith("_"):
+                    continue
+                text = text.replace("{" + name + "}", str(parameter))
+            frozen.append(text)
+        else:
+            frozen.append(RuleScorer.normalize(value))
+    return frozen
 
 
 __all__ = ["PaperGenerator", "allocate_concept_targets"]

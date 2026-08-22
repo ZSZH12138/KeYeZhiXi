@@ -375,10 +375,12 @@ def _safe_suggestions(
             continue
         if (
             item.action_type not in allowed_actions
-            or item.status not in allowed_statuses
             or not item.evidence_ids
         ):
             _invalid_input("unsupported_suggestion")
+        if item.status not in allowed_statuses:
+            omitted += 1
+            continue
         if item.action_type == "targeted_support":
             fact_refs = tuple(
                 dict.fromkeys(

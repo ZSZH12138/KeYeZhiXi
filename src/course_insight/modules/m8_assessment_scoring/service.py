@@ -365,6 +365,74 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
             prepared_at=prepared_at,
         )
 
+    @staticmethod
+    def merge_independent_rubric_results(
+        task: RubricScoringTask,
+        first: RubricScoringResult,
+        second: RubricScoringResult,
+    ) -> RubricScoringResult:
+        """Keep the first independent score and escalate criterion disagreement.
+
+        原始输入：同一量规任务的两次互不可见评分结果。
+        契约来源：score_subjective_answer 与 Rubric.review_policy。
+        返回消费者：finalize_scoring。
+        业务校验：任务身份和分项集合必须一致；正式分取第一次，不平均。
+        错误码：SCORING_TASK_RESULT_MISMATCH。
+        """
+
+        if (
+            first.scoring_task_id != task.scoring_task_id
+            or second.scoring_task_id != task.scoring_task_id
+        ):
+            raise DomainError(
+                code="SCORING_TASK_RESULT_MISMATCH",
+                module="m8",
+                message="independent scores must belong to the same rubric task",
+                details={"scoring_task_id": task.scoring_task_id},
+            )
+        second_by_id = {
+            score.criterion_id: score.score for score in second.criterion_scores
+        }
+        first_ids = [score.criterion_id for score in first.criterion_scores]
+        if set(first_ids) != set(second_by_id) or len(first_ids) != len(second_by_id):
+            raise DomainError(
+                code="SCORING_TASK_RESULT_MISMATCH",
+                module="m8",
+                message="independent scores must cover the same rubric criteria",
+                details={"scoring_task_id": task.scoring_task_id},
+            )
+        threshold = task.rubric.review_policy.double_score_disagreement_threshold
+        disagreement = 0.0
+        updated_scores: list[CriterionScore] = []
+        for score in first.criterion_scores:
+            other = second_by_id[score.criterion_id]
+            gap = abs(score.score - other)
+            disagreement = max(disagreement, gap)
+            reason = score.reason
+            if gap > threshold:
+                reason = f"{score.reason} Independent second score: {other}."
+            updated_scores.append(score.model_copy(update={"reason": reason}))
+        flags = list(first.review_flags)
+        confidence = min(first.confidence, second.confidence)
+        if (
+            disagreement > threshold
+            and "double_score_disagreement" not in flags
+        ):
+            flags.append("double_score_disagreement")
+        if task.rubric.review_policy.needs_review(confidence, disagreement):
+            if (
+                confidence < task.rubric.review_policy.low_confidence_threshold
+                and "low_confidence" not in flags
+            ):
+                flags.insert(0, "low_confidence")
+        return first.model_copy(
+            update={
+                "criterion_scores": updated_scores,
+                "review_flags": flags,
+                "confidence": confidence,
+            }
+        )
+
     def finalize_scoring(
         self,
         scoring_preparation_result: ScoringPreparationResult,
