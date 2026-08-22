@@ -33,6 +33,9 @@ from course_insight.application.factory import (  # noqa: E402
 from course_insight.contracts.evidence import (  # noqa: E402
     evidence_id_for_chunk,
 )
+from course_insight.contracts.tutoring import (  # noqa: E402
+    STUDENT_CITATION_QUOTE_PLACEHOLDER,
+)
 from course_insight.contracts.course import (  # noqa: E402
     ContentChunk,
     CoursePackage,
@@ -75,8 +78,10 @@ TEACHER_ID = "pseudonym_teacher_golden"
 PASSWORD = "correct-horse-battery-staple"
 APP_LABEL = "m0_platform_web"
 GOVERNED_TEXT = (
-    "A governed rule states that the target proposition is true. "
-    "Use this governed explanation when supporting the target concept."
+    "Retrieve governed course rules, explanations, distinctions, and examples "
+    "for the selected concepts. A governed rule states that the target "
+    "proposition is true. Use this governed explanation when supporting the "
+    "target concept."
 )
 STUDENT_PERMISSIONS = (
     "start_assessment",
@@ -730,7 +735,8 @@ def test_sqlite_web_golden_path_delivers_student_and_teacher_events(
         assert feedback_page.status_code == 200
         feedback = feedback_page.context["feedback"]
         assert feedback.citations
-        assert "governed rule" in feedback.citations[0].quote
+        assert feedback.citations[0].quote == STUDENT_CITATION_QUOTE_PLACEHOLDER
+        assert "source_1" in feedback.citations[0].label
 
         _login(teacher_client, teacher)
         context_url = reverse(

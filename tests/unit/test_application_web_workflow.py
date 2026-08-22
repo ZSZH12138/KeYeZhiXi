@@ -512,6 +512,8 @@ class _WorkflowStore:
         self.tutoring_calls = 0
         self.observation_batches_built: list[LearningObservationBatch] = []
         self.observation_batches_received: list[LearningObservationBatch] = []
+        self.appended_events: list[Any] = []
+        self.pending_review = False
 
     def trip(self, point: str) -> None:
         if self.fail_after == point and not self.failed_once:
@@ -596,6 +598,26 @@ class _M8:
             }
         )
         self.store.scoring_history.append(self.store.scoring)
+        if self.store.pending_review:
+            latest = self.store.scoring.get_audit_record("audit_attempt_1")
+            pending = latest.model_copy(
+                update={
+                    "scoring_method": "local_model",
+                    "review_status": "pending",
+                    "review_reason": ["teacher_review_required"],
+                }
+            )
+            self.store.scoring = self.store.scoring.model_copy(
+                update={
+                    "score_audit_records": [
+                        record
+                        for record in self.store.scoring.score_audit_records
+                        if record.audit_version != latest.audit_version
+                    ]
+                    + [pending]
+                }
+            )
+            self.store.scoring_history[-1] = self.store.scoring
         self.store.trip("scoring")
         return self.store.scoring.model_copy(deep=True)
 
@@ -641,8 +663,8 @@ class _M8:
             )
             rejected = latest.model_copy(
                 update={
-                    "review_status": "rejected",
-                    "review_reason": [teacher_review_decision.teacher_comment],
+                    "review_status": "rejected_pending_rescore",
+                    "review_reason": ["teacher_rejected_score"],
                 }
             )
             self.store.reviewed = self.store.reviewed.model_copy(
@@ -658,6 +680,37 @@ class _M8:
         self.store.scoring_history.append(self.store.reviewed)
         self.store.trip("review")
         return self.store.reviewed.model_copy(deep=True)
+
+    def apply_model_rescore(
+        self,
+        current_scoring_result_bundle,
+        rubric_scoring_task,
+        rubric_scoring_result,
+        **kwargs: Any,
+    ):
+        audit_id = str(kwargs["audit_id"])
+        current = current_scoring_result_bundle.get_audit_record(audit_id)
+        replacement = current.model_copy(
+            update={
+                "audit_version": current.next_version(),
+                "scoring_method": "local_model_rescore",
+                "review_status": "pending",
+                "review_reason": [
+                    "model_rescore",
+                    f"previous_rejected_version:{current.audit_version}",
+                    f"rescore_request:{kwargs['rescore_request_id']}",
+                    "teacher_review_required",
+                ],
+                "created_at": NOW + timedelta(minutes=current.audit_version),
+            }
+        )
+        bundle = current_scoring_result_bundle.model_copy(deep=True)
+        bundle.replace_audit_record(replacement)
+        self.store.reviewed = None
+        self.store.scoring = bundle
+        self.store.scoring_history.append(bundle)
+        self.store.trip("rescore")
+        return bundle.model_copy(deep=True)
 
 
 class _M5:
@@ -1039,8 +1092,16 @@ def _preparation(task_ids: list[str]):
     }
     return SimpleNamespace(
         rubric_scoring_tasks=[
-            SimpleNamespace(scoring_task_id=task_id) for task_id in task_ids
+            SimpleNamespace(
+                scoring_task_id=task_id,
+                attempt_id="attempt_1",
+                item_instance=SimpleNamespace(
+                    item_instance_id="item_instance_1",
+                ),
+            )
+            for task_id in task_ids
         ],
+        raw_answer_checksum="b" * 64,
         query_for_task=lambda task_id: queries[task_id],
     )
 
@@ -1078,9 +1139,14 @@ class _M0FaultProxy:
         self.store = store
 
     def append_learning_events(self, events):
+        self.store.appended_events.extend(events)
         result = self.delegate.append_learning_events(events)
         self.store.trip("events")
         return result
+
+    def park_assessment_run(self, *args: Any, **kwargs: Any):
+        self.store.trip("park")
+        return self.delegate.park_assessment_run(*args, **kwargs)
 
     def __getattr__(self, name: str):
         return getattr(self.delegate, name)
@@ -2175,3 +2241,356 @@ def test_submit_stops_after_workflow_lease_is_lost(tmp_path: Path) -> None:
     assert captured.value.code == "WORKFLOW_LEASE_LOST"
     assert lease_losing_m0.renew_calls >= 1
     assert store.scoring_calls == 0
+
+
+def test_pending_subjective_score_does_not_post_until_teacher_confirms(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    store.pending_review = True
+    coordinator = _coordinator(tmp_path, store)
+    knowledge, submission, arguments = _start_and_submission(coordinator, tmp_path)
+
+    submitted = coordinator.submit_assessment(**arguments)
+
+    assert submitted["waiting_status"] == "awaiting_review"
+    assert "state_result" not in submitted
+    assert store.state_history == []
+    assert store.appended_events == []
+    assert store.tutoring_calls == 0
+    assert store.feedback is None
+    student = coordinator.get_student_assessment(
+        paper_id="paper_1",
+        learner_id="learner_1",
+    )
+    assert student["waiting_status"] == "awaiting_review"
+    replayed = coordinator.submit_assessment(**arguments)
+    assert replayed["waiting_status"] == "awaiting_review"
+    assert store.state_history == []
+    assert store.appended_events == []
+
+    audit = submitted["scoring_result"].get_audit_record("audit_attempt_1")
+    confirmed = coordinator.review_assessment(
+        paper_id="paper_1",
+        review_submission=TeacherReviewSubmission(
+            submission_id="decision_pending_1",
+            audit_id=audit.audit_id,
+            expected_audit_version=audit.audit_version,
+            expected_audit_checksum=audit.content_checksum(),
+            reviewer_id="teacher_1",
+            decision="confirm",
+            final_total_score=audit.total_score,
+            criterion_overrides=[],
+            teacher_comment="Confirmed pending score.",
+            submitted_at=NOW + timedelta(minutes=1),
+        ),
+        request_id="review_pending_1",
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+        course_id="course_1",
+        class_id="class_1",
+    )
+
+    assert "recomputed_state_result" in confirmed
+    assert store.state_history
+    assert store.appended_events
+    student_final = coordinator.get_student_assessment(
+        paper_id="paper_1",
+        learner_id="learner_1",
+    )
+    assert "waiting_status" not in student_final
+    assert "scoring_result" in student_final
+    assert "feedback" in student_final
+
+
+def test_reject_then_model_rescore_stays_unposted_until_confirm(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    store.pending_review = True
+    coordinator = _coordinator(tmp_path, store)
+    knowledge, submission, arguments = _start_and_submission(coordinator, tmp_path)
+    submitted = coordinator.submit_assessment(**arguments)
+    audit = submitted["scoring_result"].get_audit_record("audit_attempt_1")
+    baseline_states = list(store.state_history)
+    baseline_events = list(store.appended_events)
+
+    rejected = coordinator.review_assessment(
+        paper_id="paper_1",
+        review_submission=TeacherReviewSubmission(
+            submission_id="decision_reject_1",
+            audit_id=audit.audit_id,
+            expected_audit_version=audit.audit_version,
+            expected_audit_checksum=audit.content_checksum(),
+            reviewer_id="teacher_1",
+            decision="reject",
+            final_total_score=audit.total_score,
+            criterion_overrides=[],
+            teacher_comment="Rejected pending score.",
+            submitted_at=NOW + timedelta(minutes=1),
+        ),
+        request_id="review_reject_1",
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+        course_id="course_1",
+        class_id="class_1",
+    )
+
+    assert rejected["waiting_status"] == "awaiting_rescore"
+    assert store.state_history == baseline_states
+    assert store.appended_events == baseline_events
+    latest = rejected["scoring_result"].get_audit_record(audit.audit_id)
+    assert latest.is_rejected()
+    assert latest.total_score != 0 or audit.total_score == 0
+
+    with pytest.raises(DomainError) as mismatch:
+        coordinator.rescore_assessment(
+            assessment_submission=submission.model_copy(
+                update={"answers": {"item_1": "different"}}
+            ),
+            audit_id=audit.audit_id,
+            expected_rejected_version=latest.audit_version,
+            rescore_request_id="rescore_1",
+            request_id="rescore_request_1",
+            index_ref=arguments["index_ref"],
+            knowledge_bundle=knowledge,
+            state_policy_path=tmp_path / "state.json",
+            teacher_threshold_policy_path=tmp_path / "teacher.json",
+        )
+    assert mismatch.value.code == "RESCORE_INPUT_MISMATCH"
+
+    rescored = coordinator.rescore_assessment(
+        assessment_submission=submission,
+        audit_id=audit.audit_id,
+        expected_rejected_version=latest.audit_version,
+        rescore_request_id="rescore_1",
+        request_id="rescore_request_1",
+        index_ref=arguments["index_ref"],
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+    )
+    replayed = coordinator.rescore_assessment(
+        assessment_submission=submission,
+        audit_id=audit.audit_id,
+        expected_rejected_version=latest.audit_version,
+        rescore_request_id="rescore_1",
+        request_id="rescore_request_1",
+        index_ref=arguments["index_ref"],
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+    )
+
+    assert rescored["waiting_status"] == "awaiting_review"
+    assert replayed["scoring_result"].content_checksum() == (
+        rescored["scoring_result"].content_checksum()
+    )
+    new_audit = rescored["scoring_result"].get_audit_record(audit.audit_id)
+    assert new_audit.scoring_method == "local_model_rescore"
+    assert new_audit.review_status == "pending"
+    assert latest.audit_version in {
+        record.audit_version
+        for record in rescored["scoring_result"].score_audit_records
+        if record.audit_id == audit.audit_id
+    }
+    assert store.state_history == baseline_states
+    assert store.appended_events == baseline_events
+
+    confirmed = coordinator.review_assessment(
+        paper_id="paper_1",
+        review_submission=TeacherReviewSubmission(
+            submission_id="decision_rescore_confirm",
+            audit_id=new_audit.audit_id,
+            expected_audit_version=new_audit.audit_version,
+            expected_audit_checksum=new_audit.content_checksum(),
+            reviewer_id="teacher_1",
+            decision="confirm",
+            final_total_score=new_audit.total_score,
+            criterion_overrides=[],
+            teacher_comment="Confirmed rescore.",
+            submitted_at=NOW + timedelta(minutes=2),
+        ),
+        request_id="review_rescore_confirm",
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+        course_id="course_1",
+        class_id="class_1",
+    )
+    assert "recomputed_state_result" in confirmed
+    assert store.state_history
+    assert store.appended_events
+    student_final = coordinator.get_student_assessment(
+        paper_id="paper_1",
+        learner_id="learner_1",
+    )
+    assert "waiting_status" not in student_final
+    assert "scoring_result" in student_final
+    assert "feedback" in student_final
+
+
+def test_pending_submit_recovers_after_crash_before_waiting_room(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    store.pending_review = True
+    store.fail_after = "park"
+    first = _coordinator(tmp_path, store)
+    _, _, arguments = _start_and_submission(first, tmp_path)
+
+    with pytest.raises(DomainError) as captured:
+        first.submit_assessment(**arguments)
+    assert captured.value.code == "WORKFLOW_EXECUTION_FAILED"
+    failed = first._m0.get_assessment_run("submit:submission_1")
+    assert failed.status == "failed"
+    assert failed.checkpoint == "scoring_saved"
+    assert store.state_history == []
+    assert store.appended_events == []
+
+    recovered = _coordinator(tmp_path, store).submit_assessment(**arguments)
+    replayed = _coordinator(tmp_path, store).submit_assessment(**arguments)
+
+    assert recovered["waiting_status"] == "awaiting_review"
+    assert replayed["waiting_status"] == "awaiting_review"
+    assert recovered["scoring_result"].content_checksum() == (
+        replayed["scoring_result"].content_checksum()
+    )
+    assert store.state_history == []
+    assert store.appended_events == []
+    student = _coordinator(tmp_path, store).get_student_assessment(
+        paper_id="paper_1",
+        learner_id="learner_1",
+    )
+    assert student["waiting_status"] == "awaiting_review"
+    assert "scoring_result" not in student
+
+
+def test_rescore_replays_park_after_completed_rescore_crashes(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    store.pending_review = True
+    coordinator = _coordinator(tmp_path, store)
+    knowledge, submission, arguments = _start_and_submission(coordinator, tmp_path)
+    submitted = coordinator.submit_assessment(**arguments)
+    audit = submitted["scoring_result"].get_audit_record("audit_attempt_1")
+    rejected = coordinator.review_assessment(
+        paper_id="paper_1",
+        review_submission=TeacherReviewSubmission(
+            submission_id="decision_reject_crash",
+            audit_id=audit.audit_id,
+            expected_audit_version=audit.audit_version,
+            expected_audit_checksum=audit.content_checksum(),
+            reviewer_id="teacher_1",
+            decision="reject",
+            final_total_score=audit.total_score,
+            criterion_overrides=[],
+            teacher_comment="Rejected pending score.",
+            submitted_at=NOW + timedelta(minutes=1),
+        ),
+        request_id="review_reject_crash",
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+        course_id="course_1",
+        class_id="class_1",
+    )
+    latest = rejected["scoring_result"].get_audit_record(audit.audit_id)
+    store.fail_after = "park"
+    store.failed_once = False
+
+    with pytest.raises(DomainError) as captured:
+        coordinator.rescore_assessment(
+            assessment_submission=submission,
+            audit_id=audit.audit_id,
+            expected_rejected_version=latest.audit_version,
+            rescore_request_id="rescore_crash",
+            request_id="rescore_crash_request",
+            index_ref=arguments["index_ref"],
+            knowledge_bundle=knowledge,
+            state_policy_path=tmp_path / "state.json",
+            teacher_threshold_policy_path=tmp_path / "teacher.json",
+        )
+    assert captured.value.code == "WORKFLOW_EXECUTION_FAILED"
+    assert store.state_history == []
+    assert store.appended_events == []
+
+    recovered = coordinator.rescore_assessment(
+        assessment_submission=submission,
+        audit_id=audit.audit_id,
+        expected_rejected_version=latest.audit_version,
+        rescore_request_id="rescore_crash",
+        request_id="rescore_crash_request",
+        index_ref=arguments["index_ref"],
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+    )
+    submit = coordinator._m0.get_assessment_run("submit:submission_1")
+    student = coordinator.get_student_assessment(
+        paper_id="paper_1",
+        learner_id="learner_1",
+    )
+
+    assert recovered["waiting_status"] == "awaiting_review"
+    assert submit.status == "awaiting_review"
+    assert student["waiting_status"] == "awaiting_review"
+    assert "scoring_result" not in student
+    assert store.state_history == []
+    assert store.appended_events == []
+
+
+def test_waiting_confirm_recovers_after_crash_before_state_post(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    store.pending_review = True
+    coordinator = _coordinator(tmp_path, store)
+    knowledge, _, arguments = _start_and_submission(coordinator, tmp_path)
+    submitted = coordinator.submit_assessment(**arguments)
+    audit = submitted["scoring_result"].get_audit_record("audit_attempt_1")
+    store.fail_after = "events"
+
+    review_kwargs = {
+        "paper_id": "paper_1",
+        "review_submission": TeacherReviewSubmission(
+            submission_id="decision_confirm_crash",
+            audit_id=audit.audit_id,
+            expected_audit_version=audit.audit_version,
+            expected_audit_checksum=audit.content_checksum(),
+            reviewer_id="teacher_1",
+            decision="confirm",
+            final_total_score=audit.total_score,
+            criterion_overrides=[],
+            teacher_comment="Confirmed pending score.",
+            submitted_at=NOW + timedelta(minutes=1),
+        ),
+        "request_id": "review_confirm_crash",
+        "knowledge_bundle": knowledge,
+        "state_policy_path": tmp_path / "state.json",
+        "teacher_threshold_policy_path": tmp_path / "teacher.json",
+        "course_id": "course_1",
+        "class_id": "class_1",
+    }
+
+    with pytest.raises(DomainError) as captured:
+        coordinator.review_assessment(**review_kwargs)
+    assert captured.value.code == "WORKFLOW_EXECUTION_FAILED"
+    assert store.state_history == []
+
+    recovered = coordinator.review_assessment(**review_kwargs)
+    replayed = coordinator.review_assessment(**review_kwargs)
+
+    assert "recomputed_state_result" in recovered
+    assert recovered["recomputed_state_result"] == replayed["recomputed_state_result"]
+    assert len(store.state_history) == 1
+    student = coordinator.get_student_assessment(
+        paper_id="paper_1",
+        learner_id="learner_1",
+    )
+    assert "waiting_status" not in student
+    assert "scoring_result" in student
+

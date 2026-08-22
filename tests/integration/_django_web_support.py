@@ -253,6 +253,8 @@ class FakeCoordinator:
         self.analytics = analytics_for(actor_id)
         self.submission: AssessmentSubmission | None = None
         self.review_submission: TeacherReviewSubmission | None = None
+        self.rescore_submission: AssessmentSubmission | None = None
+        self.rescore_audit_id: str | None = None
         self.raise_context: DomainError | None = None
 
     def start_assessment(self, **kwargs):
@@ -301,11 +303,33 @@ class FakeCoordinator:
     def get_teacher_review_context(self, **kwargs):
         if self.raise_context is not None:
             raise self.raise_context
-        return {
+        payload = {
             "assessment_paper": self.paper.model_copy(deep=True),
             "scoring_result": self.scoring.model_copy(deep=True),
             "analytics": self.analytics.model_copy(deep=True),
         }
+        if self.scoring.has_rejected_score():
+            payload["waiting_status"] = "awaiting_rescore"
+        elif self.scoring.requires_teacher_review():
+            payload["waiting_status"] = "awaiting_review"
+        return payload
+
+    def frozen_assessment_submission(self, attempt_id: str):
+        if self.submission is None or self.submission.attempt_id != attempt_id:
+            raise DomainError(
+                code="RESCORE_INPUT_UNAVAILABLE",
+                module="application",
+                message="frozen original answers are unavailable",
+                recoverable=True,
+            )
+        return self.submission.model_copy(deep=True)
+
+    def rescore_assessment(self, **kwargs):
+        submission = kwargs["assessment_submission"]
+        assert type(submission) is AssessmentSubmission
+        self.rescore_submission = submission.model_copy(deep=True)
+        self.rescore_audit_id = str(kwargs["audit_id"])
+        return {"waiting_status": "awaiting_review"}
 
     def review_assessment(self, **kwargs):
         submission = kwargs["review_submission"]

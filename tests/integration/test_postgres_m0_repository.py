@@ -904,3 +904,68 @@ def test_real_postgres_m0_allows_only_one_nonterminal_review_per_paper(
     )
     assert stored is not None
     assert stored.operation_id == winners[0]
+
+
+def test_real_postgres_waiting_room_park_resume_and_repark(
+    live_repository: PostgresM0Repository,
+) -> None:
+    checksum = "a" * 64
+    pending = _run(
+        operation_id="wait-submit",
+        paper_id="wait-paper",
+        scoring_result_checksum=checksum,
+    )
+    recorded = live_repository.insert_or_get_assessment_run(pending)
+    claimed = live_repository.claim_assessment_run(
+        recorded.operation_id,
+        worker_id="wait-worker",
+        now=NOW,
+        lease_until=LEASE,
+    )
+    assert claimed is not None
+    scored = live_repository.advance_assessment_run(
+        claimed.operation_id,
+        expected_version=claimed.version,
+        checkpoint="scoring_saved",
+        worker_id="wait-worker",
+        now=NOW,
+        scoring_result_checksum=checksum,
+    )
+    parked = live_repository.park_assessment_run(
+        scored.operation_id,
+        expected_version=scored.version,
+        worker_id="wait-worker",
+        status="awaiting_review",
+        now=NOW,
+        previous_state_frozen=True,
+        scoring_result_checksum=checksum,
+    )
+    assert parked.status == "awaiting_review"
+    assert parked.locked_by is None
+
+    resumed = live_repository.resume_parked_assessment_run(
+        parked.operation_id,
+        worker_id="rescore:wait-submit",
+        now=NOW,
+        lease_until=LEASE,
+    )
+    assert resumed.status == "running"
+    reparked = live_repository.park_assessment_run(
+        resumed.operation_id,
+        expected_version=resumed.version,
+        worker_id="rescore:wait-submit",
+        status="awaiting_rescore",
+        now=NOW,
+        scoring_result_checksum=checksum,
+    )
+    stored = live_repository.get_assessment_run("wait-submit")
+    listed = {
+        run.operation_id: run.status
+        for run in live_repository.list_assessment_runs()
+    }
+
+    assert reparked.status == "awaiting_rescore"
+    assert stored is not None
+    assert stored.status == "awaiting_rescore"
+    assert stored.scoring_result_checksum == checksum
+    assert listed["wait-submit"] == "awaiting_rescore"

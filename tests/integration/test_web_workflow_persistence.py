@@ -34,6 +34,7 @@ from course_insight.contracts.state import (
 )
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.contracts.tutoring import (
+    STUDENT_CITATION_QUOTE_PLACEHOLDER,
     EvidenceCitation,
     StudentFeedbackPackage,
 )
@@ -410,7 +411,7 @@ def _feedback() -> StudentFeedbackPackage:
                 evidence_id="evidence_1",
                 source_id="source_1",
                 locator="p.1",
-                quote="Governed evidence.",
+                quote=STUDENT_CITATION_QUOTE_PLACEHOLDER,
             )
         ],
         next_practice_item_ids=[],
@@ -444,6 +445,34 @@ def _analytics(
                 review_required_count=0,
             )
         ],
+        review_queue=[],
+        teaching_suggestions=[],
+        generated_at=generated_at,
+    )
+
+
+def _pending_rescore_analytics(
+    *,
+    report_id: str = "report_1_rejected_pending",
+    generated_at: datetime = NOW,
+) -> TeacherAnalyticsBundle:
+    return TeacherAnalyticsBundle(
+        report_id=report_id,
+        class_report=ClassReport(
+            class_id="class_1",
+            coverage_rate=0.0,
+            concept_summaries=[],
+            misconception_summaries=[],
+            score_statistics={
+                "audit_count": 0.0,
+                "score_total": 0.0,
+                "score_mean": 0.0,
+                "score_min": 0.0,
+                "score_max": 0.0,
+            },
+            evidence_status="pending_rescore",
+        ),
+        individual_reports=[],
         review_queue=[],
         teaching_suggestions=[],
         generated_at=generated_at,
@@ -663,7 +692,7 @@ def test_m5_forward_migration_preserves_all_legacy_v3_state_versions(
 
         migrate(connection)
         migrate(connection)
-        assert SCHEMA_VERSION == 15
+        assert SCHEMA_VERSION == 19
         assert current_schema_version(connection) == SCHEMA_VERSION
         assert (
             connection.execute(

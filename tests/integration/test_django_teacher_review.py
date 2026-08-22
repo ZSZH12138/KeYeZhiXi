@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 
 import django
@@ -19,6 +20,7 @@ if not apps.ready:
 
 from course_insight.contracts.errors import DomainError  # noqa: E402
 from course_insight.contracts.platform import (  # noqa: E402
+    AssessmentSubmission,
     TeacherReviewSubmission,
 )
 from course_insight.modules.m0_platform.django_app import runtime  # noqa: E402
@@ -252,3 +254,76 @@ def test_teacher_review_requires_student_report_permission(
     response = getattr(client, method)(_review_url())
 
     assert response.status_code == 403
+
+
+def test_teacher_can_request_bound_model_rescore_without_auto_accept(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    teacher = make_user(
+        actor_id="pseudonym_teacher_rescore",
+        role="teacher",
+        permissions=TEACHER_PERMISSIONS,
+    )
+    coordinator = FakeCoordinator("pseudonym_student_001")
+    rejected = coordinator.scoring.get_audit_record("audit_1").model_copy(
+        update={
+            "review_status": "rejected_pending_rescore",
+            "review_reason": ["teacher_rejected_score"],
+        },
+        deep=True,
+    )
+    coordinator.scoring = coordinator.scoring.model_copy(
+        update={"score_audit_records": [rejected]},
+        deep=True,
+    )
+    coordinator.submission = AssessmentSubmission(
+        submission_id="submission_1",
+        attempt_id=coordinator.scoring.attempt_id,
+        paper_id="paper_1",
+        learner_id="pseudonym_student_001",
+        answers={"instance_1": "governed response"},
+        submitted_at=datetime(2026, 7, 25, 8, 0, tzinfo=timezone.utc),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "get_web_runtime",
+        lambda: FakeWebRuntime(
+            coordinator=coordinator,
+            runtime_dir=tmp_path,
+        ),
+    )
+    client = Client(enforce_csrf_checks=True)
+    client.force_login(teacher)
+    context_url = reverse(
+        "teacher-review-context",
+        kwargs={
+            "course_id": "course_1",
+            "class_id": "class_1",
+            "paper_id": "paper_1",
+        },
+    )
+
+    page = client.get(context_url)
+    content = page.content.decode("utf-8")
+
+    assert page.status_code == 200
+    assert "用原作答请求模型重评" in content
+    assert "不会自动接受" in content
+    flow = page.context["rescore_flow"]
+    posted = client.post(
+        page.context["rescore_url"],
+        {
+            "flow_token": flow,
+            "csrfmiddlewaretoken": client.cookies["csrftoken"].value,
+        },
+    )
+
+    assert posted.status_code == 302
+    assert "/reviews/paper_1/" in posted["Location"]
+    assert coordinator.rescore_submission is not None
+    assert coordinator.rescore_submission.attempt_id == "attempt_1"
+    assert coordinator.rescore_audit_id == "audit_1"
+    assert coordinator.rescore_submission.answers == {
+        "instance_1": "governed response",
+    }
