@@ -6,7 +6,7 @@
 路径 `$` 表示完整契约，`$[]` 表示列表元素，点路径表示组成字段。
 服务之间必须传递契约对象，不得用无类型字典代替。
 
-当前 v2 中仍返回空结果的外部调用只有 DeepSeek 网络边界。M2 的 PostgreSQL+pgvector、embedding、策略检索和审计
+当前 v2 中，DeepSeek 网络边界默认仍返回空结果；只有密钥存在且（学生评分）本地隐私门通过时才会真正出站。M2 的 PostgreSQL+pgvector、embedding、策略检索和审计
 端口已经实现；SQLite 仅用于离线、测试和迁移演练，生产必须使用 PostgreSQL+pgvector。
 仓库已提供真实 PostgreSQL+pgvector live 用例；当前机器缺少生产依赖时必须 fail
 closed，live 用例会明确 skip，不能把逻辑 `empty` 或 skip 当成生产成功，最终以 CI
@@ -24,7 +24,8 @@ M2 正式业务检索入口是 `retrieve_with_policy`；旧 `retrieve` 仅为已
 
 M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默认关闭在
 `rules`/零 rollout/零探索状态。它们不增加公共契约；本阶段也没有真实教学训练、
-线上 rollout 或 active 生产验证。
+线上 rollout 或 active 生产验证。M4 可选 adapter、M8 自适应选题和 M7 选择性
+审核同样默认关闭，不得写成已上线。
 
 ## 2026-07-27 运维入口
 
@@ -78,7 +79,7 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 | `RetrievalAudit` | M2 | M7/M9 审计与运维 | 正式检索记录 `succeeded`/`failed`；兼容未执行场景才为 `empty` |
 | `LLMModelRef` | M7/M9 配置 | DeepSeek 适配器 | provider 固定 `deepseek`，密钥名固定 `DEEPSEEK_API_KEY` |
 | `LLMGenerationRequest` | M7 评分/反馈或 M9 叙述 | DeepSeek 适配器 | 只保存输入校验和证据 ID |
-| `LLMGenerationResult` | M7/M9 DeepSeek 适配器 | M7/M9 业务服务 | `empty`，内容/引用为空，`not_run` |
+| `LLMGenerationResult` | M7/M9 DeepSeek 适配器 | M7/M9 业务服务 | 未装配时 `empty`/`not_run`；真实调用仍不把正文写入公共契约 |
 | `ModelInvocationAudit` | DeepSeek 适配器 | M9 审计 | `not_run`，token/延迟为 0 |
 | `SafetyCheckResult` | M7/M9 安全边界 | DeepSeek 适配器 | `not_run` |
 | `LearningObservation`/`LearningObservationBatch` | M8 评分审计转换 | M5 DINA/BKT、M8 IRT | 最新有效审计生成权威观测；无有效审计时可为空 |
@@ -158,7 +159,7 @@ M6 的 OPE/approval 尚未正式接入 M9。当前公共
 保留为 legacy 智能能力脚手架入口。为保持既有
 `ArchitectureScaffoldResult.is_empty()` 公共语义，M0 的
 `prepare_django_frontend()` 继续返回 `skipped`；该 legacy 脚手架不执行 M2 正式
-`retrieve_with_policy`；M7/M9 DeepSeek 保持空结果，没有作答数据的 M5/M8 探测
+`retrieve_with_policy`；M7/M9 DeepSeek 默认空结果，没有作答数据的 M5/M8 探测
 保持证据不足。正式测评流程使用真实
 DINA/BKT、2PL IRT、模型质量和自适应选择。
 真实 Django Web/health 由独立进程入口提供，不依赖该脚手架，也不把完整领域契约

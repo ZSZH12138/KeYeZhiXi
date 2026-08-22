@@ -89,8 +89,8 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 
 当前导入器要求源 SQLite platform ledger 精确为 1—15 连续版本，并验证 v13
 `m0_assessment_runs`、M4 intent、M6 policy、v14 模型历史和 v15 观测审计身份。
-它不会把旧源在导入过程中自动升级；先在应用备份和停写边界内运行 SQLite `migrate()` 到 v15，再
-执行 dry-run；目标 PostgreSQL 必须迁移到 v17。
+它不会把旧源在导入过程中自动升级；先在应用备份和停写边界内运行 SQLite `migrate()` 到 v19，再
+执行 dry-run；目标 PostgreSQL 必须迁移到 v21。
 
 ### checkpoint 与跨进程恢复
 

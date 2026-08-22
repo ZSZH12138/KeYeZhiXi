@@ -483,7 +483,8 @@
           "enum": [
             "rule",
             "local_model",
-            "teacher_override"
+            "teacher_override",
+            "local_model_rescore"
           ],
           "title": "Scoring Method",
           "type": "string"

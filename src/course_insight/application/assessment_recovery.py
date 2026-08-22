@@ -18,7 +18,10 @@ from course_insight.contracts.state import (
 from course_insight.modules.m0_platform.lease_heartbeat import (
     run_with_lease_heartbeat,
 )
-from course_insight.modules.m0_platform.workflow import AssessmentRun
+from course_insight.modules.m0_platform.workflow import (
+    WAITING_WORKFLOW_STATUSES,
+    AssessmentRun,
+)
 
 
 ResultT = TypeVar("ResultT")
@@ -194,6 +197,102 @@ class AssessmentRecovery:
             )
         except DomainError:
             return
+
+    def park(
+        self,
+        run: AssessmentRun,
+        status: str,
+        **baseline: object,
+    ) -> AssessmentRun:
+        return self._m0.park_assessment_run(
+            run.operation_id,
+            expected_version=run.version,
+            worker_id=_owner(run),
+            status=status,
+            now=self._now(),
+            **baseline,
+        )
+
+    def ensure_waiting(
+        self,
+        run: AssessmentRun,
+        status: str,
+        *,
+        worker_id: str,
+        lease_seconds: float,
+        **baseline: object,
+    ) -> AssessmentRun:
+        """Park a scored submit into a waiting room, including crash replay."""
+
+        current = self._m0.get_assessment_run(run.operation_id)
+        if current is None:
+            raise DomainError(
+                code="WORKFLOW_NOT_FOUND",
+                module="application",
+                message="assessment workflow row does not exist",
+                recoverable=True,
+            )
+        expected_checksum = baseline.get("scoring_result_checksum")
+        if current.status == status and (
+            expected_checksum is None
+            or current.scoring_result_checksum == expected_checksum
+        ):
+            return current
+        if current.status in WAITING_WORKFLOW_STATUSES:
+            current = self.resume_parked(
+                current,
+                worker_id=worker_id,
+                lease_seconds=lease_seconds,
+            )
+        elif current.status == "failed":
+            current = self.claim(current, worker_id, lease_seconds=lease_seconds)
+        elif current.status == "running":
+            now = self._now()
+            if current.lease_until is not None and current.lease_until <= now:
+                current = self._m0.reclaim_assessment_run(
+                    current.operation_id,
+                    worker_id=worker_id,
+                    now=now,
+                    lease_until=now + timedelta(seconds=lease_seconds),
+                )
+            elif current.locked_by != worker_id:
+                raise DomainError(
+                    code="WORKFLOW_BUSY",
+                    module="application",
+                    message="assessment workflow is already being processed",
+                    recoverable=True,
+                )
+        else:
+            raise DomainError(
+                code="RESCORE_NOT_ALLOWED",
+                module="application",
+                message="scored attempt cannot be returned to the waiting room",
+                recoverable=True,
+            )
+        return self.park(current, status, **baseline)
+
+    def resume_parked(
+        self,
+        run: AssessmentRun,
+        *,
+        worker_id: str,
+        lease_seconds: float,
+    ) -> AssessmentRun:
+        return self._m0.resume_parked_assessment_run(
+            run.operation_id,
+            worker_id=worker_id,
+            now=self._now(),
+            lease_until=self._now() + timedelta(seconds=lease_seconds),
+        )
+
+    def finish(self, run: AssessmentRun, **refs: object) -> AssessmentRun:
+        return self._m0.finish_assessment_run(
+            run.operation_id,
+            expected_version=run.version,
+            worker_id=_owner(run),
+            now=self._now(),
+            **refs,
+        )
 
     def freeze_state_inputs(
         self,
