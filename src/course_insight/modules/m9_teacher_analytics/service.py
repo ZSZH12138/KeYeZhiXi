@@ -9,7 +9,6 @@ from pathlib import Path
 from typing import Any
 
 from course_insight.contracts.analytics import (
-    ReviewQueueItem,
     TeacherAnalyticsBundle,
     TeacherReviewDecision,
 )
@@ -18,27 +17,45 @@ from course_insight.contracts.errors import DomainError
 from course_insight.contracts.intelligence import (
     LLMGenerationRequest,
     LLMGenerationResult,
+    ModelInvocationAudit,
+    SafetyCheckResult,
 )
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.learning_models import (
     CalibrationRunResult,
     ModelQualityReport,
 )
-from course_insight.contracts.platform import TeacherReviewSubmission
+from course_insight.contracts.platform import ActorContext, TeacherReviewSubmission
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.deepseek import EmptyDeepSeekAdapter
 from course_insight.infrastructure.json_io import read_json
-from course_insight.modules.m9_teacher_analytics.model_quality import (
-    build_calibration_quality_report,
+from course_insight.modules.m9_teacher_analytics.adapter import (
+    GovernedM9NarrativeAdapter,
+    M9InvocationFailure,
+    M9NarrativeOutcome,
 )
 from course_insight.modules.m9_teacher_analytics.repository import (
+    M9ModelAuditRecord,
     M9Repository,
-    ReviewDecisionConflictError,
+    M9ReviewDecisionConflict,
 )
 from course_insight.modules.m9_teacher_analytics.reports import (
     build_class_report,
     build_individual_report,
-    latest_audits,
+)
+from course_insight.modules.m9_teacher_analytics.model_quality import (
+    build_calibration_quality_report,
+)
+from course_insight.modules.m9_teacher_analytics.quality import (
+    DEFAULT_M9_QUALITY_GATE_POLICY,
+    M9QualityGatePolicy,
+    TechnicalQualityExpectation,
+    evaluate_technical_quality_evidence,
+)
+from course_insight.modules.m9_teacher_analytics.review_sampling import (
+    DEFAULT_REVIEW_SAMPLING_POLICY,
+    ReviewSamplingPolicy,
+    build_review_queue,
 )
 from course_insight.modules.m9_teacher_analytics.suggestions import (
     TeacherThresholdPolicy,
@@ -93,6 +110,49 @@ class M9TeacherAnalyticsService:
         self._repository = repository
         self._statistics_engine = statistics_engine
         self._suggestion_rule_engine = suggestion_rule_engine
+        self._narrative_adapter: GovernedM9NarrativeAdapter | None = None
+        self._review_sampling_policy = DEFAULT_REVIEW_SAMPLING_POLICY
+        self._review_sampling_hmac_key: bytes | None = None
+        self._review_sampling_configured = False
+
+    def configure_review_sampling(
+        self,
+        policy: ReviewSamplingPolicy,
+        *,
+        hmac_key: bytes | bytearray | None = None,
+    ) -> None:
+        """Configure deterministic low-risk audits exactly once.
+
+        Pending reviews never depend on this key.  A key is required only when
+        a non-zero completed-score sampling rate is enabled, and is retained
+        in memory without being written to reports or repositories.
+        """
+
+        if not isinstance(policy, ReviewSamplingPolicy):
+            raise TypeError("policy must be a ReviewSamplingPolicy")
+        if self._review_sampling_configured:
+            raise RuntimeError("M9 review sampling is already configured")
+        if policy.requires_hmac_key() and (
+            not isinstance(hmac_key, (bytes, bytearray)) or len(hmac_key) < 32
+        ):
+            raise ValueError("enabled review sampling requires a 32-byte HMAC key")
+        self._review_sampling_policy = policy
+        self._review_sampling_hmac_key = (
+            None if hmac_key is None else bytes(hmac_key)
+        )
+        self._review_sampling_configured = True
+
+    def configure_teacher_interpreter(
+        self,
+        adapter: GovernedM9NarrativeAdapter,
+    ) -> None:
+        """Explicitly enable the optional, default-off DeepSeek path."""
+
+        if not isinstance(adapter, GovernedM9NarrativeAdapter):
+            raise TypeError("adapter must implement GovernedM9NarrativeAdapter")
+        if self._narrative_adapter is not None:
+            raise RuntimeError("M9 teacher interpreter is already configured")
+        self._narrative_adapter = adapter
 
     def generate_teacher_narrative(
         self,
@@ -115,6 +175,107 @@ class M9TeacherAnalyticsService:
             )
         return EmptyDeepSeekAdapter().generate(request)
 
+    def interpret_teacher_analytics(
+        self,
+        actor_context: ActorContext,
+        analytics_bundle: TeacherAnalyticsBundle,
+    ) -> LLMGenerationResult:
+        """Generate a teacher-only interpretation of authoritative analytics.
+
+        原始输入：教师权限上下文和已经持久化的 TeacherAnalyticsBundle。
+        契约来源：M0 ActorContext 及 M3/M8/M5 的确定性分析结果。
+        返回消费者：M0 教师分析界面。
+        业务校验：仅教师本人班级、仅权威报告、仅匿名班级聚合事实；模型
+        不能重算、改建议、读取个体数据或替教师决策。
+        错误码：MODEL_ADAPTER_UNCONFIGURED、MODEL_API_UNAVAILABLE、
+        MODEL_OUTPUT_BLOCKED、INVALID_MODEL_JSON、REPORT_SCOPE_INVALID、
+        TEACHER_INTERPRETATION_FORBIDDEN。
+        """
+
+        if (
+            actor_context.role != "teacher"
+            or analytics_bundle.class_report.class_id
+            not in actor_context.class_ids
+            or not actor_context.course_ids
+        ):
+            raise DomainError(
+                code="TEACHER_INTERPRETATION_FORBIDDEN",
+                module="m9",
+                message="teacher interpretation requires an authorized teacher class",
+                recoverable=False,
+            )
+        scoped_getter = getattr(
+            self._repository,
+            "get_scoped_analytics",
+            None,
+        )
+        authoritative = None
+        if callable(scoped_getter):
+            for course_id in actor_context.course_ids:
+                authoritative = scoped_getter(
+                    analytics_bundle.report_id,
+                    course_id=course_id,
+                    class_id=analytics_bundle.class_report.class_id,
+                )
+                if authoritative is not None:
+                    break
+        if authoritative is None:
+            raise DomainError(
+                code="TEACHER_INTERPRETATION_FORBIDDEN",
+                module="m9",
+                message=(
+                    "teacher interpretation requires an authorized "
+                    "course and class report"
+                ),
+                recoverable=False,
+            )
+        if (
+            not hmac.compare_digest(
+                authoritative.content_checksum(),
+                analytics_bundle.content_checksum(),
+            )
+            or authoritative != analytics_bundle
+        ):
+            raise DomainError(
+                code="REPORT_SCOPE_INVALID",
+                module="m9",
+                message="teacher interpretation requires the authoritative M9 report",
+                details={"report_id": analytics_bundle.report_id},
+                recoverable=True,
+            )
+        if self._narrative_adapter is None:
+            raise DomainError(
+                code="MODEL_ADAPTER_UNCONFIGURED",
+                module="m9",
+                message="the governed teacher-interpretation adapter is not configured",
+                recoverable=True,
+            )
+        try:
+            outcome = self._narrative_adapter.narrate(analytics_bundle)
+        except M9InvocationFailure as failure:
+            self._record_model_call(
+                prompt_record=failure.prompt_record,
+                generation=failure.generation,
+                invocation=failure.audit,
+                safety=failure.safety,
+            )
+            raise failure.error from None
+        if not isinstance(outcome, M9NarrativeOutcome):
+            raise DomainError(
+                code="INVALID_MODEL_JSON",
+                module="m9",
+                message="the governed narrative adapter returned an invalid outcome",
+                details={"report_id": analytics_bundle.report_id},
+                recoverable=True,
+            )
+        self._record_model_call(
+            prompt_record=outcome.prompt_record,
+            generation=outcome.generation,
+            invocation=outcome.audit,
+            safety=outcome.safety,
+        )
+        return outcome.generation.model_copy(deep=True)
+
     def build_model_quality_report(
         self,
         calibration_result: CalibrationRunResult,
@@ -133,6 +294,25 @@ class M9TeacherAnalyticsService:
         return build_calibration_quality_report(
             calibration_result,
             requested_at,
+        )
+
+    def build_llm_quality_report(
+        self,
+        evidence_path: Path | str,
+        *,
+        expected_file_sha256: str,
+        expectation: TechnicalQualityExpectation,
+        requested_at: datetime,
+        gate_policy: M9QualityGatePolicy = DEFAULT_M9_QUALITY_GATE_POLICY,
+    ) -> ModelQualityReport:
+        """Evaluate frozen M9 candidate evidence without publishing a model."""
+
+        return evaluate_technical_quality_evidence(
+            evidence_path,
+            expected_file_sha256=expected_file_sha256,
+            expectation=expectation,
+            requested_at=requested_at,
+            gate_policy=gate_policy,
         )
 
     def build_teacher_analytics(
@@ -192,6 +372,42 @@ class M9TeacherAnalyticsService:
             policy=policy,
         )
 
+    def build_rejected_score_analytics(
+        self,
+        knowledge_bundle: KnowledgeBundle,
+        scoring_result_bundle: ScoringResultBundle,
+        state_update_result: StateUpdateResult,
+        teacher_threshold_policy_path: Path,
+    ) -> TeacherAnalyticsBundle:
+        """Supersede score fields without treating a rejection as zero."""
+
+        self._require_rejected_score(scoring_result_bundle)
+        return self.build_teacher_analytics(
+            knowledge_bundle=knowledge_bundle,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            teacher_threshold_policy_path=teacher_threshold_policy_path,
+        )
+
+    def build_rejected_score_analytics_with_frozen_policy(
+        self,
+        knowledge_bundle: KnowledgeBundle,
+        scoring_result_bundle: ScoringResultBundle,
+        state_update_result: StateUpdateResult,
+        teacher_threshold_policy_path: Path,
+        expected_policy_checksum: str,
+    ) -> TeacherAnalyticsBundle:
+        """Build a rejection-safe report using the frozen teacher policy."""
+
+        self._require_rejected_score(scoring_result_bundle)
+        return self.build_teacher_analytics_with_frozen_policy(
+            knowledge_bundle=knowledge_bundle,
+            scoring_result_bundle=scoring_result_bundle,
+            state_update_result=state_update_result,
+            teacher_threshold_policy_path=teacher_threshold_policy_path,
+            expected_policy_checksum=expected_policy_checksum,
+        )
+
     def _build_teacher_analytics_with_policy(
         self,
         *,
@@ -200,49 +416,75 @@ class M9TeacherAnalyticsService:
         state_update_result: StateUpdateResult,
         policy: TeacherThresholdPolicy,
     ) -> TeacherAnalyticsBundle:
+        rejected = scoring_result_bundle.has_rejected_score()
         class_report = build_class_report(
             scoring_result_bundle,
             state_update_result,
         )
-        individual = build_individual_report(
-            scoring_result_bundle,
-            state_update_result,
-            weak_mastery_threshold=policy.weak_mastery_threshold,
-            misconception_threshold=policy.misconception_threshold,
-        )
-        queue = [
-            ReviewQueueItem(
-                audit_id=record.audit_id,
-                audit_version=record.audit_version,
-                learner_id=scoring_result_bundle.learner_id,
-                item_instance_id=record.item_instance_id,
-                recommended_score=record.total_score,
-                confidence=record.confidence,
-                review_reasons=(
-                    list(record.review_reason)
-                    if record.review_reason
-                    else ["review_required"]
-                ),
+        if rejected:
+            # The supplied M5 snapshot may already contain the provisional
+            # score because the current application orchestrator writes it
+            # before review.  M9 must not copy that contaminated state into a
+            # new authoritative-looking report.
+            class_report = class_report.model_copy(
+                update={
+                    "coverage_rate": 0.0,
+                    "concept_summaries": [],
+                    "misconception_summaries": [],
+                    # A rejection invalidates the attempt-level report.  Do
+                    # not retain apparently authoritative statistics from
+                    # other provisional audits in the same bundle.
+                    "score_statistics": {
+                        "audit_count": 0.0,
+                        "score_total": 0.0,
+                        "score_mean": 0.0,
+                        "score_min": 0.0,
+                        "score_max": 0.0,
+                    },
+                    "evidence_status": "pending_rescore",
+                },
+                deep=True,
             )
-            for record in latest_audits(scoring_result_bundle)
-            if record.needs_review()
-        ]
-        queue.sort(key=lambda item: item.priority_key())
+            individual_reports = []
+        else:
+            individual_reports = [
+                build_individual_report(
+                    scoring_result_bundle,
+                    state_update_result,
+                    weak_mastery_threshold=policy.weak_mastery_threshold,
+                    misconception_threshold=policy.misconception_threshold,
+                )
+            ]
+        queue = build_review_queue(
+            scoring_result_bundle,
+            policy=self._review_sampling_policy,
+            hmac_key=self._review_sampling_hmac_key,
+        )
+        report_id = teacher_analytics_report_id(
+            course_id=knowledge_bundle.course_id,
+            class_state_snapshot_id=(
+                state_update_result.class_state_snapshot.snapshot_id
+            ),
+        )
+        if rejected:
+            report_id = (
+                f"{report_id}_rejected_"
+                f"{scoring_result_bundle.content_checksum()}"
+            )
         bundle = TeacherAnalyticsBundle(
-            report_id=teacher_analytics_report_id(
-                course_id=knowledge_bundle.course_id,
-                class_state_snapshot_id=(
-                    state_update_result.class_state_snapshot.snapshot_id
-                ),
-            ),
+            report_id=report_id,
             class_report=class_report,
-            individual_reports=[individual],
+            individual_reports=individual_reports,
             review_queue=queue,
-            teaching_suggestions=build_teaching_suggestions(
-                state_update_result,
-                policy,
+            teaching_suggestions=(
+                []
+                if rejected
+                else build_teaching_suggestions(state_update_result, policy)
             ),
-            generated_at=state_update_result.updated_at,
+            generated_at=max(
+                state_update_result.updated_at,
+                scoring_result_bundle.finalized_at,
+            ),
         )
         insert_or_get = getattr(
             self._repository,
@@ -253,14 +495,33 @@ class M9TeacherAnalyticsService:
             authoritative = insert_or_get(
                 bundle.model_copy(deep=True),
                 course_id=knowledge_bundle.course_id,
+                learner_scope_ids=[scoring_result_bundle.learner_id],
             )
             if authoritative != bundle:
                 raise RuntimeError("M9 persisted analytics conflicts with result")
             return authoritative.model_copy(deep=True)
+        if rejected:
+            # The legacy save-only repository API cannot persist the private
+            # learner-scope tombstone.  Saving here would allow a later
+            # learner-scoped read to fall back to an older provisional score.
+            raise RuntimeError(
+                "rejected analytics require learner-scope tombstone persistence"
+            )
         saver = getattr(self._repository, "save_analytics", None)
         if callable(saver):
             saver(bundle.model_copy(deep=True))
         return bundle
+
+    @staticmethod
+    def _require_rejected_score(
+        scoring_result_bundle: ScoringResultBundle,
+    ) -> None:
+        if not scoring_result_bundle.has_rejected_score():
+            raise DomainError(
+                code="REJECTED_SCORE_REQUIRED",
+                module="m9",
+                message="rejection analytics requires a rejected current score",
+            )
 
     def get_analytics(
         self,
@@ -361,41 +622,42 @@ class M9TeacherAnalyticsService:
             decision.audit_id
         )
         decision.assert_matches(current)
-        insert_or_get = getattr(
-            self._repository,
-            "insert_or_get_review_decision",
-            None,
-        )
-        if callable(insert_or_get):
-            try:
-                authoritative = insert_or_get(decision.model_copy(deep=True))
-            except ReviewDecisionConflictError as error:
-                raise DomainError(
-                    code="REVIEW_VERSION_CONFLICT",
-                    module="m9",
-                    message=(
-                        "another teacher decision already reviewed this audit version"
-                    ),
-                    details={
-                        "audit_id": decision.audit_id,
-                        "expected_audit_version": (
+        try:
+            insert_or_get = getattr(
+                self._repository,
+                "insert_or_get_review_decision",
+                None,
+            )
+            if callable(insert_or_get):
+                authoritative = insert_or_get(
+                    decision.model_copy(deep=True)
+                )
+                if authoritative != decision:
+                    raise M9ReviewDecisionConflict(
+                        audit_id=decision.audit_id,
+                        expected_audit_version=(
                             decision.expected_audit_version
                         ),
-                    },
-                    recoverable=True,
-                ) from error
-            if authoritative != decision:
-                raise DomainError(
-                    code="REVIEW_VERSION_CONFLICT",
-                    module="m9",
-                    message="persisted teacher review conflicts with the request",
-                    details={"audit_id": decision.audit_id},
-                    recoverable=True,
-                )
-            return authoritative.model_copy(deep=True)
-        saver = getattr(self._repository, "save_review_decision", None)
-        if callable(saver):
-            saver(decision.model_copy(deep=True))
+                    )
+                return authoritative.model_copy(deep=True)
+            saver = getattr(self._repository, "save_review_decision", None)
+            if callable(saver):
+                saver(decision.model_copy(deep=True))
+        except M9ReviewDecisionConflict as conflict:
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m9",
+                message=(
+                    "another teacher decision already exists for this audit version"
+                ),
+                details={
+                    "audit_id": conflict.audit_id,
+                    "expected_audit_version": (
+                        conflict.expected_audit_version
+                    ),
+                },
+                recoverable=True,
+            ) from None
         return decision
 
     def get_review_decision(
@@ -407,6 +669,25 @@ class M9TeacherAnalyticsService:
             return None
         decision = getter(decision_id)
         return None if decision is None else decision.model_copy(deep=True)
+
+    def _record_model_call(
+        self,
+        *,
+        prompt_record: dict[str, Any],
+        generation: LLMGenerationResult,
+        invocation: ModelInvocationAudit,
+        safety: SafetyCheckResult,
+    ) -> None:
+        record = M9ModelAuditRecord.from_artifacts(
+            prompt_record=dict(prompt_record),
+            generation=generation.model_copy(deep=True),
+            invocation=invocation.model_copy(deep=True),
+            safety=safety.model_copy(deep=True),
+        )
+        saver = getattr(self._repository, "save_model_audit", None)
+        if not callable(saver):
+            raise RuntimeError("M9 repository does not persist model-call audits")
+        saver(record)
 
     @staticmethod
     def _validate_scope(

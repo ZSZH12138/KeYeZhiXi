@@ -1,7 +1,85 @@
 """M7 local-model module."""
 
-from course_insight.modules.m7_local_model.repository import M7Repository
+from course_insight.modules.m7_local_model.adapter import (
+    DeepSeekM7Adapter,
+    GovernedM7Adapter,
+    GovernedRubricScoringAdapter,
+    PlaceholderRubricAdapter,
+    RubricScoringAdapter,
+)
+from course_insight.modules.m7_local_model.policy import (
+    DEFAULT_M7_EXECUTION_POLICY,
+    M7ExecutionPolicy,
+)
+from course_insight.modules.m7_local_model.privacy import (
+    DEFAULT_M7_OUTBOUND_PRIVACY_POLICY,
+    M7OutboundPrivacyPolicy,
+    OutboundPrivacyResult,
+    govern_student_answer,
+)
+from course_insight.modules.m7_local_model.privacy_reviewer import (
+    DenyAllPrivacyReviewer,
+    FailClosedPrivacyReviewer,
+    PresidioSpacyPrivacyReviewer,
+    PrivacyReviewResult,
+    PrivacyReviewer,
+    SklearnSemanticPrivacyReviewer,
+    build_required_m7_privacy_reviewer,
+    build_presidio_spacy_reviewer,
+    load_sklearn_privacy_reviewer,
+)
+from course_insight.modules.m7_local_model.repository import (
+    M7ModelAuditRecord,
+    M7Repository,
+)
+from course_insight.modules.m7_local_model.review_selection import (
+    AllReviewSelector,
+    IsotonicReviewSelector,
+    ReviewSelectionDecision,
+    ReviewSelector,
+    ReviewSelectorBinding,
+    build_review_selector,
+    load_isotonic_review_selector,
+)
+from course_insight.modules.m7_local_model.runtime import (
+    build_deepseek_m7_adapter,
+    required_deepseek_api_key_env,
+)
 from course_insight.modules.m7_local_model.service import M7LocalModelService
 from course_insight.modules.m7_local_model.stubs import M7LocalModelServiceStub
 
-__all__ = ["M7LocalModelService", "M7LocalModelServiceStub", "M7Repository"]
+__all__ = [
+    "DeepSeekM7Adapter",
+    "AllReviewSelector",
+    "DenyAllPrivacyReviewer",
+    "DEFAULT_M7_EXECUTION_POLICY",
+    "DEFAULT_M7_OUTBOUND_PRIVACY_POLICY",
+    "GovernedM7Adapter",
+    "GovernedRubricScoringAdapter",
+    "IsotonicReviewSelector",
+    "FailClosedPrivacyReviewer",
+    "M7ExecutionPolicy",
+    "M7ModelAuditRecord",
+    "M7OutboundPrivacyPolicy",
+    "M7LocalModelService",
+    "M7LocalModelServiceStub",
+    "M7Repository",
+    "OutboundPrivacyResult",
+    "PlaceholderRubricAdapter",
+    "PresidioSpacyPrivacyReviewer",
+    "PrivacyReviewResult",
+    "PrivacyReviewer",
+    "RubricScoringAdapter",
+    "ReviewSelectionDecision",
+    "ReviewSelector",
+    "ReviewSelectorBinding",
+    "SklearnSemanticPrivacyReviewer",
+    "build_required_m7_privacy_reviewer",
+    "build_deepseek_m7_adapter",
+    "build_review_selector",
+    "build_presidio_spacy_reviewer",
+    "govern_student_answer",
+    "load_sklearn_privacy_reviewer",
+    "load_isotonic_review_selector",
+    "required_deepseek_api_key_env",
+]

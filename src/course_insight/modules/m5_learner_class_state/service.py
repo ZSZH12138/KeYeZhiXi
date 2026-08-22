@@ -395,6 +395,7 @@ class M5StateService:
         learning_model_run: LearningModelRun | None,
     ) -> StateUpdateResult:
         audits = latest_audits(scoring_result_bundle)
+        scoring_result_bundle.assert_score_usable(module="m5")
         audit_keys = frozenset(
             audit_version_key(record)
             for record in scoring_result_bundle.score_audit_records
