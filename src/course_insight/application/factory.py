@@ -539,6 +539,66 @@ def _assemble_application(
         if service_overrides.m7 is None
         else service_overrides.m7
     )
+    if service_overrides.m7 is None:
+        from course_insight.infrastructure.deepseek_secrets import (
+            inspect_m7_privacy_artifacts,
+            privacy_model_dir,
+            resolve_deepseek_api_key,
+        )
+        from course_insight.modules.m7_local_model.privacy_reviewer import (
+            build_required_m7_privacy_reviewer,
+        )
+        from course_insight.modules.m7_local_model.runtime import (
+            build_deepseek_m7_adapter,
+        )
+
+        if (
+            settings.environment != "test"
+            and resolve_deepseek_api_key(settings.runtime_dir)
+        ):
+            ready, _reason = inspect_m7_privacy_artifacts(settings.runtime_dir)
+            if ready:
+                try:
+                    reviewer = build_required_m7_privacy_reviewer(
+                        runtime_dir=settings.runtime_dir.resolve(),
+                        model_dir=privacy_model_dir(settings.runtime_dir),
+                        expected_presidio_version=os.environ.get(
+                            "COURSE_INSIGHT_M7_PRESIDIO_VERSION",
+                            "2.2.364",
+                        ),
+                        expected_spacy_version=os.environ.get(
+                            "COURSE_INSIGHT_M7_SPACY_VERSION",
+                            "3.8.13",
+                        ),
+                        expected_spacy_model_version=os.environ.get(
+                            "COURSE_INSIGHT_M7_SPACY_MODEL_VERSION",
+                            "3.8.0",
+                        ),
+                        expected_semantic_model_id=os.environ.get(
+                            "COURSE_INSIGHT_M7_PRIVACY_MODEL_ID",
+                            "m7-semantic-privacy",
+                        ),
+                        expected_semantic_model_version=os.environ.get(
+                            "COURSE_INSIGHT_M7_PRIVACY_MODEL_VERSION",
+                            "1",
+                        ),
+                        expected_semantic_model_sha256=os.environ[
+                            "COURSE_INSIGHT_M7_PRIVACY_MODEL_SHA256"
+                        ],
+                        expected_semantic_manifest_sha256=os.environ[
+                            "COURSE_INSIGHT_M7_PRIVACY_MANIFEST_SHA256"
+                        ],
+                    )
+                    m7 = M7LocalModelService(
+                        build_deepseek_m7_adapter(
+                            privacy_reviewer=reviewer,
+                            runtime_dir=settings.runtime_dir,
+                        ),
+                        durable["m7"],
+                        _accept_model_output,
+                    )
+                except (KeyError, OSError, TypeError, ValueError, RuntimeError):
+                    pass
     m8 = (
         M8AssessmentService(
             durable["m8"],
@@ -557,6 +617,40 @@ def _assemble_application(
         if service_overrides.m9 is None
         else service_overrides.m9
     )
+    if service_overrides.m9 is None:
+        from course_insight.infrastructure.deepseek import DeepSeekClient
+        from course_insight.infrastructure.deepseek_secrets import (
+            resolve_deepseek_api_key,
+        )
+        from course_insight.modules.m9_teacher_analytics.adapter import (
+            DeepSeekM9NarrativeAdapter,
+        )
+        from course_insight.modules.m9_teacher_analytics.policy import (
+            DEFAULT_M9_NARRATIVE_POLICY,
+        )
+
+        if (
+            settings.environment != "test"
+            and resolve_deepseek_api_key(settings.runtime_dir)
+        ):
+            try:
+                policy = DEFAULT_M9_NARRATIVE_POLICY
+                m9.configure_teacher_interpreter(
+                    DeepSeekM9NarrativeAdapter(
+                        DeepSeekClient(
+                            model_name=policy.model_name,
+                            model_version=policy.model_version,
+                            thinking_enabled=policy.thinking_enabled,
+                            temperature=policy.temperature,
+                            max_attempts=policy.max_attempts,
+                            max_tokens=policy.max_tokens,
+                            runtime_dir=settings.runtime_dir,
+                        ),
+                        policy,
+                    )
+                )
+            except (OSError, TypeError, ValueError, RuntimeError):
+                pass
     coordinator = AppCoordinator(
         m0,
         m1,

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import hmac
 import json
 import sqlite3
 from datetime import datetime, timezone
@@ -35,6 +37,8 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
     PolicyRewardRecord,
 )
 
+from course_insight.modules.m7_local_model.repository import M7ModelAuditRecord
+from course_insight.modules.m9_teacher_analytics.repository import M9ModelAuditRecord
 from course_insight.infrastructure.postgresql.sqlite_import import (
     PreparedImportRow,
     _CONTRACT_TABLES,
@@ -141,6 +145,10 @@ def _prepare_row(table: str, row: sqlite3.Row) -> PreparedImportRow:
         return _prepare_tutoring_decision(row)
     if table in _POLICY_RECORD_TYPES:
         return _prepare_policy_record(table, row)
+    if table == "m7_model_invocation_audits":
+        return _prepare_m7_model_audit(row)
+    if table == "m9_model_invocation_audits":
+        return _prepare_m9_model_audit(row)
     contract_type = _CONTRACT_TABLES[table]
     payload = _canonical_json_object(row["payload"])
     contract = contract_type.model_validate(payload)
@@ -161,6 +169,109 @@ def _prepare_row(table: str, row: sqlite3.Row) -> PreparedImportRow:
         values_by_column,
         version=_contract_version(table, row, contract),
         checksum=contract.content_checksum(),
+        contract_validated=True,
+    )
+
+
+def _prepare_m7_model_audit(row: sqlite3.Row) -> PreparedImportRow:
+    payload = _canonical_json_object(row["payload"])
+    record = M7ModelAuditRecord.from_dict(payload)
+    serialized = dumps_json(record.to_dict())
+    checksum = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(
+        checksum,
+        _required_sha256(row, "payload_checksum"),
+    ):
+        raise ValueError("M7 model audit checksum is invalid")
+    checks = {
+        "invocation_id": record.invocation_id,
+        "request_id": record.request_id,
+        "scoring_task_id": record.scoring_task_id,
+        "provider": record.provider,
+        "model_name": record.model_name,
+        "provider_status": record.provider_status,
+        "validation_status": record.validation_status,
+        "privacy_decision": record.privacy_decision,
+    }
+    if any(str(row[field]) != expected for field, expected in checks.items()):
+        raise ValueError("M7 model audit identity does not match its row")
+    created_at = _aware_datetime(row["created_at"])
+    if created_at != record.created_at:
+        raise ValueError("M7 model audit timestamp does not match its row")
+    columns = source_table_columns("m7_model_invocation_audits")
+    values = {
+        **checks,
+        "created_at": created_at,
+        "payload": serialized,
+        "payload_checksum": checksum,
+    }
+    return _build_prepared(
+        "m7_model_invocation_audits",
+        columns,
+        values,
+        version=(
+            record.model_version,
+            record.prompt_template_version,
+            record.execution_policy_version,
+            record.privacy_policy_version,
+            record.privacy_decision,
+            record.validation_status,
+        ),
+        checksum=checksum,
+        contract_validated=True,
+    )
+
+
+def _prepare_m9_model_audit(row: sqlite3.Row) -> PreparedImportRow:
+    payload = _canonical_json_object(row["payload"])
+    record = M9ModelAuditRecord.from_dict(payload)
+    stored_source_checksum = _required_sha256(row, "source_report_checksum")
+    if not hmac.compare_digest(
+        stored_source_checksum,
+        record.source_report_checksum,
+    ):
+        raise ValueError("M9 model audit source checksum is invalid")
+    serialized = dumps_json(record.to_dict())
+    checksum = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+    if not hmac.compare_digest(
+        checksum,
+        _required_sha256(row, "payload_checksum"),
+    ):
+        raise ValueError("M9 model audit checksum is invalid")
+    checks = {
+        "invocation_id": record.invocation_id,
+        "request_id": record.request_id,
+        "source_report_id": record.source_report_id,
+        "source_report_checksum": record.source_report_checksum,
+        "scope": record.scope,
+        "provider": record.provider,
+        "model_name": record.model_name,
+        "provider_status": record.provider_status,
+        "validation_status": record.validation_status,
+    }
+    if any(str(row[field]) != expected for field, expected in checks.items()):
+        raise ValueError("M9 model audit identity does not match its row")
+    created_at = _aware_datetime(row["created_at"])
+    if created_at != record.created_at:
+        raise ValueError("M9 model audit timestamp does not match its row")
+    columns = source_table_columns("m9_model_invocation_audits")
+    values = {
+        **checks,
+        "created_at": created_at,
+        "payload": serialized,
+        "payload_checksum": checksum,
+    }
+    return _build_prepared(
+        "m9_model_invocation_audits",
+        columns,
+        values,
+        version=(
+            record.policy_version,
+            record.prompt_template_version,
+            record.output_schema_version,
+            record.validation_status,
+        ),
+        checksum=checksum,
         contract_validated=True,
     )
 

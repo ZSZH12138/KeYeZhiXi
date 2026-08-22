@@ -242,6 +242,19 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
             row = _workflow_row(connection, operation_id)
             return None if row is None else _run_from_row(row)
 
+    def list_assessment_runs(self) -> tuple[AssessmentRun, ...]:
+        """Load every workflow row for offline legacy inventory."""
+
+        with m0_transaction(self._pool) as connection:
+            rows = connection.execute(
+                f"""
+                SELECT {_WORKFLOW_COLUMNS}
+                FROM m0_assessment_runs
+                ORDER BY operation_id
+                """
+            ).fetchall()
+            return tuple(_run_from_row(row) for row in rows)
+
     def get_assessment_run_by_paper(
         self,
         paper_id: str,
@@ -592,6 +605,177 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
             )
             return failed
 
+    def park_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        status: str,
+        now: datetime,
+        previous_state_frozen: bool | None = None,
+        previous_learner_snapshot_id: str | None = None,
+        previous_learner_state_version: int | None = None,
+        previous_class_snapshot_id: str | None = None,
+        previous_class_state_version: int | None = None,
+        scoring_result_checksum: str | None = None,
+    ) -> AssessmentRun:
+        """Release the lease into a teacher waiting room."""
+
+        from course_insight.modules.m0_platform.workflow import (
+            WAITING_WORKFLOW_STATUSES,
+        )
+
+        with m0_transaction(self._pool) as connection:
+            current = _required_locked_run(connection, operation_id)
+            _require_owner_version(
+                current,
+                expected_version=expected_version,
+                worker_id=worker_id,
+            )
+            if (
+                current.status != "running"
+                or status not in WAITING_WORKFLOW_STATUSES
+            ):
+                raise _version_conflict()
+            _require_live_lease(current, now=now)
+            parked = replace(
+                current,
+                status=status,  # type: ignore[arg-type]
+                version=current.version + 1,
+                locked_by=None,
+                lease_until=None,
+                updated_at=now,
+                previous_state_frozen=(
+                    current.previous_state_frozen
+                    if previous_state_frozen is None
+                    else previous_state_frozen
+                ),
+                previous_learner_snapshot_id=(
+                    current.previous_learner_snapshot_id
+                    if previous_learner_snapshot_id is None
+                    else previous_learner_snapshot_id
+                ),
+                previous_learner_state_version=(
+                    current.previous_learner_state_version
+                    if previous_learner_state_version is None
+                    else previous_learner_state_version
+                ),
+                previous_class_snapshot_id=(
+                    current.previous_class_snapshot_id
+                    if previous_class_snapshot_id is None
+                    else previous_class_snapshot_id
+                ),
+                previous_class_state_version=(
+                    current.previous_class_state_version
+                    if previous_class_state_version is None
+                    else previous_class_state_version
+                ),
+                scoring_result_checksum=(
+                    current.scoring_result_checksum
+                    if scoring_result_checksum is None
+                    else scoring_result_checksum
+                ),
+            )
+            _update_workflow_row(
+                connection,
+                expected=current,
+                updated=parked,
+            )
+            return parked
+
+    def resume_parked_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> AssessmentRun:
+        """Reclaim a waiting-room row so accepted scores can be posted."""
+
+        from course_insight.modules.m0_platform.workflow import (
+            WAITING_WORKFLOW_STATUSES,
+        )
+
+        with m0_transaction(self._pool) as connection:
+            current = _required_locked_run(connection, operation_id)
+            if current.status not in WAITING_WORKFLOW_STATUSES:
+                raise DomainError(
+                    code="WORKFLOW_LEASE_ACTIVE",
+                    module="m0",
+                    message="assessment workflow is not waiting for review",
+                    recoverable=True,
+                )
+            resumed = replace(
+                current,
+                status="running",
+                version=current.version + 1,
+                locked_by=worker_id,
+                lease_until=lease_until,
+                updated_at=now,
+            )
+            _update_workflow_row(
+                connection,
+                expected=current,
+                updated=resumed,
+            )
+            return resumed
+
+    def finish_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        now: datetime,
+        scoring_result_checksum: str | None = None,
+        state_version: int | None = None,
+        feedback_id: str | None = None,
+        report_id: str | None = None,
+    ) -> AssessmentRun:
+        """Mark the current checkpoint complete without further posting."""
+
+        with m0_transaction(self._pool) as connection:
+            current = _required_locked_run(connection, operation_id)
+            _require_owner_version(
+                current,
+                expected_version=expected_version,
+                worker_id=worker_id,
+            )
+            if current.status != "running":
+                raise _version_conflict()
+            _require_live_lease(current, now=now)
+            finished = replace(
+                current,
+                checkpoint="completed",
+                status="completed",
+                version=current.version + 1,
+                locked_by=None,
+                lease_until=None,
+                updated_at=now,
+                scoring_result_checksum=(
+                    current.scoring_result_checksum
+                    if scoring_result_checksum is None
+                    else scoring_result_checksum
+                ),
+                state_version=(
+                    current.state_version
+                    if state_version is None
+                    else state_version
+                ),
+                feedback_id=(
+                    current.feedback_id if feedback_id is None else feedback_id
+                ),
+                report_id=current.report_id if report_id is None else report_id,
+            )
+            _update_workflow_row(
+                connection,
+                expected=current,
+                updated=finished,
+            )
+            return finished
+
 
 _WORKFLOW_COLUMNS = """
 operation_id,
@@ -936,9 +1120,16 @@ def _run_from_row(row: Mapping[str, object]) -> AssessmentRun:
     try:
         operation = _required_text(row["operation"], field="operation")
         status = _required_text(row["status"], field="status")
-        if operation not in {"start", "submit", "review"}:
+        if operation not in {"start", "submit", "review", "rescore"}:
             raise ValueError("operation is invalid")
-        if status not in {"pending", "running", "failed", "completed"}:
+        if status not in {
+            "pending",
+            "running",
+            "failed",
+            "completed",
+            "awaiting_review",
+            "awaiting_rescore",
+        }:
             raise ValueError("status is invalid")
         return AssessmentRun(
             operation_id=_required_text(

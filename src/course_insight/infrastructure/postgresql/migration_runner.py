@@ -18,7 +18,7 @@ from course_insight.infrastructure.postgresql.base import (
 )
 
 
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 21
 MIGRATION_LOCK_ID = 0x434F55525345494E
 MIGRATIONS_DIRECTORY = Path(__file__).with_name("migrations")
 
@@ -55,6 +55,7 @@ CORE_TABLES = (
     "m6_tutoring_decisions",
     "m6_session_states",
     "m7_student_feedback",
+    "m7_model_invocation_audits",
     "m8_scoring_results",
     "m8_score_audits",
     "m8_assessment_papers",
@@ -65,6 +66,7 @@ CORE_TABLES = (
     "m8_adaptive_selections",
     "m8_calibration_reviews",
     "m9_teacher_reviews",
+    "m9_model_invocation_audits",
     "m9_teacher_analytics",
     "m1_m2_m3_artifacts",
     "m2_vector_documents",
@@ -95,6 +97,7 @@ _DROP_TABLE_STATEMENTS = (
     "DROP TABLE IF EXISTS m6_tutoring_decisions",
     "DROP TABLE IF EXISTS m6_session_states",
     "DROP TABLE IF EXISTS m7_student_feedback",
+    "DROP TABLE IF EXISTS m7_model_invocation_audits",
     "DROP TABLE IF EXISTS m8_scoring_results",
     "DROP TABLE IF EXISTS m8_score_audits",
     "DROP TABLE IF EXISTS m8_assessment_papers",
@@ -105,6 +108,7 @@ _DROP_TABLE_STATEMENTS = (
     "DROP TABLE IF EXISTS m8_adaptive_selections",
     "DROP TABLE IF EXISTS m8_calibration_reviews",
     "DROP TABLE IF EXISTS m9_teacher_reviews",
+    "DROP TABLE IF EXISTS m9_model_invocation_audits",
     "DROP TABLE IF EXISTS m9_teacher_analytics",
     "DROP TABLE IF EXISTS m1_m2_m3_artifacts",
     "DROP TABLE IF EXISTS m2_vector_documents",

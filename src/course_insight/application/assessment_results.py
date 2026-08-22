@@ -5,7 +5,10 @@ from __future__ import annotations
 from typing import Any
 
 from course_insight.contracts.errors import DomainError
-from course_insight.modules.m0_platform.workflow import AssessmentRun
+from course_insight.modules.m0_platform.workflow import (
+    WAITING_WORKFLOW_STATUSES,
+    AssessmentRun,
+)
 from course_insight.modules.m9_teacher_analytics.service import (
     teacher_analytics_report_id,
 )
@@ -72,6 +75,24 @@ class AssessmentResults:
             missing("assessment submission is not complete")
         return run
 
+    def scored_submit(self, paper_id: str) -> AssessmentRun:
+        run = self._m0.get_assessment_run_by_paper(
+            paper_id,
+            operation="submit",
+        )
+        if (
+            run is None
+            or run.status
+            not in {"completed", "running", "failed", *WAITING_WORKFLOW_STATUSES}
+        ):
+            missing("assessment submission is not complete")
+        if (
+            run.status in {"running", "failed"}
+            and run.scoring_result_checksum is None
+        ):
+            missing("assessment submission is not complete")
+        return run
+
     def effective_completed_run(
         self,
         paper_id: str,
@@ -84,8 +105,20 @@ class AssessmentResults:
             status="completed",
         )
         if review is not None and review.operation_id != exclude_operation_id:
-            return review
-        return self.completed_submit(paper_id)
+            if review.state_version is not None:
+                return review
+        submit = self._m0.get_assessment_run_by_paper(
+            paper_id,
+            operation="submit",
+        )
+        if submit is not None and submit.status == "completed":
+            return submit
+        if (
+            submit is not None
+            and submit.status in WAITING_WORKFLOW_STATUSES
+        ):
+            return submit
+        missing("assessment submission is not complete")
 
     def require_task(self, task_id: str):
         value = self._m4.get_task_plan(task_id)
@@ -207,9 +240,11 @@ def existing_review(current, decision):
     decision.assert_matches(base_record)
     if record.audit_version == decision.expected_audit_version:
         return None
-    expected_status = "rejected" if decision.decision == "reject" else "approved"
+    expected_status = (
+        "rejected_pending_rescore" if decision.decision == "reject" else "approved"
+    )
     expected_reasons = (
-        [decision.teacher_comment] if decision.decision == "reject" else []
+        ["teacher_rejected_score"] if decision.decision == "reject" else []
     )
     expected_scores = (
         {

@@ -13,6 +13,9 @@ SCORE_TOLERANCE = 1e-9
 COMPLETED_REVIEW_STATUSES = frozenset(
     {"approved", "completed", "confirmed", "not_required", "reviewed"}
 )
+REJECTED_REVIEW_STATUSES = frozenset(
+    {"rejected", "rejected_pending_rescore"}
+)
 
 
 class _AuditRecordLike(Protocol):
@@ -20,6 +23,7 @@ class _AuditRecordLike(Protocol):
     item_instance_id: str
     audit_version: int
     scoring_method: str
+    review_status: str
 
 
 class _LearningEventLike(Protocol):
@@ -159,14 +163,23 @@ def validate_audit_history(records: list[_AuditRecordT]) -> None:
                 message="audit history must retain every version starting at one",
                 details={"audit_id": audit_id, "versions": versions},
             )
-        if any(
-            record.audit_version > 1 and record.scoring_method != "teacher_override"
-            for record in audit_records
-        ):
+        ordered = sorted(audit_records, key=lambda record: record.audit_version)
+        for previous, current in zip(ordered, ordered[1:]):
+            if current.scoring_method == "teacher_override":
+                continue
+            previous_rejected = (
+                " ".join(previous.review_status.split()).casefold()
+                in REJECTED_REVIEW_STATUSES
+            )
+            if (
+                current.scoring_method == "local_model_rescore"
+                and previous_rejected
+            ):
+                continue
             raise DomainError(
                 code="REVIEW_VERSION_CONFLICT",
                 module="m8",
-                message="audit revisions must be teacher overrides",
+                message="audit revisions must follow a legal review transition",
                 details={"audit_id": audit_id},
                 recoverable=True,
             )

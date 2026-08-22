@@ -40,7 +40,10 @@ from course_insight.contracts.platform import (
     TeacherReviewSubmission,
 )
 from course_insight.contracts.intelligence import RetrievalPolicy
-from course_insight.modules.m0_platform.workflow import AssessmentRun
+from course_insight.modules.m0_platform.workflow import (
+    WAITING_WORKFLOW_STATUSES,
+    AssessmentRun,
+)
 
 
 class AssessmentWorkflow:
@@ -155,9 +158,11 @@ class AssessmentWorkflow:
         submitted = self._m0.get_assessment_run_by_paper(
             paper_id,
             operation="submit",
-            status="completed",
         )
-        if submitted is not None:
+        if submitted is not None and submitted.status in {
+            "completed",
+            *WAITING_WORKFLOW_STATUSES,
+        }:
             raise DomainError(
                 code="ASSESSMENT_ALREADY_SUBMITTED",
                 module="application",
@@ -215,8 +220,19 @@ class AssessmentWorkflow:
             attempt_id=assessment_submission.attempt_id,
             dependencies=dependencies,
         )
+        self._persist_frozen_submission(assessment_submission)
         if run.status == "completed":
             return self._results.submission_result(run)
+        if run.status in WAITING_WORKFLOW_STATUSES:
+            paper = self._results.require_paper(run.paper_id)
+            scoring = self._results.exact_scoring(run)
+            task = self._results.require_task(run.task_id)
+            return {
+                "task_plan": task,
+                "assessment_paper": paper,
+                "scoring_result": scoring,
+                "waiting_status": run.status,
+            }
         run = self._claim(run, request_id)
         try:
             frozen_dependencies = dependencies_from_run(run)
@@ -280,6 +296,51 @@ class AssessmentWorkflow:
                     scoring_result_checksum=scoring.content_checksum(),
                 )
             if run.checkpoint == "scoring_saved":
+                if (
+                    scoring.requires_teacher_review()
+                    or scoring.has_rejected_score()
+                ):
+                    previous_learner = self._m5.get_latest_learner_state(
+                        run.course_id,
+                        run.class_id,
+                        run.learner_id,
+                    )
+                    previous_class = self._m5.get_latest_class_state(
+                        run.course_id,
+                        run.class_id,
+                    )
+                    waiting_status = (
+                        "awaiting_rescore"
+                        if scoring.has_rejected_score()
+                        else "awaiting_review"
+                    )
+                    self._recovery.park(
+                        run,
+                        waiting_status,
+                        previous_state_frozen=True,
+                        previous_learner_snapshot_id=(
+                            None
+                            if previous_learner is None
+                            else previous_learner.snapshot_id
+                        ),
+                        previous_learner_state_version=(
+                            None
+                            if previous_learner is None
+                            else previous_learner.state_version
+                        ),
+                        previous_class_snapshot_id=(
+                            None
+                            if previous_class is None
+                            else previous_class.snapshot_id
+                        ),
+                        previous_class_state_version=None,
+                    )
+                    return {
+                        "task_plan": task,
+                        "assessment_paper": paper,
+                        "scoring_result": scoring,
+                        "waiting_status": waiting_status,
+                    }
                 self._m0.append_learning_events(scoring.learning_events)
                 run = self._advance(run, "events_appended")
 
@@ -461,6 +522,11 @@ class AssessmentWorkflow:
         self._results.require_start(paper_id, learner_id=learner_id)
         run = self._results.effective_completed_run(paper_id)
         paper = self._results.require_paper(paper_id)
+        if run.status in WAITING_WORKFLOW_STATUSES:
+            return {
+                "assessment_paper": paper,
+                "waiting_status": run.status,
+            }
         scoring = self._results.exact_scoring(run)
         feedback = self._m7.get_feedback(run.feedback_id)
         require_results(scoring, feedback)
@@ -481,6 +547,13 @@ class AssessmentWorkflow:
         run = self._results.effective_completed_run(paper_id)
         paper = self._results.require_paper(start.paper_id)
         scoring = self._results.exact_scoring(run)
+        if run.status in WAITING_WORKFLOW_STATUSES:
+            require_results(paper, scoring)
+            return {
+                "assessment_paper": paper,
+                "scoring_result": scoring,
+                "waiting_status": run.status,
+            }
         state = self._results.exact_state(run)
         analytics = self._m9.get_analytics(run.report_id)
         require_results(paper, scoring, state, analytics)
@@ -502,9 +575,10 @@ class AssessmentWorkflow:
         teacher_threshold_policy_path: Path,
         course_id: str,
         class_id: str,
+        index_ref: EvidenceIndexRef | None = None,
     ) -> dict[str, ContractModel]:
         start = self._results.require_scope(paper_id, course_id, class_id)
-        submit = self._results.completed_submit(paper_id)
+        submit = self._results.scored_submit(paper_id)
         dependencies = capture_assessment_dependencies(
             knowledge_bundle=knowledge_bundle,
             evidence_index_ref=None,
@@ -536,6 +610,21 @@ class AssessmentWorkflow:
             dependencies=dependencies,
         )
         if run.status == "completed":
+            if run.state_version is None:
+                scoring = self._results.exact_scoring(run)
+                decision = self._m9.get_review_decision(
+                    review_submission.submission_id
+                )
+                require_results(scoring, decision)
+                return {
+                    "review_decision": decision,
+                    "scoring_result": scoring,
+                    "waiting_status": (
+                        "awaiting_rescore"
+                        if scoring.has_rejected_score()
+                        else "awaiting_review"
+                    ),
+                }
             return self._results.review_result(
                 run,
                 review_submission.submission_id,
@@ -594,13 +683,35 @@ class AssessmentWorkflow:
                     scoring_result_checksum=reviewed.content_checksum(),
                 )
             if run.checkpoint == "review_saved":
+                if submit.status in WAITING_WORKFLOW_STATUSES and (
+                    reviewed.requires_teacher_review()
+                    or reviewed.has_rejected_score()
+                ):
+                    waiting_status = (
+                        "awaiting_rescore"
+                        if reviewed.has_rejected_score()
+                        else "awaiting_review"
+                    )
+                    resumed = self._recovery.resume_parked(
+                        submit,
+                        worker_id=f"review:{submit.operation_id}",
+                        lease_seconds=self._lease_seconds,
+                    )
+                    self._recovery.park(
+                        resumed,
+                        waiting_status,
+                        scoring_result_checksum=reviewed.content_checksum(),
+                    )
+                    self._complete_waiting_review(run)
+                    return {
+                        "review_decision": decision,
+                        "scoring_result": reviewed,
+                        "waiting_status": waiting_status,
+                    }
                 self._m0.append_learning_events(reviewed.learning_events)
                 run = self._advance(run, "events_appended")
 
-            review_rejected = (
-                reviewed.get_audit_record(decision.audit_id).review_status
-                == "rejected"
-            )
+            review_rejected = reviewed.has_rejected_score()
             state = self._results.exact_state(run)
             if state is None and not review_rejected:
                 state = self._m5.get_state_update_for_audit(
@@ -612,14 +723,26 @@ class AssessmentWorkflow:
                 f"{decision.audit_id}:{decision.expected_audit_version + 1}"
             )
             if run.checkpoint == "events_appended":
-                previous_state = self._results.exact_state(base_run)
-                require_results(previous_state)
-                run = self._recovery.freeze_state_inputs(
-                    run,
-                    learner=previous_state.learner_state_snapshot,
-                    class_state=previous_state.class_state_snapshot,
-                )
+                if submit.status in WAITING_WORKFLOW_STATUSES:
+                    previous_learner, previous_class = (
+                        self._recovery.load_state_inputs(submit)
+                    )
+                    run = self._recovery.freeze_state_inputs(
+                        run,
+                        learner=previous_learner,
+                        class_state=previous_class,
+                    )
+                else:
+                    previous_state = self._results.exact_state(base_run)
+                    require_results(previous_state)
+                    run = self._recovery.freeze_state_inputs(
+                        run,
+                        learner=previous_state.learner_state_snapshot,
+                        class_state=previous_state.class_state_snapshot,
+                    )
             if review_rejected and state is None:
+                if submit.status in WAITING_WORKFLOW_STATUSES:
+                    missing("rejected score is waiting for rescore")
                 state = self._results.exact_state(base_run)
                 require_results(state)
             if (
@@ -662,16 +785,49 @@ class AssessmentWorkflow:
                     state_version=state.learner_state_snapshot.state_version,
                 )
 
-            analytics = self._results.analytics_for(state)
+            feedback = None
+            if (
+                submit.status in WAITING_WORKFLOW_STATUSES
+                and not review_rejected
+            ):
+                feedback = self._feedback_for_waiting_commit(
+                    run,
+                    scoring=reviewed,
+                    state=state,
+                    index_ref=index_ref,
+                )
+
+            analytics = (
+                None
+                if review_rejected
+                else self._results.analytics_for(state)
+            )
             if analytics is None:
                 verify_policy_dependencies(
                     frozen_dependencies,
                     state_policy_path=state_policy_path,
                     teacher_policy_path=teacher_threshold_policy_path,
                 )
-                analytics = self._execute(
-                    run,
-                    lambda: self._m9.build_teacher_analytics_with_frozen_policy(
+
+                def _build_review_analytics():
+                    rejected_builder = getattr(
+                        self._m9,
+                        "build_rejected_score_analytics_with_frozen_policy",
+                        None,
+                    )
+                    if review_rejected and callable(rejected_builder):
+                        return rejected_builder(
+                            knowledge_bundle=knowledge_bundle,
+                            scoring_result_bundle=reviewed,
+                            state_update_result=state,
+                            teacher_threshold_policy_path=(
+                                teacher_threshold_policy_path
+                            ),
+                            expected_policy_checksum=(
+                                expected_teacher_policy_checksum
+                            ),
+                        )
+                    return self._m9.build_teacher_analytics_with_frozen_policy(
                         knowledge_bundle=knowledge_bundle,
                         scoring_result_bundle=reviewed,
                         state_update_result=state,
@@ -681,16 +837,30 @@ class AssessmentWorkflow:
                         expected_policy_checksum=(
                             expected_teacher_policy_checksum
                         ),
-                    ),
-                )
+                    )
+
+                analytics = self._execute(run, _build_review_analytics)
             if run.checkpoint == "state_saved":
                 run = self._advance(
                     run,
                     "analytics_saved",
                     report_id=analytics.report_id,
+                    feedback_id=(
+                        None if feedback is None else feedback.feedback_id
+                    ),
                 )
             if run.checkpoint == "analytics_saved":
                 self._complete(run)
+                if submit.status in WAITING_WORKFLOW_STATUSES:
+                    self._finish_waiting_submit(
+                        submit,
+                        scoring_result_checksum=reviewed.content_checksum(),
+                        state_version=state.learner_state_snapshot.state_version,
+                        report_id=analytics.report_id,
+                        feedback_id=(
+                            None if feedback is None else feedback.feedback_id
+                        ),
+                    )
             return {
                 "review_decision": decision,
                 "reviewed_scoring_result": reviewed,
@@ -703,6 +873,218 @@ class AssessmentWorkflow:
         except Exception as error:
             self._fail(run, "WORKFLOW_EXECUTION_FAILED")
             raise self._execution_error("teacher review") from error
+
+    def rescore(
+        self,
+        *,
+        assessment_submission: AssessmentSubmission,
+        audit_id: str,
+        expected_rejected_version: int,
+        rescore_request_id: str,
+        request_id: str,
+        index_ref: EvidenceIndexRef,
+        knowledge_bundle: KnowledgeBundle,
+        state_policy_path: Path,
+        teacher_threshold_policy_path: Path,
+    ) -> dict[str, ContractModel]:
+        start = self._results.require_start(
+            assessment_submission.paper_id,
+            learner_id=assessment_submission.learner_id,
+        )
+        submit = self._results.scored_submit(assessment_submission.paper_id)
+        if (
+            assessment_submission.content_checksum()
+            != submit.request_checksum
+        ):
+            raise DomainError(
+                code="RESCORE_INPUT_MISMATCH",
+                module="application",
+                message="rescore answers do not match the frozen submission",
+                recoverable=True,
+            )
+        dependencies = capture_assessment_dependencies(
+            knowledge_bundle=knowledge_bundle,
+            evidence_index_ref=index_ref,
+            state_policy_path=state_policy_path,
+            teacher_policy_path=teacher_threshold_policy_path,
+        )
+        ensure_start_dependencies(start, dependencies)
+        operation_id = (
+            f"rescore:{assessment_submission.attempt_id}:{audit_id}:"
+            f"{expected_rejected_version}:{rescore_request_id}"
+        )
+        checksum = self._checksum(
+            assessment_submission.content_checksum(),
+            audit_id,
+            str(expected_rejected_version),
+            rescore_request_id,
+        )
+        existing = self._m0.get_assessment_run(operation_id)
+        if existing is not None and existing.status == "completed":
+            if existing.request_checksum != checksum:
+                raise DomainError(
+                    code="RESCORE_REQUEST_CONFLICT",
+                    module="application",
+                    message="rescore request identity does not match",
+                    recoverable=False,
+                )
+            scoring = self._results.exact_scoring(existing)
+            require_results(scoring)
+            waiting_status = (
+                "awaiting_rescore"
+                if scoring.has_rejected_score()
+                else "awaiting_review"
+            )
+            submit = self._m0.get_assessment_run(submit.operation_id) or submit
+            self._recovery.ensure_waiting(
+                submit,
+                waiting_status,
+                worker_id=f"rescore:{submit.operation_id}",
+                lease_seconds=self._lease_seconds,
+                scoring_result_checksum=scoring.content_checksum(),
+            )
+            return {
+                "scoring_result": scoring,
+                "waiting_status": waiting_status,
+            }
+        if submit.status != "awaiting_rescore":
+            raise DomainError(
+                code="RESCORE_NOT_ALLOWED",
+                module="application",
+                message="model rescore requires a parked rejected attempt",
+                recoverable=True,
+            )
+        run = self._record(
+            operation_id=operation_id,
+            operation="rescore",
+            checksum=checksum,
+            start=start,
+            attempt_id=assessment_submission.attempt_id,
+            target_audit_id=audit_id,
+            target_audit_version=expected_rejected_version,
+            dependencies=dependencies,
+        )
+        if run.status == "completed":
+            scoring = self._results.exact_scoring(run)
+            require_results(scoring)
+            waiting_status = (
+                "awaiting_rescore"
+                if scoring.has_rejected_score()
+                else "awaiting_review"
+            )
+            submit = self._m0.get_assessment_run(submit.operation_id) or submit
+            self._recovery.ensure_waiting(
+                submit,
+                waiting_status,
+                worker_id=f"rescore:{submit.operation_id}",
+                lease_seconds=self._lease_seconds,
+                scoring_result_checksum=scoring.content_checksum(),
+            )
+            return {
+                "scoring_result": scoring,
+                "waiting_status": waiting_status,
+            }
+        run = self._claim(run, request_id)
+        try:
+            paper = self._results.require_paper(run.paper_id)
+            current = self._results.exact_scoring(submit)
+            require_results(current)
+            rejected = current.get_audit_record(audit_id)
+            if (
+                rejected.audit_version != expected_rejected_version
+                or not rejected.is_rejected()
+            ):
+                missing("rescore must target the latest rejected audit")
+            scoring = self._results.exact_scoring(run)
+            if scoring is None and run.scoring_result_checksum is None:
+                preparation = self._execute(
+                    run,
+                    lambda: self._m8.prepare_scoring(
+                        assessment_paper=paper,
+                        raw_answer_path=assessment_submission,
+                        knowledge_bundle=knowledge_bundle,
+                    ),
+                )
+                task = next(
+                    (
+                        candidate
+                        for candidate in preparation.rubric_scoring_tasks
+                        if candidate.item_instance.item_instance_id
+                        == rejected.item_instance_id
+                    ),
+                    None,
+                )
+                if task is None:
+                    missing("rejected item has no recoverable rubric task")
+                query = preparation.query_for_task(task.scoring_task_id)
+                evidence = self._execute(
+                    run,
+                    lambda query=query: retrieve_for_application(
+                        self._m2,
+                        query,
+                        index_ref,
+                        request_id=(
+                            f"{run.operation_id}:grading:{query.query_id}"
+                        ),
+                        policy=self._retrieval_policy,
+                    ),
+                )
+                rubric_result = self._execute(
+                    run,
+                    lambda task=task, evidence=evidence: (
+                        self._m7.score_subjective_answer(
+                            rubric_scoring_task=task,
+                            evidence_bundle=evidence,
+                        )
+                    ),
+                )
+                scoring = self._execute(
+                    run,
+                    lambda: self._m8.apply_model_rescore(
+                        current,
+                        task,
+                        rubric_result,
+                        audit_id=audit_id,
+                        expected_rejected_version=expected_rejected_version,
+                        expected_rejected_checksum=rejected.content_checksum(),
+                        expected_raw_answer_checksum=(
+                            preparation.raw_answer_checksum
+                        ),
+                        raw_answer_checksum=preparation.raw_answer_checksum,
+                        rescore_request_id=rescore_request_id,
+                    ),
+                )
+            if run.checkpoint == "claimed":
+                run = self._advance(
+                    run,
+                    "scoring_saved",
+                    scoring_result_checksum=scoring.content_checksum(),
+                )
+            if run.checkpoint == "scoring_saved":
+                self._complete(run)
+            waiting_status = (
+                "awaiting_rescore"
+                if scoring.has_rejected_score()
+                else "awaiting_review"
+            )
+            submit = self._m0.get_assessment_run(submit.operation_id) or submit
+            self._recovery.ensure_waiting(
+                submit,
+                waiting_status,
+                worker_id=f"rescore:{submit.operation_id}",
+                lease_seconds=self._lease_seconds,
+                scoring_result_checksum=scoring.content_checksum(),
+            )
+            return {
+                "scoring_result": scoring,
+                "waiting_status": waiting_status,
+            }
+        except DomainError as error:
+            self._fail(run, error.code)
+            raise
+        except Exception as error:
+            self._fail(run, "WORKFLOW_EXECUTION_FAILED")
+            raise self._execution_error("model rescore") from error
 
     def _record(
         self,
@@ -763,12 +1145,108 @@ class AssessmentWorkflow:
             return None
         return builder(scoring.paper_id, scoring)
 
+    def frozen_submission(self, attempt_id: str) -> AssessmentSubmission:
+        """Load the checksum-bound original student submission for model rescore."""
+
+        runtime_dir = getattr(self._m0, "_runtime_dir", None)
+        loader = getattr(self._m0, "load_contract_snapshot", None)
+        if runtime_dir is None or not callable(loader):
+            raise DomainError(
+                code="RESCORE_INPUT_UNAVAILABLE",
+                module="application",
+                message="frozen original answers are unavailable for model rescore",
+                recoverable=True,
+            )
+        return loader(
+            AssessmentSubmission,
+            Path(runtime_dir) / "frozen_submissions" / f"{attempt_id}.json",
+        )
+
+    def _persist_frozen_submission(
+        self,
+        assessment_submission: AssessmentSubmission,
+    ) -> None:
+        runtime_dir = getattr(self._m0, "_runtime_dir", None)
+        saver = getattr(self._m0, "save_contract_snapshot", None)
+        if runtime_dir is None or not callable(saver):
+            return
+        saver(
+            assessment_submission,
+            Path(runtime_dir)
+            / "frozen_submissions"
+            / f"{assessment_submission.attempt_id}.json",
+        )
+
     def _claim(self, run: AssessmentRun, worker_id: str) -> AssessmentRun:
         return self._recovery.claim(
             run,
             worker_id,
             lease_seconds=self._lease_seconds,
         )
+
+    def _feedback_for_waiting_commit(
+        self,
+        run: AssessmentRun,
+        *,
+        scoring: ScoringResultBundle,
+        state: Any,
+        index_ref: EvidenceIndexRef | None,
+    ):
+        existing = self._m7.get_feedback_for_task(run.task_id, run.learner_id)
+        if existing is not None:
+            return existing
+        task = self._results.require_task(run.task_id)
+        tutoring = self._execute(
+            run,
+            lambda: self._m6.decide_next_action(
+                task_plan=task,
+                scoring_result_bundle=scoring,
+                state_update_result=state,
+                previous_session_state_snapshot=None,
+            ),
+        )
+        evidence = self._execute(
+            run,
+            lambda: self._retrieve_feedback_evidence(
+                tutoring.evidence_query,
+                index_ref,
+                request_id=(
+                    f"{run.operation_id}:feedback:"
+                    f"{tutoring.evidence_query.query_id}"
+                ),
+            ),
+        )
+        return self._execute(
+            run,
+            lambda: self._m7.generate_student_feedback(
+                feedback_generation_task=tutoring.feedback_generation_task,
+                evidence_bundle=evidence,
+            ),
+        )
+
+    def _retrieve_feedback_evidence(
+        self,
+        query: Any,
+        index_ref: EvidenceIndexRef | None,
+        *,
+        request_id: str,
+    ) -> Any:
+        if index_ref is not None:
+            return retrieve_for_application(
+                self._m2,
+                query,
+                index_ref,
+                request_id=request_id,
+                policy=self._retrieval_policy,
+            )
+        legacy = getattr(self._m2, "retrieve", None)
+        policy = getattr(self._m2, "retrieve_with_policy", None)
+        if callable(legacy) and not callable(policy):
+            return legacy(
+                evidence_query=query,
+                evidence_index_ref=None,
+            )
+        missing("evidence index is unavailable for delayed feedback")
 
     def _advance(
         self,
@@ -780,6 +1258,21 @@ class AssessmentWorkflow:
 
     def _complete(self, run: AssessmentRun) -> AssessmentRun:
         return self._recovery.complete(run)
+
+    def _complete_waiting_review(self, run: AssessmentRun) -> AssessmentRun:
+        return self._recovery.finish(run)
+
+    def _finish_waiting_submit(
+        self,
+        submit: AssessmentRun,
+        **refs: object,
+    ) -> AssessmentRun:
+        resumed = self._recovery.resume_parked(
+            submit,
+            worker_id=f"commit:{submit.operation_id}",
+            lease_seconds=self._lease_seconds,
+        )
+        return self._recovery.finish(resumed, **refs)
 
     def _fail(self, run: AssessmentRun, code: str) -> None:
         self._recovery.fail(run, code)
