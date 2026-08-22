@@ -317,6 +317,15 @@ def result(
         learner_id=request.user.actor_id,
     )
     paper = _contract(response, "assessment_paper", AssessmentPaper)
+    if "waiting_status" in response and "scoring_result" not in response:
+        return render(
+            request,
+            "course_insight/student/waiting.html",
+            {
+                "waiting_status": response["waiting_status"],
+                "paper": paper_view(paper),
+            },
+        )
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
     feedback = _contract(response, "feedback", StudentFeedbackPackage)
     return render(
@@ -368,6 +377,21 @@ def feedback(
         paper_id=paper_id,
         learner_id=request.user.actor_id,
     )
+    package = response.get("feedback")
+    if package is None:
+        return render(
+            request,
+            "course_insight/student/waiting.html",
+            {
+                "waiting_status": response.get(
+                    "waiting_status",
+                    "awaiting_review",
+                ),
+                "paper": paper_view(
+                    _contract(response, "assessment_paper", AssessmentPaper)
+                ),
+            },
+        )
     package = _contract(response, "feedback", StudentFeedbackPackage)
     return render(
         request,

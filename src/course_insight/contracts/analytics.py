@@ -328,6 +328,11 @@ class TeacherReviewDecision(ContractModel):
 
         return self.decision == "override"
 
+    def is_reject(self) -> bool:
+        """Return whether the audited score is invalidated pending rescore."""
+
+        return self.decision == "reject"
+
     def override_score_sum(self) -> float:
         """Return a stable finite sum of replacement criterion scores."""
 
@@ -350,11 +355,7 @@ class TeacherReviewDecision(ContractModel):
                     "record_audit_id": record.audit_id,
                 },
             )
-        record_checksum = record.content_checksum()
-        if (
-            self.expected_audit_version != record.audit_version
-            or self.expected_audit_checksum != record_checksum
-        ):
+        if self.expected_audit_version != record.audit_version:
             raise DomainError(
                 code="REVIEW_VERSION_CONFLICT",
                 module="m9",
@@ -362,8 +363,6 @@ class TeacherReviewDecision(ContractModel):
                 details={
                     "expected_audit_version": self.expected_audit_version,
                     "record_audit_version": record.audit_version,
-                    "expected_audit_checksum": self.expected_audit_checksum,
-                    "record_audit_checksum": record_checksum,
                 },
                 recoverable=True,
             )
@@ -374,8 +373,18 @@ class TeacherReviewDecision(ContractModel):
                 message="teacher decision total cannot exceed the audit maximum",
                 details={"audit_id": record.audit_id},
             )
+        if record.is_rejected() and not self.is_override():
+            raise DomainError(
+                code="REJECTED_SCORE_REQUIRES_OVERRIDE",
+                module="m9",
+                message=(
+                    "a rejected score requires rescore or a complete teacher override"
+                ),
+                details={"audit_id": record.audit_id},
+                recoverable=True,
+            )
         if not self.is_override():
-            if self.decision == "confirm" and not math.isclose(
+            if not math.isclose(
                 self.final_total_score,
                 record.total_score,
                 rel_tol=0.0,
@@ -384,7 +393,7 @@ class TeacherReviewDecision(ContractModel):
                 raise DomainError(
                     code="REVIEW_TOTAL_MISMATCH",
                     module="m9",
-                    message="confirmed total must retain the audited score",
+                    message="non-override review must retain the audited score",
                     details={"audit_id": record.audit_id},
                 )
             return

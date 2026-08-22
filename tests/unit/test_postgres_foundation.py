@@ -574,6 +574,10 @@ def test_default_migrations_cover_exact_current_backend_tables_and_types() -> No
         "0015_m5_learning_observation_audit_identity.sql",
         "0016_m1_m2_m3_capabilities.sql",
         "0017_vector_index_metadata.sql",
+        "0018_m9_model_invocation_audits.sql",
+        "0019_m7_model_invocation_audits.sql",
+        "0020_m0_waiting_rooms.sql",
+        "0021_m0_rescore_operation.sql",
     )
     all_sql = "\n".join(migration.sql for migration in migrations)
     for table_name in CORE_TABLES:

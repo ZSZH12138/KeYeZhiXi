@@ -62,6 +62,11 @@ urlpatterns = [
         name="student-feedback",
     ),
     path("teacher/", teacher.home, name="teacher-home"),
+    path(
+        "teacher/deepseek/",
+        teacher.deepseek_settings,
+        name="teacher-deepseek-settings",
+    ),
     path("teacher/reviews/", teacher.lookup, name="teacher-review-lookup"),
     path(
         "teacher/knowledge-reviews/",
@@ -80,6 +85,14 @@ urlpatterns = [
         ),
         teacher.review_context,
         name="teacher-review-context",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "reviews/<str:paper_id>/rescore/"
+        ),
+        teacher.rescore,
+        name="teacher-rescore",
     ),
     path(
         (

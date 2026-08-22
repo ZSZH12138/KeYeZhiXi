@@ -30,17 +30,21 @@ def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
     expected_postgres_tail = expected_sqlite_tail + (
         "0016_m1_m2_m3_capabilities.sql",
         "0017_vector_index_metadata.sql",
+        "0018_m9_model_invocation_audits.sql",
+        "0019_m7_model_invocation_audits.sql",
+        "0020_m0_waiting_rooms.sql",
+        "0021_m0_rescore_operation.sql",
     )
 
-    assert SQLITE_SCHEMA_VERSION == 15
-    assert POSTGRES_SCHEMA_VERSION == 17
+    assert SQLITE_SCHEMA_VERSION == 19
+    assert POSTGRES_SCHEMA_VERSION == 21
     assert tuple(
         migration.path.name for migration in load_migrations()
-    )[-8:] == expected_postgres_tail
+    )[-12:] == expected_postgres_tail
     assert tuple(
         path.name
         for path in sorted(MIGRATIONS_DIRECTORY.glob("*.sql"))
-    )[-8:] == expected_postgres_tail
+    )[-12:] == expected_postgres_tail
 
     database_path = tmp_path / "runtime" / "course_insight.sqlite3"
     with connect_sqlite(database_path) as connection:
@@ -74,6 +78,10 @@ def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
         (13, "m0_policy_freeze"),
         (14, "m5_m8_model_runtime"),
         (15, "m5_learning_observation_audit_identity"),
+        (16, "m9_model_invocation_audits"),
+        (17, "m7_model_invocation_audits"),
+        (18, "m0_waiting_rooms"),
+        (19, "m0_rescore_operation"),
     )
     assert {
         "m4_intent_decisions",
@@ -83,4 +91,6 @@ def test_m4_and_m6_use_one_contiguous_immutable_migration_sequence(
         "m6_policy_rewards",
         "m6_policy_evaluations",
         "m5_learning_observation_audits",
+        "m7_model_invocation_audits",
+        "m9_model_invocation_audits",
     } <= tables

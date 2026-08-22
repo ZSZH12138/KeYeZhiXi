@@ -2,6 +2,23 @@
 {% block title %}教师分析 · 课业智析{% endblock %}
 {% block content %}
   <h1>教师分析</h1>
+  {% if waiting_status %}
+  <p class="status">
+    {% if waiting_status == "awaiting_rescore" %}
+      机器分已被驳回，尚未计入掌握度。请完整覆盖，或通过绑定原作答的模型重评后再确认。该操作不会自动接受新分数。
+    {% else %}
+      机器分待复核，确认前不会写入掌握度或学生最终成绩。
+    {% endif %}
+  </p>
+  {% if waiting_status == "awaiting_rescore" and rescore_flow %}
+  <form method="post" action="{{ rescore_url }}">
+    {% csrf_token %}
+    <input type="hidden" name="flow_token" value="{{ rescore_flow }}">
+    <button type="submit">用原作答请求模型重评</button>
+  </form>
+  {% endif %}
+  {% endif %}
+  {% if analytics %}
   <section class="card">
     <h2>班级状态</h2>
     <p>证据覆盖率：{{ analytics.coverage_rate }}；状态：{{ analytics.evidence_status }}</p>
@@ -16,17 +33,18 @@
     {% empty %}<p>暂无个体报告。</p>{% endfor %}
   </section>
   <section class="card">
-    <h2>复核队列（{{ analytics.review_count }}）</h2>
+    <h2>教学建议及依据</h2>
+    {% for suggestion in analytics.suggestions %}
+      <p>{{ suggestion.content }}（覆盖率 {{ suggestion.coverage_rate }}，置信度 {{ suggestion.confidence }}；证据 {{ suggestion.evidence_ids|join:", " }}）</p>
+    {% empty %}<p>暂无建议。</p>{% endfor %}
+  </section>
+  {% endif %}
+  <section class="card">
+    <h2>复核队列</h2>
     <ul>
       {% for audit, href in review_links %}
         <li><a href="{{ href }}">{{ audit.audit_id }} v{{ audit.audit_version }}</a>：建议分 {{ audit.total_score }}，原因 {{ audit.review_reasons|join:"、" }}</li>
       {% empty %}<li>暂无评分记录。</li>{% endfor %}
     </ul>
-  </section>
-  <section class="card">
-    <h2>教学建议及依据</h2>
-    {% for suggestion in analytics.suggestions %}
-      <p>{{ suggestion.content }}（覆盖率 {{ suggestion.coverage_rate }}，置信度 {{ suggestion.confidence }}；证据 {{ suggestion.evidence_ids|join:", " }}）</p>
-    {% empty %}<p>暂无建议。</p>{% endfor %}
   </section>
 {% endblock %}

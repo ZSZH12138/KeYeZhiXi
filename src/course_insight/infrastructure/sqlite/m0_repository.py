@@ -224,6 +224,22 @@ class SQLiteM0Repository(SQLiteM0OutboxRepositoryMixin):
         finally:
             connection.close()
 
+    def list_assessment_runs(self) -> tuple[AssessmentRun, ...]:
+        """Load every workflow row for offline legacy inventory."""
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            rows = connection.execute(
+                f"""
+                SELECT {_WORKFLOW_COLUMNS}
+                FROM m0_assessment_runs
+                ORDER BY operation_id
+                """
+            ).fetchall()
+            return tuple(_run_from_row(row) for row in rows)
+        finally:
+            connection.close()
+
     def get_assessment_run_by_paper(
         self,
         paper_id: str,
@@ -595,6 +611,222 @@ class SQLiteM0Repository(SQLiteM0OutboxRepositoryMixin):
             _update_workflow_row(connection, expected=current, updated=failed)
             connection.execute("COMMIT")
             return failed
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def park_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        status: str,
+        now: datetime,
+        previous_state_frozen: bool | None = None,
+        previous_learner_snapshot_id: str | None = None,
+        previous_learner_state_version: int | None = None,
+        previous_class_snapshot_id: str | None = None,
+        previous_class_state_version: int | None = None,
+        scoring_result_checksum: str | None = None,
+    ) -> AssessmentRun:
+        """Release the lease into a teacher waiting room."""
+
+        from course_insight.modules.m0_platform.workflow import (
+            WAITING_WORKFLOW_STATUSES,
+        )
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = _workflow_row(connection, operation_id)
+            if row is None:
+                raise DomainError(
+                    code="WORKFLOW_NOT_FOUND",
+                    module="m0",
+                    message="assessment workflow row does not exist",
+                    recoverable=True,
+                )
+            current = _run_from_row(row)
+            if (
+                current.version != expected_version
+                or current.locked_by != worker_id
+                or current.status != "running"
+                or status not in WAITING_WORKFLOW_STATUSES
+            ):
+                raise DomainError(
+                    code="WORKFLOW_VERSION_CONFLICT",
+                    module="m0",
+                    message="assessment workflow row is stale or not owned",
+                    recoverable=True,
+                )
+            _require_live_lease(current, now=now)
+            parked = replace(
+                current,
+                status=status,  # type: ignore[arg-type]
+                version=current.version + 1,
+                locked_by=None,
+                lease_until=None,
+                updated_at=now,
+                previous_state_frozen=(
+                    current.previous_state_frozen
+                    if previous_state_frozen is None
+                    else previous_state_frozen
+                ),
+                previous_learner_snapshot_id=(
+                    current.previous_learner_snapshot_id
+                    if previous_learner_snapshot_id is None
+                    else previous_learner_snapshot_id
+                ),
+                previous_learner_state_version=(
+                    current.previous_learner_state_version
+                    if previous_learner_state_version is None
+                    else previous_learner_state_version
+                ),
+                previous_class_snapshot_id=(
+                    current.previous_class_snapshot_id
+                    if previous_class_snapshot_id is None
+                    else previous_class_snapshot_id
+                ),
+                previous_class_state_version=(
+                    current.previous_class_state_version
+                    if previous_class_state_version is None
+                    else previous_class_state_version
+                ),
+                scoring_result_checksum=(
+                    current.scoring_result_checksum
+                    if scoring_result_checksum is None
+                    else scoring_result_checksum
+                ),
+            )
+            _update_workflow_row(connection, expected=current, updated=parked)
+            connection.execute("COMMIT")
+            return parked
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def resume_parked_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> AssessmentRun:
+        """Reclaim a waiting-room row so accepted scores can be posted."""
+
+        from course_insight.modules.m0_platform.workflow import (
+            WAITING_WORKFLOW_STATUSES,
+        )
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = _workflow_row(connection, operation_id)
+            if row is None:
+                raise DomainError(
+                    code="WORKFLOW_NOT_FOUND",
+                    module="m0",
+                    message="assessment workflow row does not exist",
+                    recoverable=True,
+                )
+            current = _run_from_row(row)
+            if current.status not in WAITING_WORKFLOW_STATUSES:
+                raise DomainError(
+                    code="WORKFLOW_LEASE_ACTIVE",
+                    module="m0",
+                    message="assessment workflow is not waiting for review",
+                    recoverable=True,
+                )
+            resumed = replace(
+                current,
+                status="running",
+                version=current.version + 1,
+                locked_by=worker_id,
+                lease_until=lease_until,
+                updated_at=now,
+            )
+            _update_workflow_row(connection, expected=current, updated=resumed)
+            connection.execute("COMMIT")
+            return resumed
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def finish_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        now: datetime,
+        scoring_result_checksum: str | None = None,
+        state_version: int | None = None,
+        feedback_id: str | None = None,
+        report_id: str | None = None,
+    ) -> AssessmentRun:
+        """Mark the current checkpoint complete without further posting."""
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = _workflow_row(connection, operation_id)
+            if row is None:
+                raise DomainError(
+                    code="WORKFLOW_NOT_FOUND",
+                    module="m0",
+                    message="assessment workflow row does not exist",
+                    recoverable=True,
+                )
+            current = _run_from_row(row)
+            if (
+                current.version != expected_version
+                or current.locked_by != worker_id
+                or current.status != "running"
+            ):
+                raise DomainError(
+                    code="WORKFLOW_VERSION_CONFLICT",
+                    module="m0",
+                    message="assessment workflow row is stale or not owned",
+                    recoverable=True,
+                )
+            _require_live_lease(current, now=now)
+            finished = replace(
+                current,
+                checkpoint="completed",
+                status="completed",
+                version=current.version + 1,
+                locked_by=None,
+                lease_until=None,
+                updated_at=now,
+                scoring_result_checksum=(
+                    current.scoring_result_checksum
+                    if scoring_result_checksum is None
+                    else scoring_result_checksum
+                ),
+                state_version=(
+                    current.state_version
+                    if state_version is None
+                    else state_version
+                ),
+                feedback_id=(
+                    current.feedback_id if feedback_id is None else feedback_id
+                ),
+                report_id=current.report_id if report_id is None else report_id,
+            )
+            _update_workflow_row(connection, expected=current, updated=finished)
+            connection.execute("COMMIT")
+            return finished
         except Exception:
             if connection.in_transaction:
                 connection.execute("ROLLBACK")

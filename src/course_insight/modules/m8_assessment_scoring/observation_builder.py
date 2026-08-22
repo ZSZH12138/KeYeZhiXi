@@ -64,7 +64,7 @@ def build_observation_batch(
     observations = []
     for item in items:
         audit = latest_by_item[item.item_instance_id]
-        if audit.review_status == "rejected":
+        if audit.is_rejected():
             continue
         item_type = "subjective" if item.is_subjective() else "objective"
         observations.append(

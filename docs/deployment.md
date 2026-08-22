@@ -11,14 +11,15 @@ PostgreSQL+pgvector。仓库已提供真实 HTTP embedding + PostgreSQL/pgvector
 后才能记录为联调验收通过。
 M5 的 DINA/BKT、M8 的 2PL IRT/能力估计/自适应选择以及 M9 的本地模型质量
 已经实现，并仍受数据门槛、shadow 质量审核和教师批准约束。M7/M9 的 DeepSeek
-网络调用仍未启用。M2 的 embedding/pgvector 代码、性能验收 CLI 和真实 live 验收用例已经实现；
+网络调用默认关闭；教师可填写密钥，但学生评分还必须部署钉住的本地隐私复核工件。M2 的 embedding/pgvector 代码、性能验收 CLI 和真实 live 验收用例已经实现；
 当前开发机若未提供受保护的 PostgreSQL 测试环境，性能 CLI 会 fail closed，不能
 把未执行写成通过。
 
 M6 已实现 rules/shadow/active runtime、artifact 校验、奖励/OPE 与私有持久化，
 但默认是 `rules`、零 rollout、零探索。本阶段没有真实教学训练、线上 rollout 或
 active 生产验证；部署文档不把这些实现能力写成 active 启用建议，也不声称学习
-策略优于 baseline。
+策略优于 baseline。M4 可选 adapter、M8 自适应选题和 M7 选择性审核同样保持
+default-off；发布说明不得把“代码可配置”写成“已生产启用”。
 
 ## 配置来源与优先级
 
@@ -105,7 +106,7 @@ Web 进程启动前需要：
 3. 已执行 `sync_roles --apply`
 4. SQLite/离线模式：校验 `runtime/snapshots/course_runtime_manifest.json`、其中全部
    快照与 policy，以及 `runtime/artifacts/` 下完整 M1/M2/M3 immutable artifacts；
-   生产 PostgreSQL 模式：校验 v17（0016/0017）schema、共享仓储中的 M1/M2/M3 制品、审计、review
+   生产 PostgreSQL 模式：校验 v21（含 0016/0017 与后续 0018–0021）schema、共享仓储中的 M1/M2/M3 制品、审计、review
    和 ready pgvector 引用
 
 建议命令：
@@ -142,7 +143,7 @@ SQLite 的 `m1_course_packages`、`m2_evidence_indexes`、`m3_knowledge_bundles`
 用于离线/测试和迁移演练；SQLite 不是生产权威后端。生产 PostgreSQL core migration
 0016 创建 `m1_m2_m3_artifacts`、`m2_vector_indexes`、`m2_vector_documents`、
 `m2_retrieval_audits` 和 `m3_teacher_reviews`，0017 为向量索引补充受治理的
-package/model metadata；当前 PostgreSQL core schema 为 v17。两者由共享的
+package/model metadata；当前 PostgreSQL core schema 为 v21。两者由共享的
 `PostgresM1M2M3Repository` 与 pgvector 适配器接收 M1—M3 业务写入。
 
 SQLite→PostgreSQL 数据迁移入口：
@@ -729,7 +730,7 @@ outbox 投递和外部日志保留策略都可能不可逆；执行前必须解�
 
 ### 生产后端与配置
 
-生产必须选择 `database.backend=postgresql`，并运行 PostgreSQL migration 至 v17：
+生产必须选择 `database.backend=postgresql`，并运行 PostgreSQL migration 至 v21：
 `0016_m1_m2_m3_capabilities.sql` 创建完整 M1/M2/M3 制品表、pgvector 索引/文档表、
 检索审计表和教师复核 CAS 表，`0017_vector_index_metadata.sql` 补充向量索引的
 课程包/embedding 模型 metadata；M1/M2/M3 在应用组合根共用一个

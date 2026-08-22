@@ -767,29 +767,10 @@ def test_apply_uses_snapshot_checksum_from_reader_not_pre_read_file_hash(
         sqlite_import,
         "_read_and_validate_source",
         lambda _path: (
-            {table: ((row,) if table == "m4_task_plans" else ()) for table in (
-                "m0_learning_events",
-                "m0_event_outbox",
-                "m0_assessment_runs",
-                "m4_task_plans",
-                "m4_intent_decisions",
-                "m5_learner_states",
-                "m5_class_states",
-                "m5_state_updates",
-                "m6_session_states",
-                "m6_policy_artifacts",
-                "m6_policy_executions",
-                "m6_tutoring_decisions",
-                "m6_policy_observations",
-                "m6_policy_rewards",
-                "m6_policy_evaluations",
-                "m7_student_feedback",
-                "m8_assessment_papers",
-                "m8_score_audits",
-                "m8_scoring_results",
-                "m9_teacher_reviews",
-                "m9_teacher_analytics",
-            )},
+            {
+                table: ((row,) if table == "m4_task_plans" else ())
+                for table in sqlite_import._TABLE_ORDER
+            },
             0,
             expected_checksum,
         ),
@@ -977,6 +958,62 @@ def test_apply_preserves_full_outbox_and_workflow_state(tmp_path: Path) -> None:
     assert workflow.value_for("checkpoint") == "pending"
     assert workflow.value_for("status") == "pending"
     assert workflow.value_for("version") == 1
+
+
+def test_apply_preserves_awaiting_review_waiting_room_status(
+    tmp_path: Path,
+) -> None:
+    source = tmp_path / "waiting-source.sqlite3"
+    repository = SQLiteM0Repository(source, outbox_clock=lambda: NOW)
+    repository.initialize()
+    run = AssessmentRun(
+        operation_id="submit:waiting-1",
+        operation="submit",
+        request_checksum="a" * 64,
+        course_id="course_1",
+        class_id="class_1",
+        learner_id="learner_1",
+        session_id="session_1",
+        task_id="task_1",
+        paper_id="paper_waiting_1",
+        attempt_id="attempt_waiting_1",
+        feedback_id=None,
+        report_id=None,
+        scoring_result_checksum="b" * 64,
+        checkpoint="scoring_saved",
+        status="awaiting_review",
+        version=2,
+        locked_by=None,
+        lease_until=None,
+        error_code=None,
+        created_at=NOW,
+        updated_at=NOW,
+        knowledge_bundle_id="bundle_1",
+        knowledge_bundle_version="1.0.0",
+        knowledge_bundle_checksum="c" * 64,
+        course_package_id="package_1",
+        evidence_index_id="index_1",
+        evidence_index_version="1.0.0",
+        evidence_index_checksum="d" * 64,
+        state_policy_checksum="e" * 64,
+        teacher_policy_checksum="f" * 64,
+        previous_state_frozen=True,
+    )
+    repository.insert_or_get_assessment_run(run)
+    destination = _MemoryDestination()
+
+    report = SQLiteToPostgresMigrator(
+        source_path=source,
+        destination=destination,
+    ).run(mode="apply")
+
+    assert report.fully_contract_validated is True
+    workflow = destination.rows[
+        ("m0_assessment_runs", ("submit:waiting-1",))
+    ]
+    assert workflow.value_for("status") == "awaiting_review"
+    assert workflow.value_for("checkpoint") == "scoring_saved"
+    assert workflow.value_for("scoring_result_checksum") == "b" * 64
 
 
 def test_mode_and_batch_size_fail_closed(tmp_path: Path) -> None:

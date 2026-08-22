@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import re
 from datetime import datetime
 from typing import Literal
 
@@ -28,16 +29,71 @@ _ALLOWED_TRANSITIONS = frozenset(
     }
 )
 _ANSWER_MARKERS = (
-    "final_answer:",
-    "final answer:",
-    "final answer：",
-    "最终答案:",
-    "最终答案：",
-    "标准答案:",
-    "标准答案：",
-    "正确答案:",
-    "正确答案：",
+    "final_answer",
+    "final answer",
+    "最终答案",
+    "标准答案",
+    "正确答案",
+    "参考答案",
+    "参考解答",
 )
+
+# Frozen v1 requires a non-empty quote even though the current learner UI does
+# not display course excerpts.  M7 persists this controlled value instead of
+# copying EvidenceChunk.text into a learner-visible contract.
+STUDENT_CITATION_QUOTE_PLACEHOLDER = "证据摘录暂不展示"
+
+_SOURCE_CITATION_ID = re.compile(r"^source_[0-9]{1,9}$")
+_EVIDENCE_CITATION_ID = re.compile(
+    r"^evidence_(?:[0-9]{1,9}|chunk_[0-9]{1,9}|chunk_[0-9a-f]{64})$"
+)
+_CITATION_PHONE = re.compile(
+    r"(?<!\d)(?:(?:\+?86)[-]?)?1[3-9]\d{9}(?!\d)"
+    r"|(?<!\d)0\d{2,3}-\d{7,8}(?!\d)"
+)
+_CITATION_PRC_ID = re.compile(
+    r"(?<!\d)\d{17}[0-9Xx](?!\d)"
+)
+_APPROVED_LOCATORS = (
+    re.compile(r"^paragraph:[1-9][0-9]{0,8}$"),
+    # Numeric-only legacy forms already present in repository fixtures.  They
+    # remain compatibility aliases, not a promise that arbitrary locators are
+    # part of the public v1 contract.
+    re.compile(
+        r"^section(?P<section_sep>[:.-])[1-9][0-9]{0,5}"
+        r"(?:(?P=section_sep)[1-9][0-9]{0,5}){0,4}$"
+    ),
+    re.compile(r"^p\.[1-9][0-9]{0,8}$"),
+)
+
+
+def _student_safe_citation_metadata(
+    value: str,
+    *,
+    pattern: re.Pattern[str],
+) -> bool:
+    return (
+        type(value) is str
+        and value == value.strip()
+        and pattern.fullmatch(value) is not None
+        and not _contains_structured_personal_identifier(value)
+    )
+
+
+def _student_safe_locator(value: str) -> bool:
+    return (
+        type(value) is str
+        and value == value.strip()
+        and any(pattern.fullmatch(value) is not None for pattern in _APPROVED_LOCATORS)
+        and not _contains_structured_personal_identifier(value)
+    )
+
+
+def _contains_structured_personal_identifier(value: str) -> bool:
+    return (
+        _CITATION_PHONE.search(value) is not None
+        or _CITATION_PRC_ID.search(value) is not None
+    )
 
 
 def _raise_invalid_transition(current_state: str, next_state: str) -> None:
@@ -292,9 +348,33 @@ class EvidenceCitation(ContractModel):
     locator: str = Field(min_length=1)
     quote: str = Field(min_length=1)
 
-    def label(self) -> str:
-        """Return a compact source and locator label."""
+    def safe_for_student(self) -> bool:
+        """Reject free-form or personally identifying citation metadata."""
 
+        values = (self.evidence_id, self.source_id, self.locator, self.quote)
+        return (
+            _student_safe_citation_metadata(
+                self.evidence_id,
+                pattern=_EVIDENCE_CITATION_ID,
+            )
+            and _student_safe_citation_metadata(
+                self.source_id,
+                pattern=_SOURCE_CITATION_ID,
+            )
+            and _student_safe_locator(self.locator)
+            and self.quote == STUDENT_CITATION_QUOTE_PLACEHOLDER
+            and all(
+                marker not in value.casefold()
+                for value in values
+                for marker in _ANSWER_MARKERS
+            )
+        )
+
+    def label(self) -> str:
+        """Return a controlled label without echoing untrusted source text."""
+
+        if not self.safe_for_student():
+            return "课程证据"
         return f"{self.source_id}@{self.locator}"
 
 
@@ -336,11 +416,46 @@ class StudentFeedbackPackage(ContractModel):
         return bool(self.evidence_citations)
 
     def safe_for_student(self) -> bool:
-        """Reject uncited feedback and explicit final-answer disclosure markers."""
+        """Check every learner-visible string for answer disclosure markers."""
 
-        normalized_message = self.message.casefold()
-        return self.has_citations() and not any(
-            marker in normalized_message for marker in _ANSWER_MARKERS
+        visible_text = (
+            self.feedback_id,
+            self.task_id,
+            self.learner_id,
+            self.message,
+            *(
+                value
+                for feedback in self.rubric_feedback
+                for value in (
+                    feedback.criterion_id,
+                    feedback.message,
+                    feedback.student_evidence,
+                )
+            ),
+            *self.missing_concept_ids,
+            *(
+                value
+                for citation in self.evidence_citations
+                for value in (
+                    citation.evidence_id,
+                    citation.source_id,
+                    citation.locator,
+                    citation.quote,
+                )
+            ),
+            *self.next_practice_item_ids,
+        )
+        return (
+            self.has_citations()
+            and all(
+                citation.safe_for_student()
+                for citation in self.evidence_citations
+            )
+            and not any(
+                marker in value.casefold()
+                for value in visible_text
+                for marker in _ANSWER_MARKERS
+            )
         )
 
     def citation_ids(self) -> list[str]:

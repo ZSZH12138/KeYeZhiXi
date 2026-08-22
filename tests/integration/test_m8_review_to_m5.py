@@ -253,8 +253,8 @@ def test_rejected_review_records_reason_and_produces_no_m5_observation(
     audit = reviewed.get_audit_record(decision.audit_id)
     observations = service.build_observation_batch(reviewed.paper_id, reviewed)
 
-    assert audit.review_status == "rejected"
-    assert audit.review_reason == [decision.teacher_comment]
+    assert audit.review_status == "rejected_pending_rescore"
+    assert audit.review_reason == ["teacher_rejected_score"]
     assert observations.observations == []
 
 
@@ -414,5 +414,5 @@ def test_legacy_rejected_review_does_not_call_m5_state_update(
         result["reviewed_scoring_result"]
         .get_audit_record(decision.audit_id)
         .review_status
-        == "rejected"
+        == "rejected_pending_rescore"
     )

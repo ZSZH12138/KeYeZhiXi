@@ -165,6 +165,11 @@ class M0PlatformService:
     def get_assessment_run(self, operation_id: str) -> AssessmentRun | None:
         return self._repository.get_assessment_run(operation_id)
 
+    def list_assessment_runs(self) -> tuple[AssessmentRun, ...]:
+        """Load every workflow row for offline legacy inventory."""
+
+        return self._repository.list_assessment_runs()
+
     def get_assessment_run_by_paper(
         self,
         paper_id: str,
@@ -317,6 +322,73 @@ class M0PlatformService:
             worker_id=worker_id,
             error_code=error_code,
             now=now,
+        )
+
+    def park_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        status: str,
+        now: datetime,
+        previous_state_frozen: bool | None = None,
+        previous_learner_snapshot_id: str | None = None,
+        previous_learner_state_version: int | None = None,
+        previous_class_snapshot_id: str | None = None,
+        previous_class_state_version: int | None = None,
+        scoring_result_checksum: str | None = None,
+    ) -> AssessmentRun:
+        return self._repository.park_assessment_run(
+            operation_id,
+            expected_version=expected_version,
+            worker_id=worker_id,
+            status=status,
+            now=now,
+            previous_state_frozen=previous_state_frozen,
+            previous_learner_snapshot_id=previous_learner_snapshot_id,
+            previous_learner_state_version=previous_learner_state_version,
+            previous_class_snapshot_id=previous_class_snapshot_id,
+            previous_class_state_version=previous_class_state_version,
+            scoring_result_checksum=scoring_result_checksum,
+        )
+
+    def resume_parked_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        worker_id: str,
+        now: datetime,
+        lease_until: datetime,
+    ) -> AssessmentRun:
+        return self._repository.resume_parked_assessment_run(
+            operation_id,
+            worker_id=worker_id,
+            now=now,
+            lease_until=lease_until,
+        )
+
+    def finish_assessment_run(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        now: datetime,
+        scoring_result_checksum: str | None = None,
+        state_version: int | None = None,
+        feedback_id: str | None = None,
+        report_id: str | None = None,
+    ) -> AssessmentRun:
+        return self._repository.finish_assessment_run(
+            operation_id,
+            expected_version=expected_version,
+            worker_id=worker_id,
+            now=now,
+            scoring_result_checksum=scoring_result_checksum,
+            state_version=state_version,
+            feedback_id=feedback_id,
+            report_id=report_id,
         )
 
     def save_contract_snapshot(self, obj: ContractModel, path: Path) -> Path:

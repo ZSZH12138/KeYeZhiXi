@@ -10,7 +10,7 @@ from django.http import HttpRequest, HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.urls import reverse
-from django.views.decorators.http import require_GET, require_http_methods
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from course_insight.contracts.analytics import TeacherAnalyticsBundle
 from course_insight.contracts.assessment import (
@@ -19,9 +19,16 @@ from course_insight.contracts.assessment import (
     ScoringResultBundle,
 )
 from course_insight.contracts.errors import DomainError
+from course_insight.infrastructure.deepseek_secrets import (
+    public_deepseek_status,
+    save_teacher_deepseek_settings,
+)
 from course_insight.infrastructure.log_context import bind_log_context
 from course_insight.modules.m0_platform.django_app import runtime
-from course_insight.modules.m0_platform.django_app.authz import authorize_scope
+from course_insight.modules.m0_platform.django_app.authz import (
+    authorize_deepseek_config,
+    authorize_scope,
+)
 from course_insight.modules.m0_platform.django_app.flow_tokens import (
     flow_issued_at,
     issue_flow_token,
@@ -31,6 +38,9 @@ from course_insight.modules.m0_platform.django_app.flow_tokens import (
 from course_insight.modules.m0_platform.django_app.knowledge_review_flow import (
     issue_knowledge_review_token,
     verify_knowledge_review_token,
+)
+from course_insight.modules.m0_platform.django_app.forms.deepseek import (
+    DeepSeekSettingsForm,
 )
 from course_insight.modules.m0_platform.django_app.forms.review import (
     TeacherReviewForm,
@@ -69,7 +79,50 @@ def home(request: HttpRequest) -> HttpResponse:
         {
             "lookup_form": ReviewLookupForm(),
             "knowledge_lookup_form": KnowledgeReviewLookupForm(),
+            "can_configure_deepseek": request.user.has_perm(
+                "m0_platform_web.configure_deepseek"
+            ),
         },
+    )
+
+
+@login_required
+@require_http_methods(["GET", "POST"])
+def deepseek_settings(request: HttpRequest) -> HttpResponse:
+    authorize_deepseek_config(request.user)
+    web_runtime = runtime.get_web_runtime()
+    runtime_dir = web_runtime.container.settings.runtime_dir
+    status = public_deepseek_status(runtime_dir)
+    if request.method == "POST":
+        form = DeepSeekSettingsForm(data=request.POST)
+        if form.is_valid():
+            api_key = str(form.cleaned_data.get("api_key") or "").strip()
+            try:
+                status = save_teacher_deepseek_settings(
+                    runtime_dir,
+                    api_key=api_key or None,
+                    model_name=str(form.cleaned_data["model_name"]),
+                    thinking_enabled=bool(
+                        form.cleaned_data.get("thinking_enabled")
+                    ),
+                    clear_key=bool(form.cleaned_data.get("clear_stored_key")),
+                )
+            except ValueError:
+                form.add_error("api_key", "密钥格式无效")
+            else:
+                runtime.close_application_container()
+                return redirect("teacher-deepseek-settings")
+    else:
+        form = DeepSeekSettingsForm(
+            initial={
+                "model_name": status.model_name,
+                "thinking_enabled": status.thinking_enabled,
+            }
+        )
+    return render(
+        request,
+        "course_insight/teacher/deepseek.html",
+        {"form": form, "status": status},
     )
 
 
@@ -157,8 +210,26 @@ def review_context(
     )
     paper = _contract(response, "assessment_paper", AssessmentPaper)
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
-    analytics = _contract(response, "analytics", TeacherAnalyticsBundle)
+    waiting_status = response.get("waiting_status")
+    analytics = None
+    if "analytics" in response:
+        analytics = _contract(response, "analytics", TeacherAnalyticsBundle)
     current_audits = _current_audits(scoring)
+    rejected = next(
+        (audit for audit in current_audits if audit.is_rejected()),
+        None,
+    )
+    rescore_flow = None
+    if waiting_status == "awaiting_rescore" and rejected is not None:
+        rescore_flow = issue_flow_token(
+            purpose="teacher_rescore",
+            actor_id=request.user.actor_id,
+            course_id=course_id,
+            class_id=class_id,
+            paper_id=paper_id,
+            audit_id=rejected.audit_id,
+            audit_version=rejected.audit_version,
+        )
     review_links = tuple(
         (
             audit_view(audit),
@@ -179,8 +250,18 @@ def review_context(
         "course_insight/teacher/context.html",
         {
             "paper": paper_view(paper),
-            "analytics": analytics_view(analytics),
+            "analytics": None if analytics is None else analytics_view(analytics),
             "review_links": review_links,
+            "waiting_status": waiting_status,
+            "rescore_flow": rescore_flow,
+            "rescore_url": reverse(
+                "teacher-rescore",
+                kwargs={
+                    "course_id": course_id,
+                    "class_id": class_id,
+                    "paper_id": paper_id,
+                },
+            ),
         },
     )
 
@@ -221,7 +302,11 @@ def review(
     )
     paper = _contract(response, "assessment_paper", AssessmentPaper)
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
-    analytics = _contract(response, "analytics", TeacherAnalyticsBundle)
+    analytics = (
+        None
+        if "analytics" not in response
+        else _contract(response, "analytics", TeacherAnalyticsBundle)
+    )
     audit = scoring.get_audit_record(audit_id)
     caps = criterion_caps(
         paper=paper,
@@ -297,6 +382,7 @@ def review(
             ),
             course_id=course_id,
             class_id=class_id,
+            index_ref=course.course_context.evidence_index_ref,
         )
     return redirect(
         "teacher-review-context",
@@ -432,6 +518,80 @@ def knowledge_review(
         course_id=course_id,
         class_id=class_id,
         review_id=review_id,
+    )
+
+
+@login_required
+@require_POST
+def rescore(
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+    paper_id: str,
+) -> HttpResponse:
+    _authorize_teacher(
+        request,
+        "review_score",
+        course_id=course_id,
+        class_id=class_id,
+    )
+    web_runtime = runtime.get_web_runtime()
+    course = web_runtime.require_course(course_id)
+    response = _teacher_context(
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
+    )
+    scoring = _contract(response, "scoring_result", ScoringResultBundle)
+    rejected = next(
+        (audit for audit in _current_audits(scoring) if audit.is_rejected()),
+        None,
+    )
+    if rejected is None:
+        raise DomainError(
+            code="RESCORE_REQUEST_INVALID",
+            module="application",
+            message="model rescore requires a rejected audit",
+            recoverable=True,
+        )
+    flow = _single_flow_value(request.POST)
+    verify_flow_token(
+        flow,
+        purpose="teacher_rescore",
+        actor_id=request.user.actor_id,
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
+        audit_id=rejected.audit_id,
+        audit_version=rejected.audit_version,
+        max_age_seconds=(
+            web_runtime.container.settings.web.session_timeout_seconds
+        ),
+    )
+    submission = web_runtime.container.coordinator.frozen_assessment_submission(
+        scoring.attempt_id
+    )
+    with bind_log_context(
+        course_id=course_id,
+        class_id=class_id,
+        attempt_id=scoring.attempt_id,
+    ):
+        web_runtime.container.coordinator.rescore_assessment(
+            assessment_submission=submission,
+            audit_id=rejected.audit_id,
+            expected_rejected_version=rejected.audit_version,
+            rescore_request_id=stable_flow_identifier("rescore", flow),
+            request_id=stable_flow_identifier("rescore-request", flow),
+            index_ref=course.course_context.evidence_index_ref,
+            knowledge_bundle=course.course_context.knowledge_bundle,
+            state_policy_path=course.state_policy_path,
+            teacher_threshold_policy_path=course.teacher_threshold_policy_path,
+        )
+    return redirect(
+        "teacher-review-context",
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
     )
 
 

@@ -5,21 +5,27 @@ from io import BytesIO
 from pathlib import Path
 
 import pytest
-from PIL import Image, ImageDraw, ImageFont
-
-try:
-    import pymupdf as fitz
-except ImportError:  # pragma: no cover - compatibility with older PyMuPDF
-    import fitz  # type: ignore[no-redef]
 
 from course_insight.infrastructure.ocr import TesseractOCRProvider
 from course_insight.modules.m1_course_governance.parsers import parse_source
 
 
 _EXECUTABLE = os.environ.get("M1_LIVE_OCR_EXECUTABLE")
+try:
+    from PIL import Image, ImageDraw, ImageFont
+except ImportError:  # pragma: no cover - live OCR extra not installed
+    Image = ImageDraw = ImageFont = None  # type: ignore[misc, assignment]
+try:
+    import pymupdf as fitz
+except ImportError:  # pragma: no cover - compatibility with older PyMuPDF
+    try:
+        import fitz  # type: ignore[no-redef]
+    except ImportError:  # pragma: no cover - OCR extra not installed
+        fitz = None  # type: ignore[assignment]
+
 pytestmark = pytest.mark.skipif(
-    not _EXECUTABLE,
-    reason="set M1_LIVE_OCR_EXECUTABLE to run the live OCR check",
+    not _EXECUTABLE or Image is None or fitz is None,
+    reason="set M1_LIVE_OCR_EXECUTABLE and install the [ocr] extra to run live OCR",
 )
 
 

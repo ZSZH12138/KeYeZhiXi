@@ -180,6 +180,7 @@ class AppCoordinator:
         teacher_threshold_policy_path: Path,
         course_id: str,
         class_id: str,
+        index_ref: EvidenceIndexRef | None = None,
     ) -> dict[str, ContractModel]:
         """Resume a teacher review without applying an existing audit twice."""
 
@@ -192,7 +193,43 @@ class AppCoordinator:
             teacher_threshold_policy_path=teacher_threshold_policy_path,
             course_id=course_id,
             class_id=class_id,
+            index_ref=index_ref,
         )
+
+    def rescore_assessment(
+        self,
+        *,
+        assessment_submission: AssessmentSubmission,
+        audit_id: str,
+        expected_rejected_version: int,
+        rescore_request_id: str,
+        request_id: str,
+        index_ref: EvidenceIndexRef,
+        knowledge_bundle: KnowledgeBundle,
+        state_policy_path: Path,
+        teacher_threshold_policy_path: Path,
+    ) -> dict[str, ContractModel]:
+        """Replay a bound model rescore without posting pending scores."""
+
+        return self._assessment_workflow.rescore(
+            assessment_submission=assessment_submission,
+            audit_id=audit_id,
+            expected_rejected_version=expected_rejected_version,
+            rescore_request_id=rescore_request_id,
+            request_id=request_id,
+            index_ref=index_ref,
+            knowledge_bundle=knowledge_bundle,
+            state_policy_path=state_policy_path,
+            teacher_threshold_policy_path=teacher_threshold_policy_path,
+        )
+
+    def frozen_assessment_submission(
+        self,
+        attempt_id: str,
+    ) -> AssessmentSubmission:
+        """Return the frozen original answers bound to one attempt."""
+
+        return self._assessment_workflow.frozen_submission(attempt_id)
 
     def initialize_course(
         self,
@@ -420,6 +457,21 @@ class AppCoordinator:
             scoring_preparation_result=preparation,
             rubric_scoring_results=[rubric_result],
         )
+        if scoring.requires_teacher_review() or scoring.has_rejected_score():
+            result: dict[str, ContractModel | str] = {
+                "task_plan": task_plan,
+                "assessment_paper": paper,
+                "scoring_preparation": preparation,
+                "scoring_evidence": scoring_evidence,
+                "rubric_scoring_result": rubric_result,
+                "scoring_result": scoring,
+                "waiting_status": (
+                    "awaiting_rescore"
+                    if scoring.has_rejected_score()
+                    else "awaiting_review"
+                ),
+            }
+            return result  # type: ignore[return-value]
         self._m0.append_learning_events(events=scoring.learning_events)
         observation_batch = self._build_observation_batch(scoring)
         learning_model_run = (
@@ -496,10 +548,7 @@ class AppCoordinator:
             teacher_review_decision=decision,
         )
         self._m0.append_learning_events(events=reviewed.learning_events)
-        rejected = (
-            reviewed.get_audit_record(decision.audit_id).review_status
-            == "rejected"
-        )
+        rejected = reviewed.has_rejected_score()
         observation_batch = (
             None if rejected else self._build_observation_batch(reviewed)
         )

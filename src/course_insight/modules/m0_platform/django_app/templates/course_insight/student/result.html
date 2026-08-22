@@ -2,18 +2,25 @@
 {% block title %}测评结果 · 课业智析{% endblock %}
 {% block content %}
   <h1>测评结果</h1>
-  <p>得分：{{ result.total_score }} / {{ result.max_score }}</p>
-  {% for audit in result.audits %}
-    <section class="card">
-      <h2>题目评分：{{ audit.total_score }} / {{ audit.max_score }}</h2>
-      <ul>
-        {% for criterion in audit.criteria %}
-          <li>{{ criterion.criterion_id }}：{{ criterion.score }} — {{ criterion.reason }}</li>
-        {% endfor %}
-      </ul>
-    </section>
-  {% endfor %}
-  <h2>安全反馈</h2>
-  <p>{{ result.feedback.message }}</p>
-  <p><a href="{{ feedback_url }}">查看完整反馈与证据引用</a></p>
+  {% if result.score_pending_rescore %}
+    <p class="status">成绩正在复核中，暂不公布最终得分。</p>
+    <p class="muted">教师确认前不会展示分数、量规明细或学生反馈。</p>
+  {% else %}
+    <p>得分：{{ result.total_score }} / {{ result.max_score }}</p>
+    {% for audit in result.audits %}
+      <section class="card">
+        <h2>题目评分：{{ audit.total_score }} / {{ audit.max_score }}</h2>
+        <ul>
+          {% for criterion in audit.criteria %}
+            <li>{{ criterion.criterion_id }}：{{ criterion.score }} — {{ criterion.reason }}</li>
+          {% endfor %}
+        </ul>
+      </section>
+    {% endfor %}
+    {% if result.feedback %}
+    <h2>安全反馈</h2>
+    <p>{{ result.feedback.message }}</p>
+    <p><a href="{{ feedback_url }}">查看完整反馈与证据引用</a></p>
+    {% endif %}
+  {% endif %}
 {% endblock %}

@@ -11,6 +11,7 @@ from pydantic import Field, field_validator
 
 from course_insight.contracts._assessment_support import (
     COMPLETED_REVIEW_STATUSES as _COMPLETED_REVIEW_STATUSES,
+    REJECTED_REVIEW_STATUSES as _REJECTED_REVIEW_STATUSES,
     SCORE_TOLERANCE as _SCORE_TOLERANCE,
     copy_json_value as _copy_json_value,
     ensure_lossless_json as _ensure_lossless_json,
@@ -276,7 +277,12 @@ class ScoreAuditRecord(ContractModel):
     total_score: float = Field(ge=0.0, allow_inf_nan=False)
     max_score: float = Field(ge=0.0, allow_inf_nan=False)
     confidence: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
-    scoring_method: Literal["rule", "local_model", "teacher_override"]
+    scoring_method: Literal[
+        "rule",
+        "local_model",
+        "teacher_override",
+        "local_model_rescore",
+    ]
     review_status: str = Field(min_length=1)
     review_reason: list[str]
     created_at: datetime
@@ -339,6 +345,12 @@ class ScoreAuditRecord(ContractModel):
 
         normalized_status = " ".join(self.review_status.split()).casefold()
         return normalized_status not in _COMPLETED_REVIEW_STATUSES
+
+    def is_rejected(self) -> bool:
+        """Return whether this version invalidates its score pending rescore."""
+
+        normalized_status = " ".join(self.review_status.split()).casefold()
+        return normalized_status in _REJECTED_REVIEW_STATUSES
 
 
 class ScoringPreparationResult(ContractModel):
@@ -701,6 +713,39 @@ class ScoringResultBundle(ContractModel):
             for record in _latest_audit_records(self.score_audit_records)
         )
 
+    def has_rejected_score(self) -> bool:
+        """Return whether any current audit is invalid pending rescore."""
+
+        return any(
+            record.is_rejected()
+            for record in _latest_audit_records(self.score_audit_records)
+        )
+
+    def rejected_audit_ids(self) -> list[str]:
+        """Return stable current audit identities that cannot be consumed."""
+
+        return [
+            record.audit_id
+            for record in _latest_audit_records(self.score_audit_records)
+            if record.is_rejected()
+        ]
+
+    def assert_score_usable(self, *, module: str) -> None:
+        """Fail closed before a rejected historical score reaches consumers."""
+
+        rejected = self.rejected_audit_ids()
+        if rejected:
+            raise DomainError(
+                code="SCORE_REJECTED_PENDING_RESCORE",
+                module=module,
+                message=(
+                    "rejected score evidence cannot be used before rescore "
+                    "or a complete teacher override"
+                ),
+                details={"audit_ids": rejected},
+                recoverable=True,
+            )
+
     def replace_audit_record(self, record: ScoreAuditRecord) -> None:
         """Append one next version while preserving all prior audit history."""
 
@@ -721,7 +766,14 @@ class ScoringResultBundle(ContractModel):
         references_match = (
             record.attempt_id == self.attempt_id == current.attempt_id
             and record.item_instance_id == current.item_instance_id
-            and record.scoring_method == "teacher_override"
+            and record.scoring_method in {
+                "teacher_override",
+                "local_model_rescore",
+            }
+            and (
+                record.scoring_method != "local_model_rescore"
+                or current.is_rejected()
+            )
             and math.isclose(
                 record.max_score,
                 current.max_score,

@@ -24,12 +24,17 @@ def test_intent_packages_are_only_declared_for_intent_extra() -> None:
         }
 
     optional_names = {"scikit-learn", "joblib"}
+    allowed_extras = ("intent", "privacy")
     assert optional_names.isdisjoint(enabled_names(""))
     assert optional_names <= enabled_names("intent")
+    assert optional_names <= enabled_names("privacy")
     for requirement in requirements:
         if canonicalize_name(requirement.name) in optional_names:
             assert requirement.marker is not None
-            assert requirement.marker.evaluate({"extra": "intent"})
+            assert any(
+                requirement.marker.evaluate({"extra": extra})
+                for extra in allowed_extras
+            )
             assert not requirement.marker.evaluate({"extra": ""})
 
 

@@ -124,8 +124,11 @@ def test_student_flow_uses_exact_scope_existing_contracts_csrf_and_prg(
     result_page = client.get(submitted["Location"])
     assert result_page.status_code == 200
     content = result_page.content.decode("utf-8")
-    assert "1.0 / 1.0" in content
-    assert "Review the cited course evidence." in content
+    assert "成绩正在复核中" in content
+    assert "1.0 / 1.0" not in content
+    assert "Review the cited course evidence." not in content
+    assert "安全反馈" not in content
+    assert "暂不公布最终得分" in content
 
     replay = client.post(
         submit_url,

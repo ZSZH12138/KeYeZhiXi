@@ -568,16 +568,16 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
             criterion_scores=reviewed_scores,
             total_score=teacher_review_decision.final_total_score,
             max_score=current.max_score,
-            confidence=1.0,
+            confidence=(current.confidence if teacher_review_decision.is_reject() else 1.0),
             scoring_method="teacher_override",
             review_status=(
-                "rejected"
-                if teacher_review_decision.decision == "reject"
+                "rejected_pending_rescore"
+                if teacher_review_decision.is_reject()
                 else "approved"
             ),
             review_reason=(
-                [teacher_review_decision.teacher_comment]
-                if teacher_review_decision.decision == "reject"
+                ["teacher_rejected_score"]
+                if teacher_review_decision.is_reject()
                 else []
             ),
             created_at=teacher_review_decision.reviewed_at,
@@ -632,6 +632,169 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
             finalized,
             teacher_review_decision,
         )
+
+    def apply_model_rescore(
+        self,
+        current_scoring_result_bundle: ScoringResultBundle,
+        rubric_scoring_task: RubricScoringTask,
+        rubric_scoring_result: RubricScoringResult,
+        *,
+        audit_id: str,
+        expected_rejected_version: int,
+        expected_rejected_checksum: str,
+        expected_raw_answer_checksum: str,
+        raw_answer_checksum: str,
+        rescore_request_id: str,
+    ) -> ScoringResultBundle:
+        """Append one model rescore after a rejected audit, never overwriting it."""
+
+        if not rescore_request_id.strip():
+            raise DomainError(
+                code="RESCORE_REQUEST_INVALID",
+                module="m8",
+                message="rescore request identity is required",
+                recoverable=True,
+            )
+        if raw_answer_checksum != expected_raw_answer_checksum:
+            raise DomainError(
+                code="RESCORE_INPUT_MISMATCH",
+                module="m8",
+                message="rescore answers do not match the frozen submission",
+                recoverable=True,
+            )
+        current = current_scoring_result_bundle.get_audit_record(audit_id)
+        if (
+            current.audit_version != expected_rejected_version
+            or current.content_checksum() != expected_rejected_checksum
+            or not current.is_rejected()
+            or current.item_instance_id
+            != rubric_scoring_task.item_instance.item_instance_id
+            or rubric_scoring_task.attempt_id
+            != current_scoring_result_bundle.attempt_id
+        ):
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m8",
+                message="rescore must target the latest rejected audit version",
+                details={
+                    "audit_id": audit_id,
+                    "expected_rejected_version": expected_rejected_version,
+                },
+                recoverable=True,
+            )
+        existing_rescore = None
+        for record in current_scoring_result_bundle.score_audit_records:
+            if (
+                record.audit_id == audit_id
+                and record.audit_version == current.next_version()
+                and record.scoring_method == "local_model_rescore"
+                and f"rescore_request:{rescore_request_id}"
+                in record.review_reason
+            ):
+                existing_rescore = record
+                break
+        if existing_rescore is not None:
+            return current_scoring_result_bundle.model_copy(deep=True)
+        self._validate_rubric_result(rubric_scoring_task, rubric_scoring_result)
+        review_reasons = [
+            "model_rescore",
+            f"previous_rejected_version:{current.audit_version}",
+            f"rescore_request:{rescore_request_id}",
+        ]
+        for flag in rubric_scoring_result.review_flags:
+            if flag not in review_reasons:
+                review_reasons.append(flag)
+        if "teacher_review_required" not in review_reasons:
+            review_reasons.append("teacher_review_required")
+        replacement = ScoreAuditRecord(
+            audit_id=current.audit_id,
+            audit_version=current.next_version(),
+            attempt_id=current.attempt_id,
+            item_instance_id=current.item_instance_id,
+            criterion_scores=[
+                score.model_copy(deep=True)
+                for score in rubric_scoring_result.criterion_scores
+            ],
+            total_score=rubric_scoring_result.total_score,
+            max_score=current.max_score,
+            confidence=rubric_scoring_result.confidence,
+            scoring_method="local_model_rescore",
+            review_status="pending",
+            review_reason=review_reasons,
+            created_at=rubric_scoring_result.scored_at,
+        )
+        reviewed_bundle = ScoringResultBundle(
+            **current_scoring_result_bundle.model_dump(mode="python")
+        )
+        reviewed_bundle.replace_audit_record(replacement)
+        rescore_event = LearningEvent(
+            event_id=(
+                f"event_{rescore_request_id}_audit_v{replacement.audit_version}"
+            ),
+            event_type="model_rescore_applied",
+            course_id=current_scoring_result_bundle.learning_events[-1].course_id
+            if current_scoring_result_bundle.learning_events
+            else "unavailable",
+            class_id=current_scoring_result_bundle.learning_events[-1].class_id
+            if current_scoring_result_bundle.learning_events
+            else "unavailable",
+            learner_id=reviewed_bundle.learner_id,
+            attempt_id=reviewed_bundle.attempt_id,
+            payload={
+                "audit_id": replacement.audit_id,
+                "audit_version": replacement.audit_version,
+                "rescore_request_id": rescore_request_id,
+                "total_score": reviewed_bundle.total_score,
+            },
+            occurred_at=rubric_scoring_result.scored_at,
+        )
+        finalized = ScoringResultBundle(
+            **{
+                **reviewed_bundle.model_dump(mode="python"),
+                "learning_events": [
+                    *reviewed_bundle.learning_events,
+                    rescore_event,
+                ],
+                "finalized_at": rubric_scoring_result.scored_at,
+            }
+        )
+        writer = getattr(
+            self._repository,
+            "insert_or_get_reviewed_scoring_result",
+            None,
+        )
+        if not callable(writer):
+            return self._persist_scoring_result(finalized)
+        try:
+            authoritative = writer(
+                finalized.model_copy(deep=True),
+                audit_id=audit_id,
+                expected_audit_version=expected_rejected_version,
+                expected_audit_checksum=expected_rejected_checksum,
+            )
+        except ReviewVersionConflictError as error:
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m8",
+                message="score audit changed before the model rescore was applied",
+                details={
+                    "audit_id": audit_id,
+                    "expected_rejected_version": expected_rejected_version,
+                },
+                recoverable=True,
+            ) from error
+        if authoritative != finalized and not same_scoring_result(
+            authoritative,
+            finalized,
+        ):
+            raise DomainError(
+                code="REVIEW_VERSION_CONFLICT",
+                module="m8",
+                message="persisted model rescore differs from the request",
+                details={"audit_id": audit_id},
+                recoverable=True,
+            )
+        return authoritative.model_copy(deep=True)
 
     def _event_context(self, paper_id: str) -> tuple[str, str]:
         context = self._paper_event_context.get(paper_id)

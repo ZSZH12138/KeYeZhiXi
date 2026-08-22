@@ -17,9 +17,9 @@ from course_insight.infrastructure.postgresql.migration_runner import (
 
 
 def test_s1_s6_migration_is_the_next_checksum_locked_version() -> None:
-    assert SCHEMA_VERSION == 17
+    assert SCHEMA_VERSION == 21
     migrations = load_migrations()
-    assert migrations[-1].version == 17
+    assert migrations[-1].version == 21
     migration = next(item for item in migrations if item.version == 16)
     assert migration.path.name == "0016_m1_m2_m3_capabilities.sql"
     assert migration.checksum
@@ -39,9 +39,16 @@ def test_s1_s6_migration_is_the_next_checksum_locked_version() -> None:
     assert "vector_dims(embedding)" in sql
     assert "JSONB NOT NULL" in sql
     assert "CREATE INDEX" in sql
-    metadata_migration = migrations[-1]
+    metadata_migration = next(item for item in migrations if item.version == 17)
     assert metadata_migration.path.name == "0017_vector_index_metadata.sql"
     assert "ADD COLUMN metadata JSONB" in metadata_migration.sql
+    waiting_migration = next(item for item in migrations if item.version == 20)
+    assert waiting_migration.path.name == "0020_m0_waiting_rooms.sql"
+    assert "awaiting_review" in waiting_migration.sql
+    assert "awaiting_rescore" in waiting_migration.sql
+    rescore_migration = migrations[-1]
+    assert rescore_migration.path.name == "0021_m0_rescore_operation.sql"
+    assert "rescore" in rescore_migration.sql
 
 
 def test_s1_s6_migration_is_transaction_safe_and_parameterized_by_runner() -> None:
