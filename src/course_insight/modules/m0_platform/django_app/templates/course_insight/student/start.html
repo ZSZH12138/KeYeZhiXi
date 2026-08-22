@@ -2,6 +2,38 @@
 {% block title %}开始测评 · 课业智析{% endblock %}
 {% block content %}
   <h1>开始测评</h1>
+  {% if profile %}
+  <section class="card">
+    <h2>我的掌握画像</h2>
+    {% if not profile.ready %}
+      <p class="muted">{{ profile.message }}</p>
+    {% else %}
+      <p class="muted">{{ profile.message }}</p>
+      <h3>已掌握</h3>
+      <ul>{% for item in profile.mastered %}<li>{{ item.name }}{% if item.source_locator %}（资料：{{ item.source_locator }}）{% endif %}</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
+      <h3>正在巩固</h3>
+      <ul>{% for item in profile.consolidating %}<li>{{ item.name }}{% if item.source_locator %}（资料：{{ item.source_locator }}）{% endif %}</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
+      <h3>优先补学</h3>
+      <ul>
+        {% for item in profile.priority_support %}
+          <li>{{ item.name }}{% if item.source_locator %}（资料：{{ item.source_locator }}）{% endif %}{% if item.misconceptions %}；误区：{{ item.misconceptions|join:"、" }}{% endif %}</li>
+        {% empty %}<li>暂无</li>
+        {% endfor %}
+      </ul>
+      {% if profile.progress %}
+      <h3>进步轨迹</h3>
+      <ul>
+        {% for version, mastery in profile.progress %}
+          <li>第 {{ version }} 次确认后掌握度 {{ mastery }}</li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      {% if profile.next_practice_names %}
+      <p>建议下一步练习：{{ profile.next_practice_names|join:"、" }}</p>
+      {% endif %}
+    {% endif %}
+  </section>
+  {% endif %}
   <form method="post">
     {% csrf_token %}
     {{ form.as_p }}

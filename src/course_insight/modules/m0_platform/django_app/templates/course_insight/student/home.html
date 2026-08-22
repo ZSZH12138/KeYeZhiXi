@@ -2,7 +2,7 @@
 {% block title %}学生端 · 课业智析{% endblock %}
 {% block content %}
   <h1>学生端</h1>
-  <p>选择已获授权的课程与班级，开始一次测评。</p>
+  <p>选择已获授权的课程与班级后，会先看到掌握画像、进步轨迹和下一步练习，再开始测评。</p>
   <form method="get" action="{% url 'student-select-scope' %}">
     {{ scope_form.as_p }}
     <button type="submit">继续</button>

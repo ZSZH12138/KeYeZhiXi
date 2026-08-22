@@ -20,7 +20,15 @@
     {% if result.feedback %}
     <h2>安全反馈</h2>
     <p>{{ result.feedback.message }}</p>
+    <p>订正说明：{{ result.feedback.correction_note }}</p>
     <p><a href="{{ feedback_url }}">查看完整反馈与证据引用</a></p>
+    {% endif %}
+    {% if result.correction_available and correction_url %}
+    <section class="card">
+      <h2>测后订正</h2>
+      <p>按失分点订正：先看错因，需要时看一层最小提示，再做跟练。未完成订正不会记成已经掌握。</p>
+      <p><a href="{{ correction_url }}">开始订正</a></p>
+    </section>
     {% endif %}
   {% endif %}
 {% endblock %}

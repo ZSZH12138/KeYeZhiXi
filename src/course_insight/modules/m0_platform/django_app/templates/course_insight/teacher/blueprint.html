@@ -1,0 +1,55 @@
+{% extends "course_insight/base.html" %}
+{% block title %}诊断卷蓝图 · 课业智析{% endblock %}
+{% block content %}
+  <h1>四段诊断卷</h1>
+  <p class="muted">课程 {{ course_id }}；班级 {{ class_id }}。先定四段用途、题量和分数，再预览组卷。保存后不会改已审核知识包，只作用在本课运行配置上。</p>
+  <form method="post">
+    {% csrf_token %}
+    <input type="hidden" name="blueprint_id" value="{{ blueprint_id }}">
+    {% for section in sections %}
+      <section class="card">
+        <h2>第 {{ forloop.counter }} 段{% if section.purpose %}（{{ section.purpose }}）{% endif %}</h2>
+        <input type="hidden" name="section_id_{{ forloop.counter0 }}" value="{{ section.section_id }}">
+        <label>段名 <input name="name_{{ forloop.counter0 }}" value="{{ section.name }}"></label>
+        <label>用途
+          <select name="purpose_{{ forloop.counter0 }}">
+            <option value="anchor"{% if section.purpose == "anchor" %} selected{% endif %}>公共锚点</option>
+            <option value="uncertainty"{% if section.purpose == "uncertainty" %} selected{% endif %}>不确定点</option>
+            <option value="misconception"{% if section.purpose == "misconception" %} selected{% endif %}>误区</option>
+            <option value="remediation"{% if section.purpose == "remediation" %} selected{% endif %}>补救</option>
+          </select>
+        </label>
+        <label>题量 <input name="item_count_{{ forloop.counter0 }}" value="{{ section.item_count }}"></label>
+        <label>分数 <input name="score_{{ forloop.counter0 }}" value="{{ section.score }}"></label>
+        <label>锚点题号（每行或逗号分隔）
+          <textarea name="anchor_item_ids_{{ forloop.counter0 }}" rows="3">{% for item_id in section.anchor_item_ids %}{{ item_id }}{% if not forloop.last %}
+{% endif %}{% endfor %}</textarea>
+        </label>
+      </section>
+    {% empty %}
+      <p>当前课包没有可配置的已审核蓝图。</p>
+    {% endfor %}
+    {% if sections %}
+      <button type="submit">保存四段蓝图</button>
+    {% endif %}
+  </form>
+  {% if preview %}
+  <section class="card">
+    <h2>发布前预览</h2>
+    <p class="muted">按当前保存的蓝图生成一份示例卷。参数题答案会随参数冻结。不会发给学生。</p>
+    {% for section in preview.sections %}
+      <h3>{{ section.name }}{% if section.purpose %}（{{ section.purpose }}）{% endif %} · {{ section.score }} 分</h3>
+      <ol>
+        {% for item in section.items %}
+          <li>{{ item.stem }}</li>
+        {% endfor %}
+      </ol>
+    {% empty %}
+      <p>当前蓝图没有可预览题目。</p>
+    {% endfor %}
+  </section>
+  {% else %}
+  <p class="muted">保存后如果题量、锚点或题型约束无法满足，预览会暂时不可用。请减少题量或补齐已审核题目后再预览。</p>
+  {% endif %}
+  <p><a href="{% url 'teacher-class' course_id=course_id class_id=class_id %}">返回班级入口</a></p>
+{% endblock %}

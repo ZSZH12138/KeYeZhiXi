@@ -272,14 +272,10 @@ class AssessmentWorkflow:
                         ),
                     )
                     rubric_results.append(
-                        self._execute(
+                        self._score_subjective_independently(
                             run,
-                            lambda scoring_task=scoring_task, evidence=evidence: (
-                                self._m7.score_subjective_answer(
-                                    rubric_scoring_task=scoring_task,
-                                    evidence_bundle=evidence,
-                                )
-                            ),
+                            scoring_task,
+                            evidence,
                         )
                     )
                 scoring = self._execute(
@@ -1029,14 +1025,10 @@ class AssessmentWorkflow:
                         policy=self._retrieval_policy,
                     ),
                 )
-                rubric_result = self._execute(
+                rubric_result = self._score_subjective_independently(
                     run,
-                    lambda task=task, evidence=evidence: (
-                        self._m7.score_subjective_answer(
-                            rubric_scoring_task=task,
-                            evidence_bundle=evidence,
-                        )
-                    ),
+                    task,
+                    evidence,
                 )
                 scoring = self._execute(
                     run,
@@ -1276,6 +1268,40 @@ class AssessmentWorkflow:
 
     def _fail(self, run: AssessmentRun, code: str) -> None:
         self._recovery.fail(run, code)
+
+    def _score_subjective_independently(
+        self,
+        run: AssessmentRun,
+        scoring_task: Any,
+        evidence: Any,
+    ) -> Any:
+        first = self._execute(
+            run,
+            lambda scoring_task=scoring_task, evidence=evidence: (
+                self._m7.score_subjective_answer(
+                    rubric_scoring_task=scoring_task,
+                    evidence_bundle=evidence,
+                )
+            ),
+        )
+        second = self._execute(
+            run,
+            lambda scoring_task=scoring_task, evidence=evidence: (
+                self._m7.score_subjective_answer(
+                    rubric_scoring_task=scoring_task,
+                    evidence_bundle=evidence,
+                )
+            ),
+        )
+        merger = getattr(self._m8, "merge_independent_rubric_results", None)
+        if not callable(merger):
+            return first
+        return self._execute(
+            run,
+            lambda scoring_task=scoring_task, first=first, second=second: (
+                merger(scoring_task, first, second)
+            ),
+        )
 
     def _execute(
         self,
