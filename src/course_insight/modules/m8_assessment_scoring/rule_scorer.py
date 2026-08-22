@@ -1,4 +1,4 @@
-"""Deterministic objective-answer normalization and audit scoring."""
+"""Deterministic objective-answer matching and audit scoring."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from course_insight.modules.m8_assessment_scoring.clock import Clock, SystemUTCC
 
 
 class RuleScorer:
-    """Score objective values against a frozen ItemCard answer key."""
+    """Score objective values against teacher-listed exact answer strings."""
 
     def __init__(self, clock: Clock | None = None) -> None:
         self._clock = SystemUTCClock() if clock is None else clock
@@ -40,16 +40,13 @@ class RuleScorer:
                 module="m8",
                 message="rule scoring requires one aligned objective item",
             )
-        if "answer" not in item.answer_key:
-            raise DomainError(
-                code="ANSWER_FORMAT_INVALID",
-                module="m8",
-                message="objective answer key is missing",
-                details={"item_id": item.item_id},
-            )
+        expected_values = self._accepted_answers(item)
+        frozen = item_instance.parameters.get("_frozen_answers")
+        if type(frozen) is list and frozen:
+            expected_values = list(frozen)
         supplied = self.normalize(raw_answer)
-        expected = self.normalize(item.answer_key["answer"])
-        correct = supplied == expected
+        expected = {self.normalize(value) for value in expected_values}
+        correct = supplied in expected
         score = item_instance.max_score if correct else 0.0
         evidence = self.display(raw_answer)
         criterion = CriterionScore(
@@ -83,9 +80,30 @@ class RuleScorer:
         )
 
     @staticmethod
+    def _accepted_answers(item: ItemCard) -> list[Any]:
+        answers = item.answer_key.get("answers")
+        if answers is not None:
+            if type(answers) is not list or not answers:
+                raise DomainError(
+                    code="ANSWER_FORMAT_INVALID",
+                    module="m8",
+                    message="objective answer key is missing",
+                    details={"item_id": item.item_id},
+                )
+            return list(answers)
+        if "answer" not in item.answer_key:
+            raise DomainError(
+                code="ANSWER_FORMAT_INVALID",
+                module="m8",
+                message="objective answer key is missing",
+                details={"item_id": item.item_id},
+            )
+        return [item.answer_key["answer"]]
+
+    @staticmethod
     def normalize(value: Any) -> str:
         if isinstance(value, str):
-            return " ".join(value.split()).casefold()
+            return value.strip()
         if type(value) is bool:
             return "true" if value else "false"
         if type(value) is int:
@@ -101,7 +119,7 @@ class RuleScorer:
     @staticmethod
     def display(value: Any) -> str:
         if isinstance(value, str):
-            return " ".join(value.split())
+            return value.strip()
         if type(value) is bool:
             return "true" if value else "false"
         if type(value) in {int, float}:

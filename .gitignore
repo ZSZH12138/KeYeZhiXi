@@ -1,4 +1,5 @@
 .env
+config/app.json
 .conda/
 runtime/
 *.db
@@ -11,6 +12,7 @@ __pycache__/
 .mypy_cache/
 .pytest_cache/
 .coverage
+coverage.xml
 htmlcov/
 .ruff_cache/
 .cache/

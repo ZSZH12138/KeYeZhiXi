@@ -5,7 +5,7 @@
   <p>总分：{{ paper.total_score }}</p>
   {% for section in paper.sections %}
     <section class="card">
-      <h2>{{ section.name }}（{{ section.score }} 分）</h2>
+      <h2>{{ section.name }}{% if section.purpose %}（{{ section.purpose }}）{% endif %}（{{ section.score }} 分）</h2>
       <ol>
         {% for item in section.items %}
           <li>{{ item.stem }}（{{ item.max_score }} 分）</li>

@@ -317,6 +317,19 @@ class M5StateService:
         snapshot = getter(course_id, class_id, learner_id)
         return None if snapshot is None else snapshot.model_copy(deep=True)
 
+    def list_latest_learner_states(
+        self,
+        course_id: str,
+        class_id: str,
+    ) -> list[LearnerStateSnapshot]:
+        lister = getattr(self._repository, "list_latest_learner_states", None)
+        if not callable(lister):
+            return []
+        return [
+            snapshot.model_copy(deep=True)
+            for snapshot in lister(course_id, class_id)
+        ]
+
     def get_latest_class_state(
         self,
         course_id: str,

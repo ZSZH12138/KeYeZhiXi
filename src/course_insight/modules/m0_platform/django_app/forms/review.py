@@ -260,3 +260,40 @@ class TeacherReviewForm(forms.Form):
 
 def _identifier_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
+
+
+class SuggestionDecisionForm(forms.Form):
+    """Validate a teacher decision on one candidate teaching suggestion."""
+
+    suggestion_id = forms.CharField(
+        min_length=1,
+        max_length=128,
+        strip=True,
+        widget=forms.HiddenInput,
+    )
+    decision = forms.ChoiceField(
+        choices=(
+            ("confirmed", "确认"),
+            ("modified", "改写"),
+            ("ignored", "忽略"),
+        )
+    )
+    content = forms.CharField(
+        required=False,
+        max_length=2_000,
+        strip=True,
+        widget=forms.Textarea,
+    )
+    flow_token = forms.CharField(
+        min_length=1,
+        max_length=2_048,
+        strip=True,
+        widget=forms.HiddenInput,
+    )
+
+    def clean(self) -> dict[str, object]:
+        cleaned = super().clean()
+        if cleaned.get("decision") == "modified" and not cleaned.get("content"):
+            self.add_error("content", "改写建议时需要填写新的表述。")
+        return cleaned
+

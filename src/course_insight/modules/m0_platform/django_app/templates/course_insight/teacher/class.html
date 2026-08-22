@@ -3,8 +3,115 @@
 {% block content %}
   <h1>班级入口</h1>
   <p>课程：{{ course_id }}；班级：{{ class_id }}</p>
-  <form method="get" action="{% url 'teacher-review-lookup' %}">
-    {{ lookup_form.as_p }}
-    <button type="submit">查看试卷分析</button>
-  </form>
+  <nav class="card">
+    <p>五个查看入口：
+      <a href="#class-map">班级知识地图</a> ·
+      <a href="#misconceptions">误区</a> ·
+      <a href="#individuals">学生个体</a> ·
+      <a href="#reviews">复核</a> ·
+      <a href="#suggestions">教学建议</a>
+    </p>
+    <p><a href="{{ objective_answers_url }}">编辑客观题标准答案</a> · <a href="{{ blueprint_url }}">配置四段诊断卷</a></p>
+  </nav>
+  {% if preview %}
+  <section class="card">
+    <h2>生成卷预览</h2>
+    <p class="muted">按当前蓝图生成一份示例卷，便于核对应四段用途和参数题干。不会发给学生。</p>
+    {% for section in preview.sections %}
+      <h3>{{ section.name }}{% if section.purpose %}（{{ section.purpose }}）{% endif %}</h3>
+      <ol>
+        {% for item in section.items %}
+          <li>{{ item.stem }}</li>
+        {% endfor %}
+      </ol>
+    {% empty %}
+      <p>当前蓝图没有可预览题目。</p>
+    {% endfor %}
+  </section>
+  {% else %}
+  <p class="muted">还没有可预览的已审核蓝图，或题目组合不满足蓝图约束。</p>
+  {% endif %}
+  {% if analytics %}
+  <section class="card" id="class-map">
+    <h2>班级知识地图</h2>
+    <p>证据覆盖率：{{ analytics.coverage_rate }}；状态：{{ analytics.evidence_status }}</p>
+    {% if analytics.correction_completion_rate != None %}
+      <p>订正完成率：{{ analytics.correction_completion_rate }}{% if analytics.post_hint_correction_rate != None %}；提示后改正率：{{ analytics.post_hint_correction_rate }}{% endif %}</p>
+    {% endif %}
+    {% if analytics.chapters %}
+    <h3>按章节</h3>
+    <ul>
+      {% for chapter in analytics.chapters %}
+        <li>{{ chapter.chapter_id }}：均掌握 {{ chapter.mean_mastery }}（{{ chapter.concept_ids|join:"、" }}）</li>
+      {% endfor %}
+    </ul>
+    {% endif %}
+    <ul>
+      {% for item in analytics.concept_summaries %}
+        <li>{{ item.concept_id }}：均掌握 {{ item.mean_mastery }}，优先补学占比 {{ item.priority_support }}{% if item.trend_delta != None %}，趋势 {{ item.trend_delta }}{% endif %}</li>
+      {% empty %}
+        <li>证据不足，暂不给出班级知识点结论。</li>
+      {% endfor %}
+    </ul>
+  </section>
+  <section class="card" id="misconceptions">
+    <h2>误区</h2>
+    <ul>
+      {% for item in analytics.misconception_summaries %}
+        <li>{{ item.misconception_id }}：涉及 {{ item.affected_count }} 人，评估占比 {{ item.affected_rate }}</li>
+      {% empty %}
+        <li>证据不足，暂无高频误区。</li>
+      {% endfor %}
+    </ul>
+  </section>
+  <section class="card" id="individuals">
+    <h2>学生个体</h2>
+    {% for report in analytics.individual_reports %}
+      <details>
+        <summary>{{ report.learner_id }}：掌握度 {{ report.overall_mastery }}，最近得分 {{ report.recent_score }}，待复核 {{ report.review_required_count }}</summary>
+        <p>{% if report.hint_dependency != None %}提示依赖 {{ report.hint_dependency }}；{% endif %}{% if report.recent_correction_rate != None %}订正率 {{ report.recent_correction_rate }}{% endif %}</p>
+        <p><a href="{% url 'teacher-learner' course_id=course_id class_id=class_id learner_id=report.learner_id %}">查看该生掌握、错因与订正</a></p>
+        {% if report.weak_concept_ids %}<p>薄弱：{{ report.weak_concept_ids|join:"、" }}</p>{% endif %}
+        {% if report.active_misconception_ids %}<p>误区：{{ report.active_misconception_ids|join:"、" }}</p>{% endif %}
+      </details>
+    {% empty %}<p>暂无个体报告。</p>{% endfor %}
+  </section>
+  {% endif %}
+  <section class="card" id="reviews">
+    <h2>复核</h2>
+    <p class="muted">输入试卷号打开该份答卷的复核队列。班级分析本身不依赖试卷号。</p>
+    <form method="get" action="{% url 'teacher-review-lookup' %}">
+      {{ lookup_form.as_p }}
+      <button type="submit">查看试卷复核</button>
+    </form>
+  </section>
+  {% if analytics %}
+  <section class="card" id="suggestions">
+    <h2>教学建议</h2>
+    <p class="muted">确认只表示采纳这条候选，不等于已经上过那堂课。忽略也是一种教学决定，依据会保留。</p>
+    {% for suggestion in analytics.suggestions %}
+      <article>
+        <p>{{ suggestion.content }}（状态 {{ suggestion.status }}；覆盖率 {{ suggestion.coverage_rate }}，置信度 {{ suggestion.confidence }}；证据 {{ suggestion.evidence_ids|join:", " }}）</p>
+        {% if suggestion_flow %}
+        {% if suggestion.status == "candidate" or suggestion.status == "observe" %}
+        <form method="post" action="{{ suggestion_url }}">
+          {% csrf_token %}
+          <input type="hidden" name="flow_token" value="{{ suggestion_flow }}">
+          <input type="hidden" name="suggestion_id" value="{{ suggestion.suggestion_id }}">
+          <label>处理
+            <select name="decision">
+              <option value="confirmed">确认</option>
+              <option value="modified">改写</option>
+              <option value="ignored">忽略</option>
+            </select>
+          </label>
+          <label>改写表述<textarea name="content" rows="2"></textarea></label>
+          <button type="submit">保存决定</button>
+        </form>
+        {% endif %}
+        {% endif %}
+      </article>
+    {% empty %}<p>暂无建议。</p>{% endfor %}
+  </section>
+  {% endif %}
 {% endblock %}

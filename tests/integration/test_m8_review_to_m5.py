@@ -101,6 +101,72 @@ def _decision(
     )
 
 
+def test_teacher_can_override_objective_rule_score_from_wrong_to_right(
+    tmp_path: Path,
+) -> None:
+    repository = SQLiteM8Repository(tmp_path / "objective-override.sqlite3")
+    repository.initialize()
+    paper = make_paper(subjective=False)
+    record = FrozenAssessmentRecord(
+        paper=paper,
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[],
+    )
+    repository.insert_or_get_paper_record(record)
+    wrong = make_scoring_bundle(paper, score=0.0)
+    zero = wrong.score_audit_records[0]
+    wrong = wrong.model_copy(
+        update={
+            "score_audit_records": [
+                zero.model_copy(
+                    update={
+                        "criterion_scores": [
+                            zero.criterion_scores[0].model_copy(
+                                update={"student_evidence": "Ipv6"}
+                            )
+                        ]
+                    }
+                )
+            ]
+        }
+    )
+    original = repository.insert_or_get_scoring_result(wrong)
+    service = M8AssessmentService(
+        repository=repository,
+        rule_scorer=object(),
+        parameter_item_generator=object(),
+    )
+    audit = original.score_audit_records[0]
+    decision = TeacherReviewDecision(
+        decision_id="review_mark_correct",
+        audit_id=audit.audit_id,
+        expected_audit_version=audit.audit_version,
+        expected_audit_checksum=audit.content_checksum(),
+        decision="override",
+        final_total_score=audit.max_score,
+        criterion_overrides=[
+            CriterionOverride(
+                criterion_id=audit.criterion_scores[0].criterion_id,
+                previous_score=0.0,
+                new_score=audit.max_score,
+                reason="Teacher marked the objective answer correct.",
+            )
+        ],
+        teacher_comment="Machine missed an accepted spelling the teacher listed later.",
+        reviewer_id="teacher_1",
+        reviewed_at=UTC_TIME + timedelta(minutes=10),
+    )
+
+    reviewed = service.apply_teacher_review(original, decision)
+    latest = reviewed.get_audit_record(audit.audit_id)
+
+    assert original.score_audit_records[0].total_score == 0.0
+    assert latest.total_score == audit.max_score
+    assert latest.scoring_method == "teacher_override"
+    assert latest.review_status == "approved"
+
+
 def test_teacher_review_rejects_stale_audit_checksum(tmp_path: Path) -> None:
     """A matching version number is insufficient after evidence changes."""
 

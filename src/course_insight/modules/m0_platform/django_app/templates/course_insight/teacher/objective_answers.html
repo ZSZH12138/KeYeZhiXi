@@ -1,0 +1,23 @@
+{% extends "course_insight/base.html" %}
+{% block title %}客观题标准答案 · 课业智析{% endblock %}
+{% block content %}
+  <h1>客观题标准答案</h1>
+  <p class="muted">课程 {{ course_id }}；班级 {{ class_id }}。每行一条可接受字符串，只去掉首尾空白，大小写和内部空格保持原样。不会改已审核知识包。</p>
+  {% if not items %}
+    <p>当前课包没有客观题。</p>
+  {% else %}
+  <form method="post">
+    {% csrf_token %}
+    {% for item in items %}
+      <section class="card">
+        <h2>{{ item.item_id }}</h2>
+        <p>{{ item.stem }}</p>
+        <label>可接受答案（每行一条）
+          <textarea name="{{ item.field_name }}" rows="4">{{ item.answers_text }}</textarea>
+        </label>
+      </section>
+    {% endfor %}
+    <button type="submit">保存答案</button>
+  </form>
+  {% endif %}
+{% endblock %}

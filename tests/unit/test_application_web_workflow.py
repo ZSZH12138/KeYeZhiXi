@@ -2026,7 +2026,12 @@ def test_submit_supports_multiple_subjective_tasks_in_stable_order(
 
     coordinator.submit_assessment(**arguments)
 
-    assert store.scored_task_ids == ["rubric_task_1", "rubric_task_2"]
+    assert store.scored_task_ids == [
+        "rubric_task_1",
+        "rubric_task_1",
+        "rubric_task_2",
+        "rubric_task_2",
+    ]
     assert [
         query_id
         for use_case, query_id in store.retrieved_queries

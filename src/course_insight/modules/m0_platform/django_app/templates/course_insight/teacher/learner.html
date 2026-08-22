@@ -1,0 +1,35 @@
+{% extends "course_insight/base.html" %}
+{% block title %}学生掌握与订正 · 课业智析{% endblock %}
+{% block content %}
+  <h1>学生 {{ review.learner_id }}</h1>
+  <p class="muted">课程 {{ course_id }}；班级 {{ class_id }}。这里只看该生已确认测评后的掌握、错因和本题订正状态。</p>
+  <section class="card">
+    <h2>掌握画像</h2>
+    {% if not review.profile.ready %}
+      <p class="muted">{{ review.profile.message }}</p>
+    {% else %}
+      <p class="muted">{{ review.profile.message }}</p>
+      <h3>已掌握</h3>
+      <ul>{% for item in review.profile.mastered %}<li>{{ item.name }}</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
+      <h3>正在巩固</h3>
+      <ul>{% for item in review.profile.consolidating %}<li>{{ item.name }}</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
+      <h3>优先补学</h3>
+      <ul>{% for item in review.profile.priority_support %}<li>{{ item.name }}{% if item.misconceptions %}；误区：{{ item.misconceptions|join:"、" }}{% endif %}</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
+    {% endif %}
+  </section>
+  <section class="card">
+    <h2>错因与订正</h2>
+    <ul>
+      {% for item in review.lost_items %}
+        <li>
+          <p>{{ item.stem }}</p>
+          <p class="muted">错因：{{ item.cause }}</p>
+          <p>订正：{{ item.status }}</p>
+        </li>
+      {% empty %}
+        <li>还没有该生的失分订正记录。学生打开测后订正后会出现在这里。</li>
+      {% endfor %}
+    </ul>
+  </section>
+  <p><a href="{% url 'teacher-class' course_id=course_id class_id=class_id %}">返回班级入口</a></p>
+{% endblock %}

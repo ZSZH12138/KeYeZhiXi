@@ -23,6 +23,15 @@
       <li>暂无可显示证据。</li>
     {% endfor %}
   </ul>
+  <h2>订正说明</h2>
+  <p>{{ feedback.correction_note }}</p>
+  {% if feedback.item_notes %}
+  <ul>
+    {% for note in feedback.item_notes %}
+      <li>{{ note.item_instance_id }}：{{ note.status }}</li>
+    {% endfor %}
+  </ul>
+  {% endif %}
   <h2>后续练习</h2>
   <ul>
     {% for item_id in feedback.next_practice_item_ids %}<li>{{ item_id }}</li>{% empty %}<li>暂无</li>{% endfor %}

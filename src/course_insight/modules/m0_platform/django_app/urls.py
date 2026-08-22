@@ -56,6 +56,22 @@ urlpatterns = [
     path(
         (
             "student/courses/<str:course_id>/classes/<str:class_id>/"
+            "results/<str:paper_id>/correction/"
+        ),
+        student.correction,
+        name="student-correction",
+    ),
+    path(
+        (
+            "student/courses/<str:course_id>/classes/<str:class_id>/"
+            "results/<str:paper_id>/correction/follow-up/"
+        ),
+        student.follow_up,
+        name="student-follow-up",
+    ),
+    path(
+        (
+            "student/courses/<str:course_id>/classes/<str:class_id>/"
             "feedback/<str:paper_id>/"
         ),
         student.feedback,
@@ -68,6 +84,7 @@ urlpatterns = [
         name="teacher-deepseek-settings",
     ),
     path("teacher/reviews/", teacher.lookup, name="teacher-review-lookup"),
+    path("teacher/classes/", teacher.class_lookup, name="teacher-class-lookup"),
     path(
         "teacher/knowledge-reviews/",
         teacher.knowledge_lookup,
@@ -81,10 +98,50 @@ urlpatterns = [
     path(
         (
             "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "suggestions/"
+        ),
+        teacher.decide_class_suggestion,
+        name="teacher-class-suggestion",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "objective-answers/"
+        ),
+        teacher.objective_answers,
+        name="teacher-objective-answers",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "blueprint/"
+        ),
+        teacher.blueprint,
+        name="teacher-blueprint",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "learners/<str:learner_id>/"
+        ),
+        teacher.learner,
+        name="teacher-learner",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
             "reviews/<str:paper_id>/"
         ),
         teacher.review_context,
         name="teacher-review-context",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "reviews/<str:paper_id>/suggestions/"
+        ),
+        teacher.decide_suggestion,
+        name="teacher-suggestion",
     ),
     path(
         (

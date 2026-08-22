@@ -337,6 +337,24 @@ class FakeCoordinator:
         self.review_submission = submission.model_copy(deep=True)
         return {}
 
+    def apply_suggestion_decision(self, **kwargs):
+        suggestion_id = str(kwargs["suggestion_id"])
+        decision = str(kwargs["decision"])
+        content = kwargs.get("content")
+        updated = []
+        for item in self.analytics.teaching_suggestions:
+            if item.suggestion_id != suggestion_id:
+                updated.append(item)
+                continue
+            payload = {"status": decision}
+            if content:
+                payload["content"] = content
+            updated.append(item.model_copy(update=payload))
+        self.analytics = self.analytics.model_copy(
+            update={"teaching_suggestions": updated}
+        )
+        return self.analytics.model_copy(deep=True)
+
 
 class FakeWebRuntime:
     def __init__(
@@ -346,6 +364,7 @@ class FakeWebRuntime:
         runtime_dir: Path,
     ) -> None:
         course = SimpleNamespace(
+            course_id="course_1",
             course_context=SimpleNamespace(
                 knowledge_bundle=knowledge_bundle(),
                 evidence_index_ref=evidence_index(),

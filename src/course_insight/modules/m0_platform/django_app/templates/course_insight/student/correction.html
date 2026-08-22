@@ -1,0 +1,34 @@
+{% extends "course_insight/base.html" %}
+{% block title %}测后订正 · 课业智析{% endblock %}
+{% block content %}
+  <h1>测后订正</h1>
+  {% if not guide.available %}
+    <p class="muted">当前没有需要订正的失分题，或成绩仍在复核中。</p>
+  {% else %}
+    {% for item in guide.lost_items %}
+    <section class="card">
+      <h2>失分题</h2>
+      <p>{{ item.stem }}</p>
+      <h3>1. 错因</h3>
+      <p class="muted">{{ item.cause }}</p>
+      <h3>2. 最小提示</h3>
+      <p>{{ guide.hint }}</p>
+      {% if not guide.hint_revealed %}
+        <p><a href="{{ hint_url }}">展开一层提示</a></p>
+      {% endif %}
+      <h3>3. 本题跟练</h3>
+      <p>只练这一道失分点的同构题。跟练做对后，本题才会记成已经订正。</p>
+      <form method="post" action="{{ follow_up_url }}">
+        {% csrf_token %}
+        <input type="hidden" name="flow_token" value="{{ flow }}">
+        <input type="hidden" name="item_instance_id" value="{{ item.item_instance_id }}">
+        <button type="submit">开始本题跟练</button>
+      </form>
+    </section>
+    {% endfor %}
+    <section class="card">
+      <h2>4. 小结</h2>
+      <p>{{ guide.summary }}</p>
+    </section>
+  {% endif %}
+{% endblock %}

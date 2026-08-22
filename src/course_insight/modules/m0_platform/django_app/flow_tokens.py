@@ -21,6 +21,7 @@ FlowPurpose = Literal[
     "student_feedback",
     "teacher_review",
     "teacher_rescore",
+    "teacher_suggestion",
 ]
 _PURPOSES = frozenset(
     {
@@ -30,6 +31,7 @@ _PURPOSES = frozenset(
         "student_feedback",
         "teacher_review",
         "teacher_rescore",
+        "teacher_suggestion",
     }
 )
 _IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$")

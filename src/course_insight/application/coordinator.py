@@ -5,6 +5,7 @@ from __future__ import annotations
 from datetime import datetime
 from pathlib import Path
 
+from course_insight.contracts.analytics import TeacherAnalyticsBundle
 from course_insight.contracts.assessment import ScoringResultBundle
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.errors import DomainError
@@ -167,6 +168,23 @@ class AppCoordinator:
             paper_id=paper_id,
             course_id=course_id,
             class_id=class_id,
+        )
+
+    def apply_suggestion_decision(
+        self,
+        *,
+        report_id: str,
+        suggestion_id: str,
+        decision: str,
+        content: str | None = None,
+    ) -> TeacherAnalyticsBundle:
+        """Record a teacher decision without auto-scheduling instruction."""
+
+        return self._m9.apply_suggestion_decision(
+            report_id=report_id,
+            suggestion_id=suggestion_id,
+            decision=decision,
+            content=content,
         )
 
     def review_assessment(
@@ -449,9 +467,19 @@ class AppCoordinator:
             request_id=f"assessment:{scoring_query.query_id}:grading",
             policy=self._retrieval_policy,
         )
-        rubric_result = self._m7.score_subjective_answer(
+        first_result = self._m7.score_subjective_answer(
             rubric_scoring_task=scoring_task,
             evidence_bundle=scoring_evidence,
+        )
+        second_result = self._m7.score_subjective_answer(
+            rubric_scoring_task=scoring_task,
+            evidence_bundle=scoring_evidence,
+        )
+        merger = getattr(self._m8, "merge_independent_rubric_results", None)
+        rubric_result = (
+            merger(scoring_task, first_result, second_result)
+            if callable(merger)
+            else first_result
         )
         scoring = self._m8.finalize_scoring(
             scoring_preparation_result=preparation,

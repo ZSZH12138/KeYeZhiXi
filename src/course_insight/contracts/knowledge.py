@@ -27,6 +27,9 @@ _OBJECTIVE_ITEM_TYPES = frozenset(
         "术语填空题",
     }
 )
+_SECTION_PURPOSES = frozenset(
+    {"anchor", "uncertainty", "misconception", "remediation"}
+)
 
 
 def _normalized_text(value: str) -> str:
@@ -397,6 +400,7 @@ class BlueprintSection(ContractModel):
     name: str = Field(min_length=1)
     item_count: int = Field(ge=0)
     score: float = Field(ge=0.0, allow_inf_nan=False)
+    purpose: str | None = Field(default=None, exclude_if=_exclude_none)
     item_types: list[str]
     concept_weights: dict[str, float]
     difficulty_range: tuple[int, int]
@@ -481,6 +485,15 @@ class BlueprintSection(ContractModel):
             )
         _require_unique(self.item_types, entity="blueprint item type")
         _require_unique(self.anchor_item_ids, entity="blueprint anchor item")
+        if self.purpose is not None:
+            normalized_purpose = " ".join(self.purpose.split()).casefold()
+            if normalized_purpose not in _SECTION_PURPOSES:
+                raise DomainError(
+                    code="BLUEPRINT_SECTION_PURPOSE_INVALID",
+                    module="m3",
+                    message="blueprint section purpose is not one of the four diagnostic parts",
+                    details={"section_id": self.section_id, "purpose": self.purpose},
+                )
         if self.anchor_item_versions:
             if set(self.anchor_item_versions) != set(self.anchor_item_ids):
                 raise DomainError(
