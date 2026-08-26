@@ -10,12 +10,14 @@
     {% else %}
       <p class="muted">{{ review.profile.message }}</p>
       <h3>已掌握</h3>
-      <ul>{% for item in review.profile.mastered %}<li>{{ item.name }}</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
+      <ul>{% for item in review.profile.mastered %}<li>{{ item.name }}：{{ item.mastery }}（{{ item.correct_count }}/{{ item.attempted_count }}）</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
       <h3>正在巩固</h3>
-      <ul>{% for item in review.profile.consolidating %}<li>{{ item.name }}</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
+      <ul>{% for item in review.profile.consolidating %}<li>{{ item.name }}：{{ item.mastery }}（{{ item.correct_count }}/{{ item.attempted_count }}）</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
       <h3>优先补学</h3>
-      <ul>{% for item in review.profile.priority_support %}<li>{{ item.name }}{% if item.misconceptions %}；误区：{{ item.misconceptions|join:"、" }}{% endif %}</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
+      <ul>{% for item in review.profile.priority_support %}<li>{{ item.name }}：{{ item.mastery }}（{{ item.correct_count }}/{{ item.attempted_count }}）</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
     {% endif %}
+    <h3>尚未作答</h3>
+    <ul>{% for item in review.profile.unseen %}<li>{{ item.name }}（未做过）</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
   </section>
   <section class="card">
     <h2>错因与订正</h2>

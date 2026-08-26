@@ -123,9 +123,14 @@ _CONTAINER: ApplicationContainer | None = None
 _WEB_RUNTIME: WebRuntime | None = None
 _LOGGING_RUNTIME: LoggingRuntime | None = None
 _ATEXIT_REGISTERED = False
+OUTBOX_WORKER_LOG_FILENAME = "outbox.log"
+INGESTION_WORKER_LOG_FILENAME = "ingestion.log"
 
 
-def get_application_container() -> ApplicationContainer:
+def get_application_container(
+    *,
+    logging_filename: str | None = None,
+) -> ApplicationContainer:
     """Build, initialize, and cache exactly one owned dependency graph."""
 
     global _CONTAINER, _LOGGING_RUNTIME, _ATEXIT_REGISTERED
@@ -136,11 +141,18 @@ def get_application_container() -> ApplicationContainer:
 
         container = build_application(django_settings.PLATFORM_SETTINGS)
         logging_runtime: LoggingRuntime | None = None
+        logging_settings = django_settings.PLATFORM_SETTINGS.logging
+        if (
+            logging_filename is not None
+            and logging_settings.mode == "rotating_file"
+            and logging_settings.filename != logging_filename
+        ):
+            logging_settings = logging_settings.model_copy(
+                update={"filename": logging_filename}
+            )
         try:
             container.m0_service.initialize()
-            logging_runtime = configure_application_logging(
-                django_settings.PLATFORM_SETTINGS.logging
-            )
+            logging_runtime = configure_application_logging(logging_settings)
         except Exception:
             if logging_runtime is not None:
                 logging_runtime.close()

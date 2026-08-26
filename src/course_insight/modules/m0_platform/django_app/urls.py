@@ -5,7 +5,10 @@ from django.urls import path
 from course_insight.modules.m0_platform.django_app.views import (
     auth,
     health,
+    knowledge,
     student,
+    student_files,
+    student_qa,
     teacher,
 )
 
@@ -16,6 +19,24 @@ urlpatterns = [
     path("accounts/login/", auth.login, name="login"),
     path("accounts/logout/", auth.logout, name="logout"),
     path("student/", student.home, name="student-home"),
+    path(
+        "student/courses/<str:course_id>/classes/<str:class_id>/qa/",
+        student_qa.page,
+        name="student-qa",
+    ),
+    path(
+        "student/courses/<str:course_id>/classes/<str:class_id>/files/",
+        student_files.page,
+        name="student-course-files",
+    ),
+    path(
+        (
+            "student/courses/<str:course_id>/classes/<str:class_id>/"
+            "files/<uuid:source_id>/download/"
+        ),
+        student_files.download,
+        name="student-course-file-download",
+    ),
     path(
         "student/start/",
         student.select_scope,
@@ -78,6 +99,80 @@ urlpatterns = [
         name="student-feedback",
     ),
     path("teacher/", teacher.home, name="teacher-home"),
+    path(
+        "teacher/courses/<str:course_id>/classes/<str:class_id>/knowledge/",
+        knowledge.page,
+        name="teacher-course-knowledge",
+    ),
+    path(
+        "teacher/courses/<str:course_id>/classes/<str:class_id>/knowledge/uploads/",
+        knowledge.upload,
+        name="teacher-knowledge-upload",
+    ),
+    path(
+        "teacher/courses/<str:course_id>/classes/<str:class_id>/knowledge/stage-delete/",
+        knowledge.stage_delete,
+        name="teacher-knowledge-stage-delete",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/knowledge/"
+            "questions/<uuid:source_id>/edit/"
+        ),
+        knowledge.edit_question,
+        name="teacher-knowledge-question-edit",
+    ),
+    path(
+        "teacher/courses/<str:course_id>/classes/<str:class_id>/knowledge/confirm/",
+        knowledge.confirm,
+        name="teacher-knowledge-confirm",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/knowledge/"
+            "jobs/<uuid:job_id>/"
+        ),
+        knowledge.job_status,
+        name="teacher-knowledge-job",
+    ),
+    path(
+        "teacher/courses/<str:course_id>/knowledge/",
+        knowledge.page,
+        name="teacher-course-knowledge",
+    ),
+    path(
+        "teacher/courses/<str:course_id>/knowledge/uploads/",
+        knowledge.upload,
+        name="teacher-knowledge-upload",
+    ),
+    path(
+        "teacher/courses/<str:course_id>/knowledge/stage-delete/",
+        knowledge.stage_delete,
+        name="teacher-knowledge-stage-delete",
+    ),
+    path(
+        "teacher/courses/<str:course_id>/knowledge/questions/<uuid:source_id>/edit/",
+        knowledge.edit_question,
+        name="teacher-knowledge-question-edit",
+    ),
+    path(
+        "teacher/courses/<str:course_id>/knowledge/confirm/",
+        knowledge.confirm,
+        name="teacher-knowledge-confirm",
+    ),
+    path(
+        "teacher/courses/<str:course_id>/knowledge/jobs/<uuid:job_id>/",
+        knowledge.job_status,
+        name="teacher-knowledge-job",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "deepseek/"
+        ),
+        teacher.deepseek_settings,
+        name="teacher-deepseek-settings",
+    ),
     path(
         "teacher/deepseek/",
         teacher.deepseek_settings,

@@ -2,6 +2,9 @@
 config/app.json
 .conda/
 runtime/
+outputs/
+tmp/
+config/correction_records.json
 *.db
 *.sqlite*
 *.log

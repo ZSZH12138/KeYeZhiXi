@@ -1,0 +1,12 @@
+{% extends "course_insight/base.html" %}
+{% block title %}编辑题目文件 · 课业智析{% endblock %}
+{% block content %}
+  <p class="breadcrumb"><a href="{% url 'teacher-course-knowledge' course_id=course_id class_id=class_id %}">课程知识文件</a> / 编辑题目</p>
+  <h1 class="page-title">编辑 {{ source.display_name }}</h1>
+  <p class="muted">保存后会生成新的不可变版本；点击课程页“确认处理”后，系统重新解析全部题目并更新知识点编号。</p>
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">保存新版本</button>
+  </form>
+{% endblock %}

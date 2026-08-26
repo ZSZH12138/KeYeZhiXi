@@ -1,0 +1,18 @@
+{% with course_id=request.resolver_match.kwargs.course_id class_id=request.resolver_match.kwargs.class_id %}
+<p class="breadcrumb">
+  <a href="{% url 'student-home' %}">学生端首页</a>
+  {% if course_id and class_id %}
+    / <a href="{% url 'student-start' course_id=course_id class_id=class_id %}">掌握画像</a>
+    / <a href="{% url 'student-qa' course_id=course_id class_id=class_id %}">课程答疑</a>
+    / <a href="{% url 'student-course-files' course_id=course_id class_id=class_id %}">课程文件</a>
+  {% endif %}
+  {% if current_label %} / {{ current_label }}{% endif %}
+</p>
+{% if current_label != "掌握画像" %}
+{% if course_id and class_id %}
+<p><a href="{% url 'student-start' course_id=course_id class_id=class_id %}">返回掌握画像（首页）</a></p>
+{% else %}
+<p><a href="{% url 'student-home' %}">返回学生端首页</a></p>
+{% endif %}
+{% endif %}
+{% endwith %}

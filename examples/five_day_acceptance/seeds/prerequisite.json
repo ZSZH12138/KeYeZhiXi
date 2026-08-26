@@ -1,0 +1,46 @@
+{
+  "prerequisite_relations": [
+    {
+      "from_concept_id": "concept_network_layers",
+      "relation_type": "prerequisite",
+      "strength": 1.0,
+      "to_concept_id": "concept_ipv4_cidr"
+    },
+    {
+      "from_concept_id": "concept_network_layers",
+      "relation_type": "prerequisite",
+      "strength": 1.0,
+      "to_concept_id": "concept_tcp_reliability"
+    },
+    {
+      "from_concept_id": "concept_network_layers",
+      "relation_type": "prerequisite",
+      "strength": 1.0,
+      "to_concept_id": "concept_udp_datagram"
+    },
+    {
+      "from_concept_id": "concept_ipv4_cidr",
+      "relation_type": "prerequisite",
+      "strength": 1.0,
+      "to_concept_id": "concept_dns_resolution"
+    },
+    {
+      "from_concept_id": "concept_tcp_reliability",
+      "relation_type": "prerequisite",
+      "strength": 1.0,
+      "to_concept_id": "concept_http_semantics"
+    },
+    {
+      "from_concept_id": "concept_udp_datagram",
+      "relation_type": "prerequisite",
+      "strength": 1.0,
+      "to_concept_id": "concept_dns_resolution"
+    },
+    {
+      "from_concept_id": "concept_performance",
+      "relation_type": "prerequisite",
+      "strength": 1.0,
+      "to_concept_id": "concept_http_semantics"
+    }
+  ]
+}

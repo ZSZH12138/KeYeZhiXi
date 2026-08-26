@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
 
 from django.contrib.auth.decorators import login_required
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import HttpRequest, HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.utils import timezone
@@ -27,6 +28,7 @@ from course_insight.infrastructure.deepseek_secrets import (
 from course_insight.infrastructure.log_context import bind_log_context
 from course_insight.modules.m0_platform.django_app import runtime
 from course_insight.modules.m0_platform.django_app.authz import (
+    authorize_course_knowledge,
     authorize_deepseek_config,
     authorize_scope,
 )
@@ -36,22 +38,25 @@ from course_insight.modules.m0_platform.django_app.flow_tokens import (
     stable_flow_identifier,
     verify_flow_token,
 )
-from course_insight.modules.m0_platform.django_app.knowledge_review_flow import (
-    issue_knowledge_review_token,
-    verify_knowledge_review_token,
-)
 from course_insight.modules.m0_platform.django_app.forms.deepseek import (
     DeepSeekSettingsForm,
+)
+from course_insight.modules.m0_platform.django_app.learning_projection import (
+    project_finalized_assessment,
+)
+from course_insight.modules.m0_platform.django_app.models import (
+    CourseClassWorkspace,
+    CourseKnowledgeRelease,
+    LearnerConceptMastery,
+    User,
+)
+from course_insight.modules.m0_platform.django_app.scoped_deepseek import (
+    save_scoped_deepseek_settings,
+    scoped_deepseek_status,
 )
 from course_insight.modules.m0_platform.django_app.forms.review import (
     SuggestionDecisionForm,
     TeacherReviewForm,
-)
-from course_insight.modules.m0_platform.django_app.forms.knowledge_review import (
-    KnowledgeReviewForm,
-)
-from course_insight.modules.m0_platform.django_app.forms.knowledge_lookup import (
-    KnowledgeReviewLookupForm,
 )
 from course_insight.modules.m0_platform.django_app.forms.start import (
     ReviewLookupForm,
@@ -88,8 +93,8 @@ from course_insight.modules.m5_learner_class_state.update_policy import (
 from course_insight.modules.m8_assessment_scoring.paper_generator import (
     PaperGenerator,
 )
-from course_insight.modules.m3_knowledge_bundle.teacher_review import (
-    TeacherReviewRecord,
+from course_insight.modules.m3_knowledge_bundle.release_compatibility import (
+    knowledge_bundle_from_release,
 )
 
 
@@ -100,15 +105,35 @@ def home(request: HttpRequest) -> HttpResponse:
         "m0_platform_web.view_class_analytics"
     ):
         raise PermissionDenied
+    knowledge_scopes = sorted(
+        {
+            (course_id, class_id)
+            for course_id, class_id in request.user.actor_grants.filter(
+                is_active=True,
+                revoked_at__isnull=True,
+                class_id__isnull=False,
+            ).values_list("course_id", "class_id")
+            if course_id and class_id
+        }
+    )
     return render(
         request,
         "course_insight/teacher/home.html",
         {
             "lookup_form": ReviewLookupForm(),
             "class_form": ScopeSelectionForm(),
-            "knowledge_lookup_form": KnowledgeReviewLookupForm(),
             "can_configure_deepseek": request.user.has_perm(
                 "m0_platform_web.configure_deepseek"
+            ),
+            "knowledge_scopes": tuple(
+                {"course_id": course_id, "class_id": class_id}
+                for course_id, class_id in knowledge_scopes
+            ),
+            "knowledge_courses": sorted(
+                {course_id for course_id, _ in knowledge_scopes}
+            ),
+            "can_manage_course_knowledge": request.user.has_perm(
+                "m0_platform_web.manage_course_knowledge"
             ),
         },
     )
@@ -116,28 +141,66 @@ def home(request: HttpRequest) -> HttpResponse:
 
 @login_required
 @require_http_methods(["GET", "POST"])
-def deepseek_settings(request: HttpRequest) -> HttpResponse:
-    authorize_deepseek_config(request.user)
-    web_runtime = runtime.get_web_runtime()
-    runtime_dir = web_runtime.container.settings.runtime_dir
-    status = public_deepseek_status(runtime_dir)
+def deepseek_settings(
+    request: HttpRequest,
+    course_id: str | None = None,
+    class_id: str | None = None,
+) -> HttpResponse:
+    scoped = course_id is not None and class_id is not None
+    if scoped:
+        authorize_scope(
+            request.user,
+            "configure_deepseek",
+            course_id=course_id,
+            class_id=class_id,
+        )
+        status = scoped_deepseek_status(course_id, class_id)
+        runtime_dir = None
+    else:
+        authorize_deepseek_config(request.user)
+        web_runtime = runtime.get_web_runtime()
+        runtime_dir = web_runtime.container.settings.runtime_dir
+        status = public_deepseek_status(runtime_dir)
     if request.method == "POST":
         form = DeepSeekSettingsForm(data=request.POST)
         if form.is_valid():
             api_key = str(form.cleaned_data.get("api_key") or "").strip()
             try:
-                status = save_teacher_deepseek_settings(
-                    runtime_dir,
-                    api_key=api_key or None,
-                    model_name=str(form.cleaned_data["model_name"]),
-                    thinking_enabled=bool(
-                        form.cleaned_data.get("thinking_enabled")
-                    ),
-                    clear_key=bool(form.cleaned_data.get("clear_stored_key")),
-                )
+                if scoped:
+                    status = save_scoped_deepseek_settings(
+                        course_id=course_id,
+                        class_id=class_id,
+                        api_key=api_key or None,
+                        model_name=str(form.cleaned_data["model_name"]),
+                        thinking_enabled=bool(
+                            form.cleaned_data.get("thinking_enabled")
+                        ),
+                        clear_key=bool(
+                            form.cleaned_data.get("clear_stored_key")
+                        ),
+                        updated_by=request.user,
+                    )
+                else:
+                    status = save_teacher_deepseek_settings(
+                        runtime_dir,
+                        api_key=api_key or None,
+                        model_name=str(form.cleaned_data["model_name"]),
+                        thinking_enabled=bool(
+                            form.cleaned_data.get("thinking_enabled")
+                        ),
+                        clear_key=bool(
+                            form.cleaned_data.get("clear_stored_key")
+                        ),
+                    )
             except ValueError:
                 form.add_error("api_key", "密钥格式无效")
             else:
+                if scoped:
+                    return redirect(
+                        "teacher-deepseek-settings",
+                        course_id=course_id,
+                        class_id=class_id,
+                    )
                 runtime.close_application_container()
                 return redirect("teacher-deepseek-settings")
     else:
@@ -150,7 +213,13 @@ def deepseek_settings(request: HttpRequest) -> HttpResponse:
     return render(
         request,
         "course_insight/teacher/deepseek.html",
-        {"form": form, "status": status},
+        {
+            "form": form,
+            "status": status,
+            "course_id": course_id,
+            "class_id": class_id,
+            "scoped": scoped,
+        },
     )
 
 
@@ -162,7 +231,7 @@ def lookup(request: HttpRequest) -> HttpResponse:
         return render(
             request,
             "course_insight/teacher/home.html",
-            {"lookup_form": form, "class_form": ScopeSelectionForm(), "knowledge_lookup_form": KnowledgeReviewLookupForm()},
+            {"lookup_form": form, "class_form": ScopeSelectionForm()},
             status=400,
         )
     course_id = str(form.cleaned_data["course_id"])
@@ -193,7 +262,6 @@ def class_lookup(request: HttpRequest) -> HttpResponse:
             {
                 "lookup_form": ReviewLookupForm(),
                 "class_form": form,
-                "knowledge_lookup_form": KnowledgeReviewLookupForm(),
             },
             status=400,
         )
@@ -436,6 +504,13 @@ def review(
     )
     paper = _contract(response, "assessment_paper", AssessmentPaper)
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
+    task_value = response.get("task_plan")
+    assessment_bundle = _assessment_bundle(
+        course,
+        task_value,
+        course_id=course_id,
+        class_id=class_id,
+    )
     analytics = (
         None
         if "analytics" not in response
@@ -445,7 +520,7 @@ def review(
     caps = criterion_caps(
         paper=paper,
         audit=audit,
-        knowledge_bundle=_knowledge_bundle(course),
+        knowledge_bundle=assessment_bundle,
     )
     if request.method == "GET":
         flow = issue_flow_token(
@@ -509,7 +584,7 @@ def review(
             paper_id=paper_id,
             review_submission=submission,
             request_id=stable_flow_identifier("request", flow),
-            knowledge_bundle=_knowledge_bundle(course),
+            knowledge_bundle=assessment_bundle,
             state_policy_path=course.state_policy_path,
             teacher_threshold_policy_path=(
                 course.teacher_threshold_policy_path
@@ -517,6 +592,29 @@ def review(
             course_id=course_id,
             class_id=class_id,
             index_ref=course.course_context.evidence_index_ref,
+        )
+    refreshed = _teacher_context(
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
+    )
+    refreshed_task = refreshed.get("task_plan")
+    refreshed_paper = refreshed.get("assessment_paper")
+    refreshed_scoring = refreshed.get("scoring_result")
+    learner = User.objects.filter(actor_id=paper.learner_id).first()
+    if (
+        learner is not None
+        and type(refreshed_task) is TaskPlan
+        and type(refreshed_paper) is AssessmentPaper
+        and type(refreshed_scoring) is ScoringResultBundle
+    ):
+        project_finalized_assessment(
+            course_id=course_id,
+            class_id=class_id,
+            learner=learner,
+            task=refreshed_task,
+            paper=refreshed_paper,
+            scoring=refreshed_scoring,
         )
     return redirect(
         "teacher-review-context",
@@ -529,32 +627,11 @@ def review(
 @login_required
 @require_GET
 def knowledge_lookup(request: HttpRequest) -> HttpResponse:
-    form = KnowledgeReviewLookupForm(data=request.GET)
-    if not form.is_valid():
-        return render(
-            request,
-            "course_insight/teacher/home.html",
-            {
-                "lookup_form": ReviewLookupForm(),
-                "class_form": ScopeSelectionForm(),
-                "knowledge_lookup_form": form,
-            },
-            status=400,
-        )
-    course_id = str(form.cleaned_data["course_id"])
-    class_id = str(form.cleaned_data["class_id"])
-    _authorize_teacher(
-        request,
-        "view_class_analytics",
-        course_id=course_id,
-        class_id=class_id,
-    )
-    return redirect(
-        "teacher-knowledge-review",
-        course_id=course_id,
-        class_id=class_id,
-        review_id=str(form.cleaned_data["review_id"]),
-    )
+    course_id = request.GET.get("course_id", "")
+    if not course_id:
+        return HttpResponse("旧知识包审核入口已停用，请从课程知识文件进入。", status=410)
+    authorize_course_knowledge(request.user, course_id)
+    return redirect("teacher-course-knowledge", course_id=course_id)
 
 
 @login_required
@@ -565,95 +642,9 @@ def knowledge_review(
     class_id: str,
     review_id: str,
 ) -> HttpResponse:
-    """Review M3 knowledge-package governance state through a signed flow."""
-
-    _authorize_teacher(
-        request,
-        "view_class_analytics",
-        course_id=course_id,
-        class_id=class_id,
-    )
-    _authorize_teacher(
-        request,
-        "review_score",
-        course_id=course_id,
-        class_id=class_id,
-    )
-    web_runtime = runtime.get_web_runtime()
-    course = web_runtime.require_course(course_id)
-    review_record = _knowledge_review_record(web_runtime, review_id)
-    package = getattr(course.course_context, "course_package", None)
-    package_id = getattr(package, "course_package_id", None)
-    if not isinstance(package_id, str) or review_record.subject_id != package_id:
-        raise DomainError(
-            code="M3_REVIEW_NOT_FOUND",
-            module="m3",
-            message="knowledge review does not belong to this course",
-            recoverable=True,
-        )
-    if request.method == "GET":
-        flow = issue_knowledge_review_token(
-            actor_id=request.user.actor_id,
-            course_id=course_id,
-            class_id=class_id,
-            review_id=review_id,
-            review_version=review_record.version,
-        )
-        return _render_knowledge_review(
-            request,
-            review=review_record,
-            flow=flow,
-            form=KnowledgeReviewForm(
-                initial={"action": _default_knowledge_action(review_record.state)},
-                allowed_actions=_knowledge_actions(review_record.state),
-            ),
-        )
-
-    flow = _single_flow_value(request.POST)
-    verify_knowledge_review_token(
-        flow,
-        actor_id=request.user.actor_id,
-        course_id=course_id,
-        class_id=class_id,
-        review_id=review_id,
-        review_version=review_record.version,
-        max_age_seconds=web_runtime.container.settings.web.session_timeout_seconds,
-    )
-    form = KnowledgeReviewForm(
-        data=_without_flow(request.POST),
-        allowed_actions=_knowledge_actions(review_record.state),
-    )
-    if not form.is_valid():
-        return _render_knowledge_review(
-            request,
-            review=review_record,
-            flow=flow,
-            form=form,
-            status=400,
-        )
-    action = str(form.cleaned_data["action"])
-    reason = str(form.cleaned_data["reason"])
-    method = getattr(web_runtime.container.coordinator, f"{action}_knowledge_review", None)
-    if not callable(method):
-        raise DomainError(
-            code="M3_REVIEW_ACTION_INVALID",
-            module="m3",
-            message="knowledge review action is unavailable",
-            recoverable=True,
-        )
-    method(
-        review_id,
-        request.user.actor_id,
-        reason,
-        review_record.version,
-        timezone.now(),
-    )
-    return redirect(
-        "teacher-knowledge-review",
-        course_id=course_id,
-        class_id=class_id,
-        review_id=review_id,
-    )
+    del class_id, review_id
+    authorize_course_knowledge(request.user, course_id)
+    return redirect("teacher-course-knowledge", course_id=course_id)
 
 
 @login_required
@@ -840,7 +831,16 @@ def learner(
     )
     web_runtime = runtime.get_web_runtime()
     course = web_runtime.require_course(course_id)
-    bundle = _knowledge_bundle(course)
+    workspace = CourseClassWorkspace.objects.select_related("active_release").filter(
+        course_id=course_id,
+        class_id=class_id,
+        active_release__status=CourseKnowledgeRelease.Status.ACTIVE,
+    ).first()
+    bundle = (
+        knowledge_bundle_from_release(workspace.active_release)
+        if workspace is not None and workspace.active_release is not None
+        else _knowledge_bundle(course)
+    )
     snapshot = _latest_snapshot(
         web_runtime,
         course_id=course_id,
@@ -866,6 +866,13 @@ def learner(
         mastered_threshold=mastered,
         consolidating_threshold=consolidating,
         misconception_activation_threshold=misconception,
+        authoritative_mastery=tuple(
+            LearnerConceptMastery.objects.filter(
+                workspace__course_id=course_id,
+                workspace__class_id=class_id,
+                learner__actor_id=learner_id,
+            ).order_by("concept_id")
+        ),
     )
     return render(
         request,
@@ -1010,6 +1017,13 @@ def rescore(
         paper_id=paper_id,
     )
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
+    task_value = response.get("task_plan")
+    assessment_bundle = _assessment_bundle(
+        course,
+        task_value,
+        course_id=course_id,
+        class_id=class_id,
+    )
     rejected = next(
         (audit for audit in _current_audits(scoring) if audit.is_rejected()),
         None,
@@ -1050,7 +1064,7 @@ def rescore(
             rescore_request_id=stable_flow_identifier("rescore", flow),
             request_id=stable_flow_identifier("rescore-request", flow),
             index_ref=course.course_context.evidence_index_ref,
-            knowledge_bundle=_knowledge_bundle(course),
+            knowledge_bundle=assessment_bundle,
             state_policy_path=course.state_policy_path,
             teacher_threshold_policy_path=course.teacher_threshold_policy_path,
         )
@@ -1140,68 +1154,6 @@ def _render_review(
     )
 
 
-def _knowledge_review_record(web_runtime: object, review_id: str) -> TeacherReviewRecord:
-    try:
-        value = web_runtime.container.coordinator.get_knowledge_review(
-            review_id=review_id
-        )
-    except AttributeError as error:
-        raise DomainError(
-            code="M3_REVIEW_NOT_FOUND",
-            module="m3",
-            message="knowledge review is unavailable",
-            recoverable=True,
-        ) from error
-    if type(value) is not TeacherReviewRecord:
-        raise DomainError(
-            code="WEB_RESPONSE_INVALID",
-            module="m0",
-            message="knowledge review response is invalid",
-        )
-    return value
-
-
-def _default_knowledge_action(state: str) -> str:
-    return {
-        "draft": "submit",
-        "submitted": "approve",
-        "approved": "recall",
-        "rejected": "recall",
-        "recalled": "",
-    }.get(state, "")
-
-
-def _knowledge_actions(state: str) -> tuple[str, ...]:
-    return {
-        "draft": ("submit",),
-        "submitted": ("approve", "reject"),
-        "approved": ("recall",),
-        "rejected": ("recall",),
-        "recalled": (),
-    }.get(state, ())
-
-
-def _render_knowledge_review(
-    request: HttpRequest,
-    *,
-    review: TeacherReviewRecord,
-    flow: str,
-    form: KnowledgeReviewForm,
-    status: int = 200,
-) -> HttpResponse:
-    return render(
-        request,
-        "course_insight/teacher/knowledge_review.html",
-        {
-            "review": review,
-            "flow": flow,
-            "form": form,
-            "can_change": bool(_knowledge_actions(review.state)),
-        },
-        status=status,
-    )
-
-
 def _contract(
     values: Mapping[str, object],
     key: str,
@@ -1275,6 +1227,46 @@ def _knowledge_bundle(course):
         course.state_policy_path,
     )
     return bundle_with_blueprint(bundle, course.state_policy_path)
+
+
+def _assessment_bundle(
+    course,
+    task: object,
+    *,
+    course_id: str,
+    class_id: str,
+):
+    """Resolve new assessments from their frozen release; keep old records readable."""
+
+    if type(task) is not TaskPlan:
+        return _knowledge_bundle(course)
+    if task.course_id != course_id or task.class_id != class_id:
+        raise DomainError(
+            code="ASSESSMENT_SCOPE_MISMATCH",
+            module="m0",
+            message="试卷不属于当前课程班级。",
+        )
+    try:
+        release = CourseKnowledgeRelease.objects.filter(
+            pk=task.knowledge_bundle_id,
+            course_id=course_id,
+            class_id=class_id,
+            status__in=(
+                CourseKnowledgeRelease.Status.ACTIVE,
+                CourseKnowledgeRelease.Status.RETIRED,
+            ),
+        ).first()
+    except (ValidationError, ValueError):
+        release = None
+    if release is None:
+        if os.environ.get("COURSE_INSIGHT_ALLOW_LEGACY_TEST_BUNDLE") == "1":
+            return _knowledge_bundle(course)
+        raise DomainError(
+            code="FROZEN_KNOWLEDGE_RELEASE_MISSING",
+            module="m0",
+            message="该试卷绑定的课程版本已不可用。",
+        )
+    return knowledge_bundle_from_release(release)
 
 
 def _latest_snapshot(web_runtime, *, course_id: str, class_id: str, learner_id: str):

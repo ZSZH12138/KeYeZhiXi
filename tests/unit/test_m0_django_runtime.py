@@ -203,3 +203,56 @@ def test_container_is_closed_when_initialize_fails(
 
     assert closed == [True]
     assert runtime._CONTAINER is None
+
+
+def test_container_can_use_a_separate_rotating_log_filename(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from django.conf import settings as django_settings
+
+    from course_insight.infrastructure.config.models import LoggingSettings
+    from course_insight.modules.m0_platform.django_app import runtime
+
+    captured: list[str] = []
+
+    class _ReadyM0:
+        @staticmethod
+        def initialize() -> None:
+            return None
+
+    container = SimpleNamespace(
+        m0_service=_ReadyM0(),
+        close=lambda: None,
+    )
+    monkeypatch.setattr(runtime, "_CONTAINER", None)
+    monkeypatch.setattr(runtime, "_WEB_RUNTIME", None)
+    monkeypatch.setattr(runtime, "_LOGGING_RUNTIME", None)
+    monkeypatch.setattr(
+        django_settings,
+        "PLATFORM_SETTINGS",
+        SimpleNamespace(
+            logging=LoggingSettings(
+                level="INFO",
+                mode="rotating_file",
+                directory=Path("logs"),
+                filename="app.log",
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        runtime,
+        "build_application",
+        lambda settings: container,
+    )
+
+    def _capture_logging(settings: object) -> object:
+        captured.append(getattr(settings, "filename"))
+        return SimpleNamespace(close=lambda: None)
+
+    monkeypatch.setattr(runtime, "configure_application_logging", _capture_logging)
+
+    built = runtime.get_application_container(logging_filename="outbox.log")
+
+    assert built is container
+    assert captured == ["outbox.log"]
+    runtime.close_application_container()

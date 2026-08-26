@@ -39,9 +39,39 @@ def test_plain_text_drops_empty_paragraphs_and_uses_plain_text_media_type() -> N
     ]
 
 
-def test_legacy_powerpoint_is_explicitly_rejected() -> None:
-    with pytest.raises(_ParserError, match="unsupported legacy powerpoint"):
+def test_legacy_powerpoint_requires_a_converter() -> None:
+    with pytest.raises(_ParserError, match="conversion is unavailable"):
         parse_source("lecture.ppt", b"not a modern presentation")
+
+
+def test_legacy_powerpoint_reuses_pptx_parser_and_preserves_source_media_type() -> None:
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide.shapes.add_textbox(Inches(1), Inches(1), Inches(4), Inches(1)).text = (
+        "拥塞控制"
+    )
+    converted = BytesIO()
+    presentation.save(converted)
+
+    class _Converter:
+        def convert(self, payload: bytes) -> bytes:
+            assert payload.startswith(bytes.fromhex("D0CF11E0A1B11AE1"))
+            return converted.getvalue()
+
+    parsed = parse_source(
+        "lecture.ppt",
+        bytes.fromhex("D0CF11E0A1B11AE1") + b"legacy",
+        legacy_powerpoint_converter=_Converter(),
+    )
+
+    assert parsed.media_type == "application/vnd.ms-powerpoint"
+    assert parsed.page_count == 1
+    assert [(block.text, block.locator) for block in parsed.blocks] == [
+        ("拥塞控制", "slide:1;shape:1;paragraph:1"),
+    ]
 
 
 def test_empty_text_source_is_rejected() -> None:

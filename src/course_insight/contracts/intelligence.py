@@ -110,7 +110,14 @@ class LLMGenerationRequest(ContractModel):
     """Hashed, evidence-scoped request for M7 or M9 DeepSeek generation."""
 
     request_id: str = Field(min_length=1)
-    use_case: Literal["rubric_scoring", "student_feedback", "teacher_narrative"]
+    use_case: Literal[
+        "rubric_scoring",
+        "student_feedback",
+        "teacher_narrative",
+        "knowledge_extraction",
+        "question_concept_linking",
+        "student_rag_qa",
+    ]
     model_ref: LLMModelRef
     prompt_template_id: str = Field(min_length=1)
     prompt_template_version: str = Field(min_length=1)

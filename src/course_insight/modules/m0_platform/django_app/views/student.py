@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
+from dataclasses import replace
 
 from django.contrib.auth.decorators import login_required
-from django.core.exceptions import PermissionDenied
+from django.core.exceptions import PermissionDenied, ValidationError
 from django.http import HttpRequest, HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.urls import reverse
@@ -17,6 +19,7 @@ from course_insight.contracts.assessment import (
 )
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.tutoring import StudentFeedbackPackage
+from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m0_platform.blueprint_overlay import (
     bundle_with_blueprint,
 )
@@ -31,6 +34,7 @@ from course_insight.modules.m0_platform.correction_records import (
 )
 from course_insight.modules.m0_platform.follow_up import (
     build_follow_up_bundle,
+    follow_up_source,
     merge_follow_up_items,
 )
 from course_insight.modules.m5_learner_class_state.update_policy import (
@@ -39,6 +43,24 @@ from course_insight.modules.m5_learner_class_state.update_policy import (
 from course_insight.infrastructure.log_context import bind_log_context
 from course_insight.modules.m0_platform.django_app import runtime
 from course_insight.modules.m0_platform.django_app.authz import authorize_scope
+from course_insight.modules.m0_platform.django_app.assessment_feedback import (
+    question_feedback_details,
+)
+from course_insight.modules.m0_platform.django_app.assessment_history import (
+    load_profile_assessment_history,
+)
+from course_insight.modules.m0_platform.django_app.learning_projection import (
+    project_finalized_assessment,
+    selection_context_for_learner,
+)
+from course_insight.modules.m0_platform.django_app.models import (
+    CourseClassWorkspace,
+    CourseKnowledgeRelease,
+    LearnerConceptMastery,
+)
+from course_insight.modules.m0_platform.django_app.qa_handoff import (
+    issue_qa_handoff,
+)
 from course_insight.modules.m0_platform.django_app.flow_tokens import (
     flow_issued_at,
     issue_flow_token,
@@ -55,6 +77,7 @@ from course_insight.modules.m0_platform.django_app.forms.start import (
 from course_insight.modules.m0_platform.django_app.views.viewmodels import (
     blueprint_section_purposes,
     correction_guide_view,
+    count_mastery_profile_view,
     feedback_view,
     item_correction_notes,
     paper_view,
@@ -63,6 +86,9 @@ from course_insight.modules.m0_platform.django_app.views.viewmodels import (
 )
 from course_insight.modules.m0_platform.objective_answers import (
     bundle_with_overlays,
+)
+from course_insight.modules.m3_knowledge_bundle.release_compatibility import (
+    knowledge_bundle_from_release,
 )
 
 
@@ -131,15 +157,13 @@ def start(
         return render(
             request,
             "course_insight/student/start.html",
-            {
-                "form": AssessmentStartForm(initial={"flow_token": token}),
-                "profile": _student_profile(
-                    web_runtime,
-                    course,
-                    class_id=class_id,
-                    learner_id=request.user.actor_id,
-                ),
-            },
+            _start_context(
+                request,
+                web_runtime,
+                course,
+                class_id=class_id,
+                form=AssessmentStartForm(initial={"flow_token": token}),
+            ),
         )
 
     form = AssessmentStartForm(data=request.POST)
@@ -147,15 +171,13 @@ def start(
         return render(
             request,
             "course_insight/student/start.html",
-            {
-                "form": form,
-                "profile": _student_profile(
-                    web_runtime,
-                    course,
-                    class_id=class_id,
-                    learner_id=request.user.actor_id,
-                ),
-            },
+            _start_context(
+                request,
+                web_runtime,
+                course,
+                class_id=class_id,
+                form=form,
+            ),
             status=400,
         )
     token = str(form.cleaned_data["flow_token"])
@@ -166,15 +188,48 @@ def start(
         course_id=course_id,
         class_id=class_id,
     )
-    with bind_log_context(course_id=course_id, class_id=class_id):
-        result = web_runtime.container.coordinator.start_assessment(
-            student_text=str(form.cleaned_data["student_text"]),
-            task_type_hint=str(form.cleaned_data["task_type_hint"]),
-            course_id=course_id,
-            class_id=class_id,
-            learner_id=request.user.actor_id,
-            session_id=stable_flow_identifier("session", token),
-            knowledge_bundle=_knowledge_bundle(course),
+    try:
+        try:
+            bundle = _active_release_bundle(course_id, class_id)
+            selection_context = selection_context_for_learner(
+                course_id=course_id,
+                class_id=class_id,
+                learner=request.user,
+                current_item_ids=tuple(
+                    item.item_id for item in bundle.approved_items()
+                ),
+            )
+        except DomainError:
+            if not _legacy_test_runtime():
+                raise
+            bundle = _knowledge_bundle(course)
+            selection_context = None
+        with bind_log_context(course_id=course_id, class_id=class_id):
+            result = web_runtime.container.coordinator.start_assessment(
+                student_text=_assessment_intent_text(
+                    str(form.cleaned_data["task_type_hint"])
+                ),
+                task_type_hint=str(form.cleaned_data["task_type_hint"]),
+                course_id=course_id,
+                class_id=class_id,
+                learner_id=request.user.actor_id,
+                session_id=stable_flow_identifier("session", token),
+                knowledge_bundle=bundle,
+                selection_context=selection_context,
+            )
+    except DomainError as error:
+        form.add_error(None, error.message)
+        return render(
+            request,
+            "course_insight/student/start.html",
+            _start_context(
+                request,
+                web_runtime,
+                course,
+                class_id=class_id,
+                form=form,
+            ),
+            status=400,
         )
     paper = _contract(result, "assessment_paper", AssessmentPaper)
     flow = issue_flow_token(
@@ -224,6 +279,17 @@ def assessment(
         learner_id=request.user.actor_id,
     )
     paper = _contract(result, "assessment_paper", AssessmentPaper)
+    task_value = result.get("task_plan")
+    bundle = (
+        _bundle_for_task(
+            task_value,
+            course_id=course_id,
+            class_id=class_id,
+            legacy_course=course,
+        )
+        if type(task_value) is TaskPlan
+        else _legacy_test_bundle(course)
+    )
     form = AssessmentSubmissionForm(
         paper=paper,
         learner_id=request.user.actor_id,
@@ -235,7 +301,7 @@ def assessment(
             "paper": paper_view(
                 paper,
                 section_purposes=blueprint_section_purposes(
-                    _knowledge_bundle(course),
+                    bundle,
                     paper.blueprint_id,
                 ),
             ),
@@ -248,6 +314,13 @@ def assessment(
                     "class_id": class_id,
                     "paper_id": paper_id,
                 },
+            ),
+            "source_correction_url": _source_correction_url(
+                request,
+                course,
+                course_id=course_id,
+                class_id=class_id,
+                paper_id=paper_id,
             ),
         },
     )
@@ -293,6 +366,7 @@ def submit(
             )
         raise
     paper = _contract(pending, "assessment_paper", AssessmentPaper)
+    task_value = pending.get("task_plan")
     form = AssessmentSubmissionForm(
         paper=paper,
         learner_id=request.user.actor_id,
@@ -321,16 +395,31 @@ def submit(
         class_id=class_id,
         attempt_id=attempt_id,
     ):
-        web_runtime.container.coordinator.submit_assessment(
+        submitted = web_runtime.container.coordinator.submit_assessment(
             assessment_submission=submission,
             request_id=stable_flow_identifier("request", flow),
             index_ref=course.course_context.evidence_index_ref,
-            knowledge_bundle=_knowledge_bundle(course),
+            knowledge_bundle=(
+                _bundle_for_task(
+                    task_value,
+                    course_id=course_id,
+                    class_id=class_id,
+                    legacy_course=course,
+                )
+                if type(task_value) is TaskPlan
+                else _legacy_test_bundle(course)
+            ),
             state_policy_path=course.state_policy_path,
             teacher_threshold_policy_path=(
                 course.teacher_threshold_policy_path
             ),
         )
+    _project_response_if_final(
+        submitted,
+        request=request,
+        course_id=course_id,
+        class_id=class_id,
+    )
     return _result_redirect(
         request,
         course_id=course_id,
@@ -362,7 +451,8 @@ def result(
         class_id=class_id,
         paper_id=paper_id,
     )
-    response = runtime.get_web_runtime().container.coordinator.get_student_assessment(
+    web_runtime = runtime.get_web_runtime()
+    response = web_runtime.container.coordinator.get_student_assessment(
         paper_id=paper_id,
         learner_id=request.user.actor_id,
     )
@@ -377,11 +467,38 @@ def result(
             },
         )
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
+    task_value = response.get("task_plan")
+    if type(task_value) is TaskPlan:
+        project_finalized_assessment(
+            course_id=course_id,
+            class_id=class_id,
+            learner=request.user,
+            task=task_value,
+            paper=paper,
+            scoring=scoring,
+        )
+    elif not _legacy_test_runtime():
+        raise DomainError(
+            code="WEB_RESPONSE_INVALID",
+            module="m0",
+            message="application response is invalid",
+        )
     feedback = _contract(response, "feedback", StudentFeedbackPackage)
-    web_runtime = runtime.get_web_runtime()
     course = web_runtime.require_course(course_id)
     _record_follow_up_if_needed(course, paper_id, scoring)
     result = student_result_view(paper, scoring, feedback)
+    question_details = (
+        ()
+        if result.score_pending_rescore
+        else _question_details_with_qa(
+            task=task_value,
+            paper=paper,
+            request=request,
+            course_id=course_id,
+            class_id=class_id,
+            paper_id=paper_id,
+        )
+    )
     correction_url = None
     if result.correction_available:
         correction_url = _url_with_flow(
@@ -396,6 +513,11 @@ def result(
         "course_insight/student/result.html",
         {
             "result": result,
+            "question_details": question_details,
+            "qa_url": reverse(
+                "student-qa",
+                kwargs={"course_id": course_id, "class_id": class_id},
+            ),
             "feedback_url": _url_with_flow(
                 "student-feedback",
                 issue_flow_token(
@@ -410,6 +532,13 @@ def result(
                 paper_id=paper_id,
             ),
             "correction_url": correction_url,
+            "source_correction_url": _source_correction_url(
+                request,
+                course,
+                course_id=course_id,
+                class_id=class_id,
+                paper_id=paper_id,
+            ),
         },
     )
 
@@ -458,11 +587,26 @@ def feedback(
         )
     package = _contract(response, "feedback", StudentFeedbackPackage)
     paper = _contract(response, "assessment_paper", AssessmentPaper)
+    task_value = response.get("task_plan")
+    if type(task_value) is not TaskPlan and not _legacy_test_runtime():
+        raise DomainError(
+            code="WEB_RESPONSE_INVALID",
+            module="m0",
+            message="application response is invalid",
+        )
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
     web_runtime = runtime.get_web_runtime()
     course = web_runtime.require_course(course_id)
     records = _load_records(course)
     notes = item_correction_notes(paper, scoring, records)
+    question_details = _question_details_with_qa(
+        task=task_value,
+        paper=paper,
+        request=request,
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
+    )
     return render(
         request,
         "course_insight/student/feedback.html",
@@ -471,7 +615,12 @@ def feedback(
                 package,
                 correction_note=_correction_note(notes),
                 item_notes=notes,
-            )
+            ),
+            "question_details": question_details,
+            "qa_url": reverse(
+                "student-qa",
+                kwargs={"course_id": course_id, "class_id": class_id},
+            ),
         },
     )
 
@@ -541,13 +690,13 @@ def correction(
         paper_id=paper_id,
         item_instance_ids=[item.item_instance_id for item in guide.lost_items],
     )
-    if hint_revealed:
-        guide = correction_guide_view(
-            paper,
-            scoring,
-            bundle,
-            hint_revealed=True,
-        )
+    guide = correction_guide_view(
+        paper,
+        scoring,
+        bundle,
+        hint_revealed=hint_revealed,
+        records=records,
+    )
     hint_url = _url_with_flow(
         "student-correction",
         flow,
@@ -684,7 +833,100 @@ def _correction_note(notes) -> str:
     return "已订正"
 
 
+def _assessment_intent_text(task_type: str) -> str:
+    return {
+        "diagnostic": "请开始诊断测评",
+        "practice": "请开始随心练习",
+        "correction": "请开始订正",
+        "stage_assessment": "请开始阶段评测",
+    }[task_type]
+
+
+def _start_context(request, web_runtime, course, *, class_id: str, form):
+    history = load_profile_assessment_history(
+        course_id=course.course_id,
+        class_id=class_id,
+        learner=request.user,
+        coordinator=web_runtime.container.coordinator,
+    )
+    return {
+        "form": form,
+        "profile": _student_profile(
+            web_runtime,
+            course,
+            class_id=class_id,
+            learner_id=request.user.actor_id,
+        ),
+        "assessment_history": tuple(
+            replace(
+                item,
+                result_url=_url_with_flow(
+                    "student-result",
+                    issue_flow_token(
+                        purpose="student_result",
+                        actor_id=request.user.actor_id,
+                        course_id=course.course_id,
+                        class_id=class_id,
+                        paper_id=item.paper_id,
+                    ),
+                    course_id=course.course_id,
+                    class_id=class_id,
+                    paper_id=item.paper_id,
+                ),
+            )
+            if item.result_available
+            else item
+            for item in history
+        ),
+    }
+
+
+def _question_details_with_qa(
+    *,
+    task: object,
+    paper: AssessmentPaper,
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+    paper_id: str,
+):
+    if type(task) is not TaskPlan:
+        return ()
+    return tuple(
+        replace(
+            detail,
+            qa_token=issue_qa_handoff(
+                course_id=course_id,
+                class_id=class_id,
+                learner_id=request.user.actor_id,
+                paper_id=paper_id,
+                item_instance_id=detail.item_instance_id,
+            ),
+        )
+        for detail in question_feedback_details(task=task, paper=paper)
+    )
+
+
 def _student_profile(web_runtime, course, *, class_id: str, learner_id: str):
+    try:
+        bundle = _active_release_bundle(course.course_id, class_id)
+    except DomainError:
+        if _legacy_test_runtime():
+            bundle = _knowledge_bundle(course)
+        else:
+            return None
+    records = LearnerConceptMastery.objects.filter(
+        workspace__course_id=course.course_id,
+        workspace__class_id=class_id,
+        learner__actor_id=learner_id,
+    ).order_by("concept_id")
+    return count_mastery_profile_view(
+        mastery_records=tuple(records),
+        knowledge_bundle=bundle,
+    )
+
+
+def _legacy_student_profile(web_runtime, course, *, class_id: str, learner_id: str):
     snapshot = _latest_snapshot(
         web_runtime,
         course_id=course.course_id,
@@ -717,13 +959,151 @@ def _student_profile(web_runtime, course, *, class_id: str, learner_id: str):
     )
 
 
-def _knowledge_bundle(course):
+def _course_bundle(course):
     bundle = bundle_with_overlays(
         course.course_context.knowledge_bundle,
         course.state_policy_path,
     )
-    bundle = bundle_with_blueprint(bundle, course.state_policy_path)
-    return merge_follow_up_items(bundle, _load_records(course))
+    return bundle_with_blueprint(bundle, course.state_policy_path)
+
+
+def _knowledge_bundle(course):
+    return merge_follow_up_items(_course_bundle(course), _load_records(course))
+
+
+def _legacy_test_runtime() -> bool:
+    """Keep pre-release Web test doubles isolated from production behavior."""
+
+    return os.environ.get("COURSE_INSIGHT_ALLOW_LEGACY_TEST_BUNDLE") == "1"
+
+
+def _legacy_test_bundle(course):
+    if not _legacy_test_runtime():
+        raise DomainError(
+            code="WEB_RESPONSE_INVALID",
+            module="m0",
+            message="application response is invalid",
+        )
+    return _knowledge_bundle(course)
+
+
+def _active_release_bundle(course_id: str, class_id: str):
+    workspace = CourseClassWorkspace.objects.select_related("active_release").filter(
+        course_id=course_id,
+        class_id=class_id,
+        active_release__course_id=course_id,
+        active_release__class_id=class_id,
+        active_release__status=CourseKnowledgeRelease.Status.ACTIVE,
+    ).first()
+    if workspace is None or workspace.active_release is None:
+        raise DomainError(
+            code="TEACHER_QUESTION_BANK_EMPTY",
+            module="m0",
+            message="教师尚未上传并发布可用题目，试卷生成失败。",
+            recoverable=True,
+        )
+    bundle = knowledge_bundle_from_release(workspace.active_release)
+    if not bundle.approved_items() or not bundle.blueprints:
+        raise DomainError(
+            code="TEACHER_QUESTION_BANK_EMPTY",
+            module="m0",
+            message="教师尚未上传并发布可用题目，试卷生成失败。",
+            recoverable=True,
+        )
+    return bundle
+
+
+def _bundle_for_task(
+    task: TaskPlan,
+    *,
+    course_id: str,
+    class_id: str,
+    legacy_course=None,
+):
+    if task.course_id != course_id or task.class_id != class_id:
+        raise DomainError(
+            code="ASSESSMENT_SCOPE_MISMATCH",
+            module="m0",
+            message="试卷不属于当前课程班级。",
+        )
+    try:
+        release = CourseKnowledgeRelease.objects.filter(
+            pk=task.knowledge_bundle_id,
+            course_id=course_id,
+            class_id=class_id,
+            status__in=(
+                CourseKnowledgeRelease.Status.ACTIVE,
+                CourseKnowledgeRelease.Status.RETIRED,
+            ),
+        ).first()
+    except (ValidationError, ValueError):
+        release = None
+    if release is None:
+        if _legacy_test_runtime() and legacy_course is not None:
+            return _knowledge_bundle(legacy_course)
+        raise DomainError(
+            code="FROZEN_KNOWLEDGE_RELEASE_MISSING",
+            module="m0",
+            message="该试卷绑定的课程版本已不可用。",
+        )
+    return knowledge_bundle_from_release(release)
+
+
+def _project_response_if_final(
+    response: Mapping[str, object],
+    *,
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+) -> None:
+    task = response.get("task_plan")
+    paper = response.get("assessment_paper")
+    scoring = response.get("scoring_result")
+    if not (
+        type(task) is TaskPlan
+        and type(paper) is AssessmentPaper
+        and type(scoring) is ScoringResultBundle
+    ):
+        return
+    project_finalized_assessment(
+        course_id=course_id,
+        class_id=class_id,
+        learner=request.user,
+        task=task,
+        paper=paper,
+        scoring=scoring,
+    )
+
+
+def _source_correction_url(
+    request: HttpRequest,
+    course,
+    *,
+    course_id: str,
+    class_id: str,
+    paper_id: str,
+) -> str | None:
+    link = follow_up_source(_load_records(course), paper_id)
+    if link is None:
+        return None
+    source_paper_id, item_instance_id, _ = link
+    flow = issue_flow_token(
+        purpose="student_result",
+        actor_id=request.user.actor_id,
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=source_paper_id,
+    )
+    return (
+        _url_with_flow(
+            "student-correction",
+            flow,
+            course_id=course_id,
+            class_id=class_id,
+            paper_id=source_paper_id,
+        )
+        + f"#lost-{item_instance_id}"
+    )
 
 
 def _load_records(course):

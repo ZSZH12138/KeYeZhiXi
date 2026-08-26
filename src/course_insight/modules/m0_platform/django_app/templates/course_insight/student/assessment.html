@@ -1,6 +1,7 @@
 {% extends "course_insight/base.html" %}
 {% block title %}当前试卷 · 课业智析{% endblock %}
 {% block content %}
+  {% include "course_insight/student/_nav.html" with current_label="当前试卷" %}
   <h1>当前试卷</h1>
   <p>总分：{{ paper.total_score }}</p>
   {% for section in paper.sections %}
@@ -13,6 +14,9 @@
       </ol>
     </section>
   {% endfor %}
+  {% if source_correction_url %}
+    <p><a href="{{ source_correction_url }}">返回原卷订正页</a></p>
+  {% endif %}
   <form method="post" action="{{ submit_url }}">
     {% csrf_token %}
     <input type="hidden" name="flow_token" value="{{ flow }}">

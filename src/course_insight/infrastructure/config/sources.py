@@ -104,6 +104,7 @@ def safe_defaults() -> dict[str, Any]:
             "session_cookie_httponly": True,
             "session_cookie_samesite": "Lax",
             "max_request_body_bytes": 1024 * 1024,
+            "max_upload_request_body_bytes": 5 * 1024**3 + 16 * 1024**2,
             "login_failure_limit": 5,
             "login_failure_window_seconds": 300,
         },

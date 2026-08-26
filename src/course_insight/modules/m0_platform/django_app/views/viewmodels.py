@@ -109,6 +109,10 @@ class ConceptProfileView:
     misconceptions: tuple[str, ...]
     evidence_count: int
     source_locator: str
+    mastery: float = 0.0
+    attempted_count: int = 0
+    correct_count: int = 0
+    attempt_status: str = "unseen"
 
 
 @dataclass(frozen=True, slots=True)
@@ -121,6 +125,7 @@ class StudentProfileView:
     next_practice_concept_ids: tuple[str, ...]
     next_practice_names: tuple[str, ...]
     progress: tuple[tuple[int, float], ...]
+    unseen: tuple[ConceptProfileView, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,6 +134,8 @@ class LostItemGuideView:
     stem: str
     cause: str
     concept_ids: tuple[str, ...]
+    concept_names: tuple[str, ...]
+    status: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -555,6 +562,8 @@ def student_profile_view(
         "priority_support": [],
     }
     for state in snapshot.concept_states:
+        if state.evidence_count <= 0:
+            continue
         band = state.band(mastered_threshold, consolidating_threshold)
         active = tuple(
             misconception_names.get(item.misconception_id, item.misconception_id)
@@ -588,6 +597,73 @@ def student_profile_view(
     )
 
 
+def count_mastery_profile_view(
+    *,
+    mastery_records: Sequence[object],
+    knowledge_bundle: KnowledgeBundle,
+    mastered_threshold: float = 0.8,
+    consolidating_threshold: float = 0.4,
+) -> StudentProfileView:
+    """Project the authoritative correct/attempted counters for students."""
+
+    by_concept = {
+        str(getattr(record, "concept_id")): record for record in mastery_records
+    }
+    grouped: dict[str, list[ConceptProfileView]] = {
+        "mastered": [],
+        "consolidating": [],
+        "priority_support": [],
+        "unseen": [],
+    }
+    for concept in knowledge_bundle.concepts:
+        record = by_concept.get(concept.concept_id)
+        attempted = int(getattr(record, "attempted_count", 0))
+        correct = int(getattr(record, "correct_count", 0))
+        mastery = float(getattr(record, "mastery", 0.0))
+        if attempted == 0:
+            band = "unseen"
+        elif mastery >= mastered_threshold:
+            band = "mastered"
+        elif mastery >= consolidating_threshold:
+            band = "consolidating"
+        else:
+            band = "priority_support"
+        grouped[band].append(
+            ConceptProfileView(
+                concept_id=concept.concept_id,
+                name=concept.name,
+                band=band,
+                misconceptions=(),
+                evidence_count=attempted,
+                source_locator=concept.chapter_id,
+                mastery=mastery,
+                attempted_count=attempted,
+                correct_count=correct,
+                attempt_status="unseen" if attempted == 0 else "attempted",
+            )
+        )
+    ready = any(
+        int(getattr(record, "attempted_count", 0)) > 0
+        for record in by_concept.values()
+    )
+    priority = tuple(grouped["priority_support"])
+    return StudentProfileView(
+        ready=ready,
+        message=(
+            "掌握度仅由诊断测评和阶段评测更新，最高为 0.9。"
+            if ready
+            else "还没有计入画像的作答；未做过与做过但掌握度为 0 会分别显示。"
+        ),
+        mastered=tuple(grouped["mastered"]),
+        consolidating=tuple(grouped["consolidating"]),
+        priority_support=priority,
+        next_practice_concept_ids=tuple(item.concept_id for item in priority),
+        next_practice_names=tuple(item.name for item in priority),
+        progress=(),
+        unseen=tuple(grouped["unseen"]),
+    )
+
+
 def blueprint_section_purposes(
     knowledge_bundle: KnowledgeBundle,
     blueprint_id: str,
@@ -613,8 +689,18 @@ def correction_guide_view(
     knowledge_bundle: KnowledgeBundle,
     *,
     hint_revealed: bool = False,
+    records: Mapping[str, Any] | None = None,
 ) -> CorrectionGuideView:
-    del knowledge_bundle
+    names = {
+        concept.concept_id: concept.name for concept in knowledge_bundle.concepts
+    }
+    stored: Mapping[str, Any] = {}
+    if isinstance(records, Mapping):
+        payload = records.get(paper.paper_id)
+        if isinstance(payload, Mapping):
+            items = payload.get("items")
+            if isinstance(items, Mapping):
+                stored = items
     hidden = scoring.requires_teacher_review() or scoring.has_rejected_score()
     lost: list[LostItemGuideView] = []
     if not hidden:
@@ -627,12 +713,23 @@ def correction_guide_view(
                 for criterion in audit.criterion_scores
                 if criterion.reason
             ]
+            concept_ids = tuple(instance.concept_ids)
+            item_record = stored.get(instance.item_instance_id)
             lost.append(
                 LostItemGuideView(
                     item_instance_id=instance.item_instance_id,
                     stem=instance.stem,
                     cause="；".join(reasons) if reasons else "本题未得到满分。",
-                    concept_ids=tuple(instance.concept_ids),
+                    concept_ids=concept_ids,
+                    concept_names=tuple(
+                        names.get(concept_id, concept_id)
+                        for concept_id in concept_ids
+                    ),
+                    status=(
+                        correction_status(item_record)
+                        if isinstance(item_record, Mapping)
+                        else "尚未订正"
+                    ),
                 )
             )
     hint = (
@@ -692,6 +789,7 @@ def learner_review_view(
     mastered_threshold: float = 0.8,
     consolidating_threshold: float = 0.4,
     misconception_activation_threshold: float = 0.5,
+    authoritative_mastery: Sequence[object] | None = None,
 ) -> LearnerReviewView:
     del paper, scoring
     lost: list[LearnerLostItemView] = []
@@ -714,14 +812,23 @@ def learner_review_view(
             )
     return LearnerReviewView(
         learner_id=learner_id,
-        profile=student_profile_view(
-            snapshot=snapshot,
-            knowledge_bundle=knowledge_bundle,
-            mastered_threshold=mastered_threshold,
-            consolidating_threshold=consolidating_threshold,
-            misconception_activation_threshold=(
-                misconception_activation_threshold
-            ),
+        profile=(
+            count_mastery_profile_view(
+                mastery_records=authoritative_mastery,
+                knowledge_bundle=knowledge_bundle,
+                mastered_threshold=mastered_threshold,
+                consolidating_threshold=consolidating_threshold,
+            )
+            if authoritative_mastery is not None
+            else student_profile_view(
+                snapshot=snapshot,
+                knowledge_bundle=knowledge_bundle,
+                mastered_threshold=mastered_threshold,
+                consolidating_threshold=consolidating_threshold,
+                misconception_activation_threshold=(
+                    misconception_activation_threshold
+                ),
+            )
         ),
         lost_items=tuple(lost),
     )

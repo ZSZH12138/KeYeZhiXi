@@ -1,0 +1,100 @@
+{
+  "bundle_version": "1.0.0",
+  "concept_evidence_ids": {
+    "concept_dns_resolution": [
+      "evidence_chunk_11645854547ef5ec9487d196f7d292961bd86da6fd9aec720fffa0091191159f"
+    ],
+    "concept_http_semantics": [
+      "evidence_chunk_5c0cda09ba8a062bd011a135ab5e8fa193d34cd7bfbad3fc01f3798e43b5035b"
+    ],
+    "concept_ipv4_cidr": [
+      "evidence_chunk_1785e3acd332f4691a882082d8a0559535af4708062667c53f886e0f98760869"
+    ],
+    "concept_ipv6_text": [
+      "evidence_chunk_43644d46991b2d3e436c2c06eb1b56a1aca60dba6400b3601117399aaee95bf2"
+    ],
+    "concept_network_layers": [
+      "evidence_chunk_6514a2d4c8c6781909e86e110c8c1bc344f758d7f60a615ae65d1de45702c100"
+    ],
+    "concept_performance": [
+      "evidence_chunk_0e675c07e42efdfbf62f65ecce964f03820da5d699dd43adb166120ae4d8bcff"
+    ],
+    "concept_tcp_reliability": [
+      "evidence_chunk_dc52564f5829d05011f4167f0f2749b98500bc8bf53a721ec5c8d5469924726a"
+    ],
+    "concept_udp_datagram": [
+      "evidence_chunk_fed07e7cca4da814eca274690a3670675ff1fdc55159e76572fbde76771ae72c"
+    ]
+  },
+  "concepts": [
+    {
+      "aliases": [],
+      "chapter_id": "chapter_01_layers",
+      "concept_id": "concept_network_layers",
+      "description": "网络分层与封装",
+      "name": "网络分层与封装",
+      "status": "published"
+    },
+    {
+      "aliases": [],
+      "chapter_id": "chapter_02_addressing",
+      "concept_id": "concept_ipv4_cidr",
+      "description": "IPv4 前缀与子网",
+      "name": "IPv4 前缀与子网",
+      "status": "published"
+    },
+    {
+      "aliases": [],
+      "chapter_id": "chapter_02_addressing",
+      "concept_id": "concept_ipv6_text",
+      "description": "IPv6 地址表示",
+      "name": "IPv6 地址表示",
+      "status": "published"
+    },
+    {
+      "aliases": [],
+      "chapter_id": "chapter_03_transport",
+      "concept_id": "concept_tcp_reliability",
+      "description": "TCP 可靠传输",
+      "name": "TCP 可靠传输",
+      "status": "published"
+    },
+    {
+      "aliases": [],
+      "chapter_id": "chapter_03_transport",
+      "concept_id": "concept_udp_datagram",
+      "description": "UDP 数据报",
+      "name": "UDP 数据报",
+      "status": "published"
+    },
+    {
+      "aliases": [],
+      "chapter_id": "chapter_04_performance",
+      "concept_id": "concept_performance",
+      "description": "吞吐量、时延与带宽",
+      "name": "吞吐量、时延与带宽",
+      "status": "published"
+    },
+    {
+      "aliases": [],
+      "chapter_id": "chapter_05_application",
+      "concept_id": "concept_dns_resolution",
+      "description": "DNS 名称解析",
+      "name": "DNS 名称解析",
+      "status": "published"
+    },
+    {
+      "aliases": [],
+      "chapter_id": "chapter_05_application",
+      "concept_id": "concept_http_semantics",
+      "description": "HTTP 请求与响应",
+      "name": "HTTP 请求与响应",
+      "status": "published"
+    }
+  ],
+  "course_id": "course_network",
+  "course_package_checksum": "ec641e94e729e1955a78fd1b648dd286c7ff37cced87369e6ee368a5250af213",
+  "course_package_id": "package_network_acceptance_v1",
+  "knowledge_bundle_id": "bundle_network_acceptance_v1",
+  "published_at": "2026-08-24T08:00:00+00:00"
+}

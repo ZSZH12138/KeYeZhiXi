@@ -256,8 +256,11 @@ def test_readiness_requires_fresh_valid_running_worker_status(
 
     assert client.get(reverse("health-live")).json() == {"status": "live"}
     missing = client.get(reverse("health-ready"))
-    assert missing.status_code == 503
+    assert missing.status_code == 200
+    assert missing.json()["status"] == "degraded"
     assert missing.json()["outbox"] == "unavailable"
+    assert missing.json()["ingestion"] == "unavailable"
+    assert missing.json()["capabilities"]["web_auth"] == "ready"
 
     status_path = (
         tmp_path / "outbox_worker" / "worker-safe.status.json"
@@ -266,18 +269,28 @@ def test_readiness_requires_fresh_valid_running_worker_status(
         status_path,
         _worker_status(datetime.now(timezone.utc)),
     )
+    outbox_only = client.get(reverse("health-ready"))
+    assert outbox_only.status_code == 200
+    assert outbox_only.json()["status"] == "degraded"
+    assert outbox_only.json()["outbox"] == "ok"
+
+    ingestion_dir = tmp_path / "ingestion_worker"
+    ingestion_dir.mkdir()
+    now = datetime.now(timezone.utc)
+    (ingestion_dir / "worker.lock").write_text(
+        '{"pid":1234,"heartbeat_at":"' + now.isoformat() + '"}',
+        encoding="utf-8",
+    )
     ready = client.get(reverse("health-ready"))
     assert ready.status_code == 200
     payload = ready.json()
-    assert payload == {
-        "status": "ready",
-        "config": "ok",
-        "database": "ok",
-        "migrations": "ok",
-        "runtime": "ok",
-        "logging": "ok",
-        "outbox": "ok",
-        "capabilities": "ok",
+    assert payload["status"] == "ready"
+    assert payload["capabilities"] == {
+        "web_auth": "ready",
+        "course_runtime": "ready",
+        "student_read": "ready",
+        "learning_outbox": "ready",
+        "knowledge_ingestion": "ready",
     }
     serialized = ready.content.decode("utf-8")
     assert str(tmp_path) not in serialized
@@ -291,8 +304,10 @@ def test_readiness_requires_fresh_valid_running_worker_status(
         ),
     )
     stale = client.get(reverse("health-ready"))
-    assert stale.status_code == 503
+    assert stale.status_code == 200
+    assert stale.json()["status"] == "degraded"
     assert stale.json()["outbox"] == "unavailable"
+    assert stale.json()["capabilities"]["web_auth"] == "ready"
 
 
 def test_readiness_fails_closed_when_logging_is_not_ready(
@@ -320,7 +335,7 @@ def test_readiness_fails_closed_when_logging_is_not_ready(
     assert response.json()["logging"] == "unavailable"
 
 
-def test_readiness_fails_closed_when_production_capability_ports_are_missing(
+def test_readiness_degrades_when_legacy_production_capabilities_are_missing(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -351,8 +366,11 @@ def test_readiness_fails_closed_when_production_capability_ports_are_missing(
 
     response = Client().get(reverse("health-ready"))
 
-    assert response.status_code == 503
-    assert response.json()["capabilities"] == "unavailable"
+    assert response.status_code == 200
+    assert response.json()["status"] == "degraded"
+    assert response.json()["legacy_capabilities"] == "unavailable"
+    assert response.json()["capabilities"]["web_auth"] == "ready"
+    assert response.json()["capabilities"]["student_read"] == "not_ready"
 
 
 def _worker_status(heartbeat: datetime) -> dict[str, object]:

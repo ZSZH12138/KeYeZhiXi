@@ -1,226 +1,157 @@
-# 架构说明
+# 课业智析当前架构
+
+> 当前版本：2026-08-27 新知识入库、测评画像与可溯源 RAG 架构
+>
+> 详细设计：[`knowledge_ingestion_rag_redesign.md`](knowledge_ingestion_rag_redesign.md)
+>
+> 当前课程班级学习流程：[`course_class_learning_flow.md`](course_class_learning_flow.md)
+>
+> 被替换的旧架构：[`legacy_architecture_snapshot_2026-08-25.md`](legacy_architecture_snapshot_2026-08-25.md)
+
+旧知识包审批流程只存在于历史快照和兼容代码中，不再是当前产品流程。教师端不再要求审核 ID，也不再操作 `draft/submitted/approved/rejected/recalled` 状态。
 
 ## 架构定位
 
-课业智析保持 M0—M9 十个责任域，不新增 M10。核心是进程内的 Python
-模块化单体：模块之间传递 Pydantic 契约对象，不用内部 HTTP，
-`AppCoordinator` 只编排公开服务，不直接读任何模块的业务表。
+课业智析仍是 M0–M9 模块化单体，不新增 M10。Django 负责页面、登录、权限、上传和任务状态；课程解析、知识点抽取、题目标注、检索、诊断、测评和分析继续按原模块职责协作。模块之间使用类型化对象，不用内部 HTTP。
 
-Django 是 M0 的系统外层，负责页面、会话、鉴权和表单入口；它不是
-独立业务模块。目标持久化是 PostgreSQL，M2 的目标向量检索后端是
-pgvector。LLM 只允许通过 DeepSeek API 边界进入 M7 与 M9。
-
-当前交付已包含 M0 的生产平台面：统一配置与组合根、结构化日志、leased
-outbox Worker、真实 Django Web/权限/表单、SQLite 与 PostgreSQL 仓储适配器，
-以及 SQLite→PostgreSQL 导入器。真实 Django 由 `manage.py`/WSGI/ASGI 独立启动，
-由 `/health/live/` 和 `/health/ready/` 观察。
-
-`prepare_django_frontend()` 只属于 legacy
-`run_intelligence_architecture()` 空脚手架。为保持既有公共
-`ArchitectureScaffoldResult` 语义，它仍固定返回 `skipped`；这只是“脚手架不启动
-Django 作业”，不是“Django 尚未实现”。
-
-“空实现”现在只描述尚未满足出站条件的外部调用：没有密钥或没有钉住的本地隐私
-工件时，M7/M9 不调用 DeepSeek。教师可在页面填写密钥；真实学生评分仍必须通过
-`build_required_m7_privacy_reviewer`。M2 的生产
-PostgreSQL+pgvector、embedding、策略检索和审计适配器已经实现；SQLite 仅用于
-离线/测试/迁移演练。仓库已提供 `tests/integration/test_postgres_m1_m2_m3_live.py`，
-覆盖真实 HTTP embedding、M1—M3 PostgreSQL/pgvector 链路和恢复；若验收环境没有提供
-受保护的临时 PostgreSQL，相关 live tests 会明确跳过，必须以 CI `live-m1-m3` job
-的实际通过结果为准，不能把 skip 写成真实联调通过。
-
-M5 已运行真实 DINA/BKT，M8 已运行真实 2PL IRT、能力估计和自适应选择，M9
-已运行本地模型质量检查；这些能力仍受数据门槛、shadow 质量审核和教师批准约束。
-
-M2 正式业务检索入口是 `retrieve_with_policy`；旧 `retrieve` 仅为已有 lexical 调用
-保留的兼容入口。M3 生产发布必须经过教师复核 CAS，并使用
-`build_knowledge_bundle_after_approval`；无审批的 `build_knowledge_bundle` 不能作为
-生产发布入口。
-
-应用层的 `AppCoordinator` 与 `assessment_workflow` 通过
-`retrieve_for_application -> retrieve_with_policy` 进入 M2，旧 `retrieve` 不再作为
-业务编排入口。完整 vector/hybrid 生产链仍以 CI `live-m1-m3` job 的真实
-PostgreSQL+pgvector live 结果为验收条件。
-
-M6 已实现私有、版本化的策略运行时和离线评估代码，但默认仍为
-`rules`、零 rollout、零探索。`shadow` 只记录模型建议，`active` 还必须通过
-安全候选和多重门禁；本阶段没有执行真实教学训练、线上 rollout 或生产启用，
-因此不能把“代码可配置”表述成“学习策略已经上线或优于 baseline”。
-
-## M0—M9 能力归属
+当前知识主链如下：
 
 ```text
-M0 Django 外层/鉴权/提交契约
-           │
-           ▼
-M1 课程版本与分块 ──► M2 RAG（词法 + PostgreSQL/pgvector）──┐
-           │                                        │
-           └──► M3 知识包/Q 矩阵/题目标定依据         ▼
-                         │                       M7 DeepSeek
-                         ▼                       评分/反馈
-                 M4 任务与版本编排                      │
-                         │                             ▼
-                         ▼                       M8 测评/评分/IRT/
-                 M5 DINA 认知诊断 + BKT             自适应选题/在线标定
-                         │                             │
-                         ▼                             ▼
-                 M6 诊断驱动的辅导状态机      M9 DeepSeek 叙述/
-                                                       模型质量/教师审核
+教师上传或删除文件
+        │
+        ▼
+待处理文件列表 ── 教师点击“确认处理”
+        │
+        ▼
+后台入库任务：校验 → 解析 → 分块 → DeepSeek 抽取全部知识点
+        │
+        ▼
+合并同义知识点及全部来源 → 重建题目关联 → 构建候选发布版本
+        │
+        ▼
+一次事务原子切换活动版本
+        │
+        ├──► 学生可溯源 RAG 答疑
+        └──► M4/M5/M8/M9 继续消费冻结版本
 ```
 
-上图表示能力归属和高层协作关系，不是完整的数据契约图或工作流顺序。
-M6 直接产出的 `EvidenceQuery` 和 `FeedbackGenerationTask` 分别进入 M2、M7。
-M6 policy manifest/execution/observation/reward/evaluation 都留在 M6 私有边界；
-M9 直接消费 M3/M5/M8 的公共契约，与 M6 没有直接数据契约边。尤其是当前 M9
-公共 `build_model_quality_report(...)` 只接收 M8 `CalibrationRunResult`，M6
-OPE/approval 尚未正式接入 M9。
+## 教师可见流程
 
-| 模块 | 架构责任 | v2 新边界 | 当前行为 |
-|---|---|---|---|
-| M0 | 配置、日志、事件/outbox、快照、Django 外层 | `ActorContext`、提交契约、`AsyncJobStatus` | 真实 Web/Worker；legacy scaffold 作业保持 `skipped` |
-| M1 | 授权课程、来源版本、确定性分块 | 不增新智能引擎 | 保持现有实现 |
-| M2 | 证据索引、RAG 检索与审计 | `EmbeddingModelRef`、`RetrievalPolicy`、`RetrievalAudit` | SQLite lexical 基线；生产 PostgreSQL+pgvector 的 lexical/vector/hybrid 与审计 |
-| M3 | 知识包、题库、量规、蓝图、Q 矩阵 | 为 DINA/IRT 提供版本化标定依据与教师复核 CAS | 生产发布必须走 `build_knowledge_bundle_after_approval` |
-| M4 | 任务识别、蓝图选择与工作流编排 | 冻结课程包、知识包、蓝图和路由引用 | 确定性路由与持久化幂等 |
-| M5 | 学习观测、认知诊断、知识追踪、状态 | DINA 系契约与 BKT 系契约 | 真实模型、完整历史与版本化状态 |
-| M6 | S0—S5 教学控制 | 消费 M4 任务、M8 评分、M5 状态和可选前版会话；私有 policy learning 不扩张公共契约 | 确定性 baseline；默认 rules；shadow 不改变公共动作；active 门禁失败回退 rules |
-| M7 | 主观评分与学生反馈 | DeepSeek 唯一 LLM 适配器 | 默认占位适配器；密钥+钉住隐私工件才允许出站 |
-| M8 | 测评、评分、IRT、自适应选题与在线标定 | IRT 参数、能力估计、标定与选题契约 | 真实 2PL/EAP、审核发布和受约束选题 |
-| M9 | 教师分析、质量门槛与复核 | DeepSeek 教师叙述、`ModelQualityReport` | 有密钥时可装配教师解读；IRT 质量报告真实计算 |
+1. 上传任意数量的 `.md`、`.txt`、`.pdf`、`.pptx` 或 `.docx` 知识文件；题目使用固定格式的 UTF-8 `.txt`。
+2. 上传只进入待处理列表，不立即改变学生当前看到的知识。
+3. 教师可以继续上传、编辑题目 TXT，或一次勾选多个文件待删除；文件进入 `pending_delete` 后立即从普通教师列表隐藏。
+4. 点击“确认处理”后形成不可变任务，页面显示进度。
+5. 有效文件独立处理；一个坏文件只报告该文件，不阻断其他有效文件。
+6. 新版本完整构建成功后一次切换。构建失败时学生继续使用旧版本。
 
-## 分层映射
+## 长文本处理
 
-| 路径 | 唯一职责 |
-|---|---|
-| `src/course_insight/contracts/` | 91 个公开 Pydantic 契约及来源图逻辑 |
-| `src/course_insight/application/` | 应用组合根、运行上下文恢复、拆分 Web 用例与既有一站式编排 |
-| `src/course_insight/modules/m0_*`—`m9_*` | 十个责任域的服务、仓储边界和可替换实现 |
-| `src/course_insight/infrastructure/` | 配置、SQLite/PostgreSQL、JSON/日志、导入器与 DeepSeek 客户端 |
-| `contracts/` | 91 份 Schema、1 份中性空示例与 `contract_provenance.json` |
-| `data/raw_course/` | 本地授权原始资料占位；真实资料不进入可分发产物 |
-| `runtime/` | 数据库、索引、快照、日志和 M6 JSON-only policy artifact；不进入可分发产物 |
+M1 对规范化后的正文执行确定性分块，默认上限是 6,000 个非空白 Unicode 字符，可在 1,000–20,000 范围内配置。
 
-## 运维入口
+切割顺序固定为：
 
-截至 `2026-07-27`，当前代码中的运维入口包括：
+1. 优先按空行分隔的段落组织块；
+2. 单段超限时优先在句号、问号、感叹号等句末切割；
+3. 仍无法切割时尝试较弱标点和空白；
+4. 最后才按字符数硬切，保证任何输入都不会无限增长。
 
-- 根 `manage.py`：统一 Django 命令入口；
-- `python manage.py sync_roles --check|--dry-run|--apply`：同步 `roles.csv`；
-- `python manage.py run_outbox_worker [--once]`：运行 M0 leased outbox Worker；
-- `python scripts/migrate_sqlite_to_postgres.py ...`：显式 SQLite→PostgreSQL 导入；
-- `python -m pytest -q`：统一测试入口。
+每个块保留文件版本、块 ID 和原文定位。相邻块主要按 6,000 个非空白字符组合成一次分析请求，并设置每批最多 64 个块的安全上限。DeepSeek 被明确要求返回当前批内零个、一个或多个知识点组成的完整数组，并在输出前自检字段、逐字引用、关系类型和引用集合。格式或溯源校验失败时，同一批额外重试 5 次，每次携带安全校验代码；仍失败才二分文本。返回结果达到 100 条或服务明确报告响应不完整时也会二分，最多递归 8 层；最小文本同样完成 5 次重试后才结束任务。
 
-M6 没有训练、manifest 注册或 promotion 的公共 CLI/管理页。现有配置、artifact
-校验、promotion/rollback/kill-switch 和 OPE 运维边界见
-[m6_policy_operations.md](m6_policy_operations.md)。
+DeepSeek 只负责逐字返回原文 `quote`，不负责估算字符偏移。M7 在本地确认 quote 存在于指定 chunk 后计算 `span_start/span_end`，因此下游仍使用稳定的精确区间进行合并和溯源。
 
-真实 PostgreSQL 集成测试必须同时提供
-`COURSE_INSIGHT_TEST_DATABASE_URL` 与 `COURSE_INSIGHT_TEST_DATABASE_NAME`；
-后者必须与 DSN 中的库名完全一致，且库名必须带分隔的 `test`、`ci` 或 `tmp`
-一次性标记。缺少任一变量时 live tests 明确 `skip`，危险库名则 fail closed。
+## 知识点合并与来源
 
-## M0 多请求应用边界
+知识点合并只合并概念身份，不合并掉证据。每条来源按以下身份去重：
 
-`ApplicationContainer` 由 `build_application()` 一次组装配置、M0—M9 Service、
-所选持久化后端、`AppCoordinator`、`CourseRuntimeRegistry` 与 Worker。Django、
-CLI 和 Worker 复用同一组合方式。SQLite 模式下 M1—M3 从已校验的 runtime
-snapshots/artifacts 离线恢复；生产 PostgreSQL 模式下由 0016/0017 migrations 和共享的
-`PostgresM1M2M3Repository` 恢复 M1—M3 制品、审计和教师复核记录，并由 M2 显式校验
-ready pgvector 引用。SQLite/PostgreSQL 后端切换覆盖本任务实际持久化的全部模块，
-但 SQLite 不作为生产后端。
+```text
+(source_version_id, chunk_id, span_start, span_end, relation_type)
+```
 
-为支持 HTTP 多请求流程，`AppCoordinator` 在保留既有一站式用例的同时增加
-`start_assessment`、`submit_assessment`、`get_student_assessment`、
-`get_teacher_review_context` 和 `review_assessment`。M0 只保存关联 ID、
-checkpoint、lease 和幂等状态；TaskPlan、状态、反馈、评分与分析仍由 M4/M5/M7/
-M8/M9 自有仓储恢复。View 不读领域表，Session 也不保存完整领域契约。
+同一知识点出现在两个文件、同一文件两个位置或二分后的两个块中时，全部来源都会进入并集。学生引用、题目标注和删除重建都使用该来源集合，不能用“最新来源”覆盖已有来源。
 
-每个操作还冻结知识包、课程包、证据索引与 policy 内容 checksum；进入 M5 前先在
-`state_inputs_frozen` checkpoint 保存精确 learner/class 前态身份。恢复只能按该
-身份读取，不允许重新读取“最新状态”。潜在长调用在事务外执行，由 M0 CAS
-heartbeat 延长 lease；失租 worker 的返回值会被丢弃，且不能再写 checkpoint 或
-终态。M5/M9 的冻结 policy 入口只读取文件一次，checksum 比较和严格解析消费同一
-份字节，关闭 check-then-use 竞态。
+## 题目处理
 
-submit 在 `state_saved` 与 `tutoring_saved` 之间增加 `policy_frozen`，只保存
-M6 私有执行身份的七个字段：`policy_id`、`adapter_id`、`adapter_version`、
-`artifact_sha256`、`feature_schema_version`、`action_space_version` 和
-`gate_policy_version`。M6 以既有 request fingerprint first-write binding；
-崩溃恢复重新 prepare 并逐字段精确比较，不把公共领域 payload 放入 M0 metadata。
-M6 自己的私有 execution JSON 另存当次探索率和 active gate 结论，使尚未提交决定
-的 learned binding 能在当前 mode/policy 改变后重新解析原 immutable artifact；
-该恢复快照不扩展 M0 七字段或公共契约，全局 kill switch 仍可强制 baseline。
+题目 TXT 以独立 `[QUESTION]...[/QUESTION]` 块解析，支持选择题、填空题和主观题。单题格式错误只隔离该题，不影响同文件其他题目。
 
-从 v8 升级的 workflow 行采用窄化的惰性接管：只有旧 replay identity 完全一致、
-全部新增依赖/恢复字段均为空、且持久化 TaskPlan 的知识包 ID 与课程包 ID 匹配当前
-受治理输入时，SQLite/PostgreSQL 才以 CAS 一次性补齐依赖。`state_saved` 之后还
-必须已有精确 `state_version`；部分填充行和不可能来自 v8 的
-`state_inputs_frozen` 行继续 fail closed。
+题目标注按变化类型增量执行：
 
-运行上下文由 `runtime/snapshots/course_runtime_manifest.json` 指向
-`CoursePackage`、`EvidenceIndexRef`、`KnowledgeBundle` 和两份 policy。SQLite/离线
-模式下所有引用必须是 runtime 内相对路径，加载时重验契约、checksum、重建的词法索引
-身份以及 policy 内容；生产 PostgreSQL 模式下 M1—M3 权威对象由共享仓储恢复，
-manifest/snapshot 只作为显式配置的引用和身份 cross-check。任一不一致即 fail closed。
+- 新增题目文件时，只解析和标注新题目；已有题目文件不重新读取；
+- 新增知识文件产生活动版本中不存在的新知识点 ID 时，才用完整活动知识点白名单重新标注全部活动题目；
+- 只增加已有知识点的来源时，不调用题目标注模型，只在本地刷新现有题目关联的完整证据并集；
+- 删除知识文件时不调用题目标注模型：失去全部活动来源的知识点和对应关联从新版本消失，仍有其他来源的知识点及其他题目标签继续保留；
+- 历史试卷继续引用当时冻结的旧版本，不被回写。
 
-M6 learned policy 使用另一条私有制品链：Repository 按 `policy_id` 选择 immutable
-`PolicyArtifactManifest`，其 `artifact_reference` 再相对于
-`m6_policy.runtime_directory` 解析。后者必须位于 `runtime_dir` 之下；只允许
-canonical UTF-8 JSON、lowercase SHA-256、有限 23 维 LinUCB 参数，以及完整的
-`m6-features-v1`/`m6-action-space-v1` 版本匹配。它不是 course runtime manifest
-的一部分。
+删除发布成功后，`pending_delete` 转为最终 `deleted`，其文件版本也标记为 `deleted`。最终删除记录不再进入可视化列表或后续确认任务；历史 release 中冻结的引用继续保留。
 
-PostgreSQL core schema 当前为 v21；SQLite bundled platform schema 当前为 v19，SQLite 的
-M1—M3 S1-S6 仓储另有独立的 schema version 1。M4 intent 使用已发布的 v10/0010
-与 v11/0011；M6 五张私有 policy 表位于 v12/`0012_m6_policy_learning.sql`，M0
-七字段 freeze 安全追加在 v13/`0013_m0_policy_freeze.sql`；M5/M8 模型运行历史
-追加在 v14/`0014_m5_m8_model_runtime.sql`，学习观测审计身份补强追加在
-v15/`0015_m5_learning_observation_audit_identity.sql`；PostgreSQL M1—M3 S1-S6 能力
-位于 v16/`0016_m1_m2_m3_capabilities.sql`，向量索引元数据绑定由
-v17/`0017_vector_index_metadata.sql` 补充；M9/M7 模型调用审计为 v18/v19，
-M0 等待室为 v20/`0020_m0_waiting_rooms.sql`，模型 rescore 操作为
-v21/`0021_m0_rescore_operation.sql`。SQLite 对应等待室为 v18、rescore 为 v19。
-既有 migration 未被改写或重编号。
+## 学生答疑
 
-## 日志与投递
+学生只能查询自己有权访问课程班级的活动发布版本，并且答疑只使用该课程班级教师保存的 DeepSeek 密钥；未配置时答疑不可用，不回退全局密钥。模型先从当前知识点 ID、标题和别名白名单中选择零到多个知识点，系统验证并去重后加载对应课程原文和少量相关例题。
 
-应用运行日志与领域审计分离：开发单进程可独占滚动 `app.log`；生产只写 stdout，
-交给部署平台采集，Web/Worker 不得多进程共享普通 `RotatingFileHandler`。
-`LearningEvent` 与 outbox 在数据库同一事务提交，独立 Worker 在事务外写
-`learning_events.jsonl` 后再确认。整体是 at-least-once，并由 sink 以 `event_id`
-幂等去重，不是 exactly-once。
+课程资料完全覆盖时只根据课程证据回答；部分覆盖或没有匹配知识点时可以使用同一教师密钥执行外部检索，但页面必须醒目提示“无完整课程知识点支撑，建议核对事实”。每条课程引用包含来源文件名、文件内定位（页码、幻灯片或行号）和支撑回答的短引文；未知引用、跨课程引用和已删除来源都会被拒绝。答疑不写入画像、做题计数或错题账本。
 
-## 边界不变量
+## 学生测评与画像
 
-- 契约对象跨模块原样传递，不降级为临时字典。
-- 时间必须带时区，校验和使用规范化 JSON 的 SHA-256。
-- 外部身份只通过 M0 的伪匿名 `ActorContext` 进入核心。
-- DeepSeek 的密钥只能在运行时由 `DEEPSEEK_API_KEY` 或教师写入的 runtime 密钥文件提供，环境变量优先；契约、审计和日志不存密钥或完整提示词。
-- 默认主观评分仍全部进入教师复核（`all_review`）。选择性免审没有本校金标前不得作为生产默认。
-- 待复核或待重评分数不得写入 M5/M6/学生反馈或权威 M9；reject 后可走绑定原作答 checksum 的 `local_model_rescore`，结果先回到 pending。
-- M7 真实评分在密钥之外还必须装配钉住 SHA 的本地隐私复核器；缺工件时保持占位适配器，不得静默 DenyAll 后假装已启用。
-- DINA/BKT/IRT 和在线标定的每次运行都必须绑定数据水位、模型/参数版本与质量报告。
-- 新标定参数先以 shadow 版本产生，经 M9 质量门槛与教师审核后才能被 M8 启用。
-- M6 `m6-features-v1` 与 `m6-action-space-v1` 只允许在确定性
-  `SafetyEnvelope` 候选内排序；rules/shadow/fallback 的公共 logging policy 为
-  one-hot，学习探索上限为 0.05 且补救场景禁用。
-- M6 active 必须同时满足 approved manifest、精确版本/SHA、作用域、至少两个
-  候选、支持度、不确定性、离线评估、rollout 和 kill switch 门禁；任一缺失回退
-  rules。
-- M7/M9 默认不访问模型网络；只有密钥存在且（对 M7 学生评分）隐私门通过时才构造真实客户端。M5/M8/M9 的
-  本地模型功能不伪造 DINA/BKT/IRT 或质量指标；M2 生产检索按配置连接 PostgreSQL+pgvector，
-  缺少依赖时 fail closed。
-- 量规、试卷、审计和结果总分必须守恒；教师复核追加新版本，不覆盖旧版本。
-- 对外不传播主机路径；索引、作业和产物使用逻辑引用或相对路径。
+学生只选择四类任务，Web 在服务端生成固定意图文本交给 M4。诊断和阶段评测更新简单权威画像；随心练习和订正不更新画像计数。完成的诊断/阶段试卷按学生、课程、班级隔离展示，结果页逐题给出原题、选择题选项、答案、知识点、有效课程原文和签名答疑入口。待教师复核的成绩不会提前展示分数或答案。
 
-## 扩展顺序
+## 发布与恢复
 
-1. 保持 91 个公共契约、既有 Service 签名和模块责任稳定。
-2. 在目标环境实测 PostgreSQL、Web/Worker 多进程部署与备份恢复。
-3. 在目标环境完成 PostgreSQL+pgvector live 建库、检索、审计和恢复验收，不把向量
-   能力移入 M0。
-4. 在目标环境提供达到治理门槛的去标识化作答数据，验证 M5 DINA/BKT 和 M8
-   IRT shadow 标定；只有 M9 质量 ready 且教师批准后才启用自适应选择。在此之前
-   不得把自适应选题、M6 active 或选择性审核写成已生产上线。
-5. M7/M9 的安全、审计和量规约束完成后，才把 DeepSeek 空适配器替换为真实
-   API 适配器。
+原始文件版本、入库任务、候选发布版本和历史活动版本均不可变。后台任务先离线构建完整候选版本，再在数据库事务中完成：
+
+1. 旧活动版本改为 retired；
+2. 新候选版本改为 active；
+3. 对应文件版本改为 active；
+4. 保存任务结果和重放统计。
+
+事务提交前学生看旧版本，提交后看新版本，不会看到半成品。同一变更校验和重复确认会复用同一任务和发布结果。
+
+任务进度按 `reading_sources → sources_parsed → concepts_extracted → concepts_merged → questions_linked → publishing → published` 持久化。知识提取重试时，页面显示当前批次、重试次数、缩小层级和原因；重试本身只刷新活动状态和 Worker 心跳，不虚增已完成字符，每个成功子批才按实际字符数推进进度。普通模式的 30 秒只约束一次 DeepSeek HTTP 请求等待，不是文本批次、重试序列或整项任务的总时限。Worker 可重新认领租约已过期的 `running` 任务并从幂等流程安全重跑。
+
+## M0–M9 变化
+
+| 模块 | 当前变化 | 保留能力 |
+|---|---|---|
+| M0 | 补充多文件 UI、文件版本、入库任务、进度、批量删除、学生答疑；删除知识审批页面 | 登录、权限、会话、日志、outbox、成绩复核 |
+| M1 | 覆盖固定文件假设；补充混合格式解析和长文本分块 | 课程治理、来源定位、规范化 |
+| M2 | 按活动发布版本和来源过滤证据，删除后不再检索已删来源 | 词法/向量/混合检索与审计 |
+| M3 | 覆盖教师 seed + 审批发布；改为概念合并、来源并集、题目解析和原子发布投影 | `KnowledgeBundle` 下游兼容形状、Q 矩阵校验 |
+| M4 | 冻结新的发布版本 ID | 任务幂等、蓝图和流程编排 |
+| M5 | 消费新发布版本投影出的 Q 矩阵 | DINA/BKT 与状态版本化 |
+| M6 | 无结构性修改 | 辅导状态机与安全策略门 |
+| M7 | 补充多知识点抽取、题目多标签关联和学生 RAG 回答 | DeepSeek 单一出口、结构化输出、隐私与引用校验 |
+| M8 | 新试卷使用新发布版本；历史试卷继续冻结旧版本 | 客观/主观评分、IRT、自适应选题、成绩复核 |
+| M9 | 统计活动发布版本的知识点、题目、来源和关联质量 | 教师分析与模型质量检查 |
+
+新入库对象属于模块内部契约，不扩大原有 91 个公共契约；`TaskPlan` 公共字段保持不变。
+
+## 进程和就绪状态
+
+本地运行至少包含 Web 与知识入库 Worker；需要异步学习事件时再运行 outbox Worker：
+
+```powershell
+python manage.py runserver
+python manage.py run_ingestion_worker
+python manage.py run_outbox_worker
+```
+
+`/health/ready/` 现在按能力返回：
+
+- `not_ready` / HTTP 503：数据库、配置、日志等登录所需核心能力失败；
+- `degraded` / HTTP 200：Web 可登录，但某个后台 Worker 或旧兼容能力不可用；
+- `ready` / HTTP 200：核心和两个 Worker 均就绪。
+
+因此 outbox 或知识入库 Worker 停止不会再让所有账号登录统一失败。
+
+## 安全边界
+
+- 上传 HTTP 请求默认允许 `5 GiB + 16 MiB` 表单开销，因此不应在 5 GiB 内返回 413；单个文件仍限 50 MiB，并使用扩展名、签名和 OOXML ZIP 结构联合校验，拒绝路径穿越、ZIP 炸弹和双扩展名欺骗。
+- 原文件名只用于显示，磁盘使用不可猜测对象键。
+- 知识入库和学生答疑只读取精确 `(course_id, class_id)` 下教师加密保存的密钥；旧评分/教师解读兼容路径可使用 `DEEPSEEK_API_KEY`。任何密钥都不写入知识表、提示审计或异常。
+- DeepSeek 输出经过严格结构、来源白名单、跨度和概念 ID 校验后才能发布。
+- 教师只能管理获授权课程；学生只能读取获授权课程的活动版本。
+
+## 运行入口
+
+- 教师知识文件：`/teacher/courses/<course_id>/knowledge/`
+- 学生答疑：`/student/courses/<course_id>/classes/<class_id>/qa/`
+- 入库 Worker：`python manage.py run_ingestion_worker [--once]`
+- 旧知识审核 URL：有课程上下文时重定向到新文件页；无法确定课程时返回 410，不再执行审核操作。

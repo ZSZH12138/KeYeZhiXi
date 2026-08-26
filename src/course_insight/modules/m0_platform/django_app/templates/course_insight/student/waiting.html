@@ -1,6 +1,7 @@
 {% extends "course_insight/base.html" %}
 {% block title %}成绩待教师确认 · 课业智析{% endblock %}
 {% block content %}
+  {% include "course_insight/student/_nav.html" with current_label="待确认" %}
   <h1>成绩待教师确认</h1>
   <p class="muted">试卷 {{ paper.paper_id }} 已完成机器评分，但尚未计入掌握度，也未形成最终学生成绩。</p>
   {% if waiting_status == "awaiting_rescore" %}

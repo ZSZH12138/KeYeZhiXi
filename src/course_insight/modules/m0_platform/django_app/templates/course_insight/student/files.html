@@ -1,0 +1,16 @@
+{% extends "course_insight/base.html" %}
+{% block title %}课程文件 · 课业智析{% endblock %}
+{% block content %}
+  {% include "course_insight/student/_nav.html" with current_label="课程文件" %}
+  <h1 class="page-title">课程文件</h1>
+  <p class="muted">这里只显示教师已经解析并发布的课程资料；题库文件不会向学生开放。当前内容版本：{{ content_revision }}。</p>
+  <div class="card">
+    <ul>
+      {% for source in sources %}
+        <li><a href="{% url 'student-course-file-download' course_id=course_id class_id=class_id source_id=source.source_id %}">{{ source.display_name }}</a></li>
+      {% empty %}
+        <li>教师尚未发布可查看的课程文件。</li>
+      {% endfor %}
+    </ul>
+  </div>
+{% endblock %}

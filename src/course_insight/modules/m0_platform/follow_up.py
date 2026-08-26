@@ -60,9 +60,48 @@ def build_follow_up_bundle(
     return working.model_copy(update={"blueprints": blueprints}), follow_item
 
 
+def rebuild_follow_up_bundle(
+    bundle: KnowledgeBundle,
+    records: Mapping[str, Any],
+    follow_up_paper_id: str,
+) -> KnowledgeBundle | None:
+    """Rebuild the exact bundle frozen when a follow-up paper was started."""
+
+    link = _follow_up_link(records, follow_up_paper_id)
+    if link is None:
+        return None
+    source_paper_id, item_instance_id, source_item_id = link
+    prior = merge_follow_up_items(
+        bundle,
+        records,
+        exclude_follow_up_paper_id=follow_up_paper_id,
+    )
+    try:
+        source = prior.get_item(source_item_id)
+    except DomainError:
+        return None
+    follow_bundle, _ = build_follow_up_bundle(
+        prior,
+        source_item=source,
+        salt=f"{source_paper_id}:{item_instance_id}",
+    )
+    return follow_bundle
+
+
+def follow_up_source(
+    records: Mapping[str, Any],
+    follow_up_paper_id: str,
+) -> tuple[str, str, str] | None:
+    """Return source paper, item instance, and item id for one follow-up paper."""
+
+    return _follow_up_link(records, follow_up_paper_id)
+
+
 def merge_follow_up_items(
     bundle: KnowledgeBundle,
     records: Mapping[str, Any],
+    *,
+    exclude_follow_up_paper_id: str | None = None,
 ) -> KnowledgeBundle:
     """Reattach cloned follow-up items so later scoring can resolve them."""
 
@@ -75,6 +114,11 @@ def merge_follow_up_items(
         if type(stored) is not dict:
             continue
         for item in stored.values():
+            if (
+                exclude_follow_up_paper_id is not None
+                and item.get("follow_up_paper_id") == exclude_follow_up_paper_id
+            ):
+                continue
             clone_id = item.get("follow_up_item_id")
             source_id = item.get("source_item_id")
             if (
@@ -97,17 +141,41 @@ def merge_follow_up_items(
     return bundle.model_copy(update={"items": items, "q_matrix": q_matrix})
 
 
+def _follow_up_link(
+    records: Mapping[str, Any],
+    follow_up_paper_id: str,
+) -> tuple[str, str, str] | None:
+    for source_paper_id, payload in records.items():
+        stored = payload.get("items", {}) if isinstance(payload, dict) else None
+        if type(stored) is not dict:
+            continue
+        for item_instance_id, item in stored.items():
+            if (
+                type(item) is dict
+                and item.get("follow_up_paper_id") == follow_up_paper_id
+                and isinstance(item.get("source_item_id"), str)
+                and isinstance(item_instance_id, str)
+            ):
+                return source_paper_id, item_instance_id, str(item["source_item_id"])
+    return None
+
+
 def _select_or_clone(
     bundle: KnowledgeBundle,
     source_item: ItemCard,
     salt: str,
 ) -> ItemCard:
     source_concepts = set(source_item.concept_ids)
-    for item in bundle.approved_items():
-        if item.item_id == source_item.item_id:
-            continue
-        if source_concepts.intersection(item.concept_ids):
-            return item.model_copy(deep=True)
+    siblings = [
+        item
+        for item in bundle.approved_items()
+        if item.item_id != source_item.item_id
+        and source_concepts.intersection(item.concept_ids)
+    ]
+    if siblings:
+        digest = hashlib.sha256(salt.encode("utf-8")).digest()
+        chosen = siblings[int.from_bytes(digest[:8], "big") % len(siblings)]
+        return chosen.model_copy(deep=True)
     digest = hashlib.sha256(salt.encode("utf-8")).hexdigest()[:8]
     return source_item.model_copy(
         update={"item_id": f"{source_item.item_id}_fu_{digest}"},

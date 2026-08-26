@@ -1296,6 +1296,7 @@ def test_split_assessment_use_cases_reload_and_review(tmp_path: Path) -> None:
     assert student["assessment_paper"].paper_id == "paper_1"
     assert student["feedback"].feedback_id == "feedback_1"
     assert set(teacher) == {
+        "task_plan",
         "assessment_paper",
         "scoring_result",
         "state_result",

@@ -1,0 +1,7 @@
+*.docx binary
+*.pdf binary
+*.ppt binary
+*.pptx binary
+
+# Acceptance fixtures are checksum-verified; preserve their exact bytes on Windows.
+examples/five_day_acceptance/** -text

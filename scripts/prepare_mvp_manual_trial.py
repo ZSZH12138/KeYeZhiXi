@@ -39,9 +39,9 @@ from course_insight.modules.m1_course_governance.snapshots import (
 NOW = datetime(2026, 8, 22, 12, 0, tzinfo=timezone.utc)
 COURSE_ID = "course_network"
 CLASS_ID = "class_01"
-PACKAGE_ID = "package_network_trial"
-BUNDLE_ID = "bundle_network_trial"
-SOURCE_ID = "source_network_notes"
+PACKAGE_ID = "package_network_trial_v2"
+BUNDLE_ID = "bundle_network_trial_v2"
+SOURCE_ID = "source_1"
 FILE_NAME = "computer-network-trial-notes.md"
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 
@@ -82,7 +82,7 @@ def main() -> int:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="replace an existing trial course in runtime/",
+        help="replace trial course snapshots without deleting other runtime files",
     )
     args = parser.parse_args()
     _ensure_app_json()
@@ -96,8 +96,8 @@ def main() -> int:
             file=sys.stderr,
         )
         return 2
-    if args.force and settings.runtime_dir.exists():
-        shutil.rmtree(settings.runtime_dir)
+    if args.force:
+        _replace_trial_runtime(settings.runtime_dir)
     settings.runtime_dir.mkdir(parents=True, exist_ok=True)
     container = build_application(settings)
     try:
@@ -193,6 +193,25 @@ def main() -> int:
     print("Then: python manage.py sync_roles --apply")
     print("Then set passwords for pseudonym_student_001 and pseudonym_teacher_001")
     return 0
+
+
+def _replace_trial_runtime(runtime_dir: Path) -> None:
+    """Remove only trial course snapshots; keep databases and other runtime files."""
+
+    for relative in (
+        "snapshots/course_runtime_manifest.json",
+        "snapshots/course-package.json",
+        "snapshots/evidence-index.json",
+        "snapshots/knowledge-bundle.json",
+        "policies/state.json",
+        "policies/teacher.json",
+    ):
+        path = runtime_dir / relative
+        if path.is_file():
+            path.unlink()
+    seeds = runtime_dir / "teacher-seeds"
+    if seeds.is_dir():
+        shutil.rmtree(seeds)
 
 
 def _ensure_app_json() -> None:
@@ -371,6 +390,20 @@ def _write_seed_files(seed_dir: Path, package: CoursePackage) -> dict[str, Path]
                     evidence_id,
                 ),
                 _fill(
+                    "item_subnet_host_bits_16",
+                    "IPv4 前缀 /16 对应的主机位数是多少？只写数字。",
+                    ["16"],
+                    "concept_subnet",
+                    evidence_id,
+                ),
+                _fill(
+                    "item_subnet_host_bits_8",
+                    "IPv4 前缀 /8 对应的主机位数是多少？只写数字。",
+                    ["24"],
+                    "concept_subnet",
+                    evidence_id,
+                ),
+                _fill(
                     "item_transport_handshake",
                     "三次握手属于哪一种传输层协议？请填写 TCP 或 UDP。",
                     ["TCP", "tcp"],
@@ -386,14 +419,32 @@ def _write_seed_files(seed_dir: Path, package: CoursePackage) -> dict[str, Path]
                     "concept_throughput",
                     evidence_id,
                 ),
+                _fill(
+                    "item_throughput_bits_6000",
+                    "若 6000 bit 在 2 秒内成功传送，吞吐量是多少 bit/s？只写数字。",
+                    ["3000"],
+                    "concept_throughput",
+                    evidence_id,
+                ),
+                _fill(
+                    "item_throughput_bits_10000",
+                    "若 10000 bit 在 2 秒内成功传送，吞吐量是多少 bit/s？只写数字。",
+                    ["5000"],
+                    "concept_throughput",
+                    evidence_id,
+                ),
             ],
             "q_matrix": [
                 _q("item_ipv6_anchor", "concept_ipv6"),
                 _q("item_ipv6_follow", "concept_ipv6"),
                 _q("item_subnet_host_bits", "concept_subnet"),
+                _q("item_subnet_host_bits_16", "concept_subnet"),
+                _q("item_subnet_host_bits_8", "concept_subnet"),
                 _q("item_transport_handshake", "concept_transport"),
                 _q("item_protocol_template", "concept_transport"),
                 _q("item_throughput_bits", "concept_throughput"),
+                _q("item_throughput_bits_6000", "concept_throughput"),
+                _q("item_throughput_bits_10000", "concept_throughput"),
             ],
         },
         "rubric": {"rubrics": []},
@@ -416,21 +467,21 @@ def _write_seed_files(seed_dir: Path, package: CoursePackage) -> dict[str, Path]
                             "不确定点",
                             "uncertainty",
                             "concept_subnet",
-                            ["item_subnet_host_bits"],
+                            [],
                         ),
                         _section(
                             "sec_misconception",
                             "误区",
                             "misconception",
                             "concept_transport",
-                            ["item_transport_handshake"],
+                            [],
                         ),
                         _section(
                             "sec_remediation",
                             "补救",
                             "remediation",
                             "concept_throughput",
-                            ["item_throughput_bits"],
+                            [],
                         ),
                     ],
                     "total_score": 4.0,

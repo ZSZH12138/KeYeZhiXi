@@ -1,12 +1,14 @@
 # 接口与生产者—消费者指南
 
+> 2026-08-27：知识文件入库、题目自动标注和学生答疑已经采用新的活动发布版本。旧 M3 审批接口仅为兼容保留，不再是生产者入口。新入库对象是 M0/M1/M3/M7 内部接口，因此公共根契约仍为 91 个。
+
 ## 使用规则
 
 本项目共有 91 个公开契约，其中 22 个是可独立导出的根契约。
 路径 `$` 表示完整契约，`$[]` 表示列表元素，点路径表示组成字段。
 服务之间必须传递契约对象，不得用无类型字典代替。
 
-当前 v2 中，DeepSeek 网络边界默认仍返回空结果；只有密钥存在且（学生评分）本地隐私门通过时才会真正出站。M2 的 PostgreSQL+pgvector、embedding、策略检索和审计
+旧 M7 主观评分和 M9 教师解读仍默认关闭，并分别受隐私与质量门限制。知识抽取、题目标注和独立学生答疑只使用精确课程号、班级号下由教师保存的 DeepSeek 密钥；未配置时不出站，学生答疑也不回退到全局密钥。M2 的 PostgreSQL+pgvector、embedding、策略检索和审计
 端口已经实现；SQLite 仅用于离线、测试和迁移演练，生产必须使用 PostgreSQL+pgvector。
 仓库已提供真实 PostgreSQL+pgvector live 用例；当前机器缺少生产依赖时必须 fail
 closed，live 用例会明确 skip，不能把逻辑 `empty` 或 skip 当成生产成功，最终以 CI
@@ -16,11 +18,7 @@ M5 已运行真实 DINA/BKT，M8 已运行真实 2PL IRT、能力估计和自适
 已运行本地模型质量检查；这些本地能力仍受数据、质量审核和教师批准门槛约束。
 
 M2 正式业务检索入口是 `retrieve_with_policy`；旧 `retrieve` 仅为已有 lexical 调用
-保留的兼容入口。M3 生产发布必须使用 `build_knowledge_bundle_after_approval`，
-无审批的 `build_knowledge_bundle` 只适用于离线/测试或审批前校验。
-`AppCoordinator.initialize_course` 可选接收 `teacher_review_id` 与
-`teacher_review_version`；两者同时提供时才走审批后发布入口。M3 service 的
-`create/submit/approve/reject/recall_teacher_review` wrappers 负责 CAS 复核状态迁移。
+保留的兼容入口。M3 当前生产者是 `KnowledgeIngestionProcessor`：它接收活动文件版本，构建候选 `CourseKnowledgeRelease`，再通过 `knowledge_bundle_from_release` 向 M4–M9 提供兼容的 `KnowledgeBundle`。旧 `build_knowledge_bundle_after_approval` 和审核 wrappers 不再连接教师 Web。
 
 M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默认关闭在
 `rules`/零 rollout/零探索状态。它们不增加公共契约；本阶段也没有真实教学训练、
@@ -33,6 +31,7 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 
 - 根 `manage.py`：Django 命令总入口；
 - `python manage.py sync_roles --check|--dry-run|--apply`：roles 初始化/同步；
+- `python manage.py run_ingestion_worker [--once]`：知识文件解析、抽取、题目标注与活动发布 Worker；
 - `python manage.py run_outbox_worker [--once]`：M0 outbox Worker；
 - `python scripts/migrate_sqlite_to_postgres.py --project-root ...`：显式 SQLite→PostgreSQL 导入。
 
@@ -43,11 +42,11 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 
 | 根契约 | 唯一生产者 | 消费者/字段路径 |
 |---|---|---|
-| `CoursePackage` | `M1.import_course` | `M2.build_index/build_vector_index(course_package=$)`；M3 审批前校验或 `build_knowledge_bundle_after_approval(course_package=$)` |
+| `CoursePackage` | `M1.import_course` | `M2.build_index/build_vector_index(course_package=$)`；M3 旧兼容投影 |
 | `EvidenceIndexRef` | `M2.build_index`、`M2.build_vector_index`、`M2.restore_vector_index` | `M2.retrieve_with_policy(evidence_index_ref=$)`；旧 `retrieve` 仅兼容 lexical |
 | `EvidenceQuery` | `M8.prepare_scoring`、`M6.decide_next_action` | `M2.retrieve_with_policy(evidence_query=$)` |
 | `EvidenceBundle` | `M2.retrieve_with_policy` | `M7.score_subjective_answer`；`M7.generate_student_feedback` |
-| `KnowledgeBundle` | `M3.build_knowledge_bundle_after_approval`（生产）；`build_knowledge_bundle`（离线/测试） | M4、M5、M8、M9 |
+| `KnowledgeBundle` | M3 `knowledge_bundle_from_release`（当前生产）；旧 service 仅兼容 | M4、M5、M8、M9 |
 | `TaskPlan` | `M4.create_task_plan` | `M8.generate_paper`；`M6.decide_next_action` |
 | `AssessmentPaper` | `M8.generate_paper` | M0 学生作答外层；`M8.prepare_scoring` |
 | `ScoringPreparationResult` | `M8.prepare_scoring` | `M2.retrieve_with_policy($.evidence_queries[])`；`M7.score_subjective_answer($.rubric_scoring_tasks[])`；`M8.finalize_scoring($)` |
@@ -94,10 +93,19 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 | `ModelQualityReport` | `M9.build_model_quality_report` | M9 教师审核与 M8 发布门槛 | `ready`、`failed` 或证据不足时 `insufficient_data` |
 | `CalibrationReviewDecision` | M9 教师审核 | M8 参数版本发布 | approve/reject/defer 驱动追加式参数状态机 |
 
-M0 的 `TeacherReviewSubmission` 是 M8/M9 评分复核接口，不等同于 M3 S4 知识包复核。
-M3 生产发布必须先通过 `TeacherReviewWorkflow` 的 CAS 状态
-`draft -> submitted -> approved`，再调用 `build_knowledge_bundle_after_approval`；
-两条复核链不能互相替代。
+M0 的 `TeacherReviewSubmission` 只用于 M8/M9 成绩复核。M3 的旧 `TeacherReviewWorkflow` 已退出当前知识发布链，不能把它重新接到教师文件页。
+
+## 新知识入库内部接口
+
+这些对象不从 `course_insight.contracts` 根导出，不计入 91 个公共契约：
+
+| 内部对象 | 生产者 | 消费者 | 约束 |
+|---|---|---|---|
+| `KnowledgeExtractionBatch` | M7 batch builder | M7 DeepSeek 抽取 | 每批最多 6,000 个可见字符；可含多个块 |
+| `KnowledgeExtractionResult` | M7 抽取器 | 入库处理器 | 返回零到多个候选；100 条触发二分重跑 |
+| `KnowledgeEvidenceRef` | M7 本地校验边界 | M3 合并/发布 | 来源版本、块、定位和跨度必须来自输入白名单 |
+| `MergedKnowledgeConcept` | M3 概念合并 | 发布处理器、题目标注 | 同义概念合并时来源取并集 |
+| `QuestionConceptLinkCandidate` | M7 题目标注 | M3 发布 | concept ID 必须属于当前活动候选集合 |
 
 ## 编排入口
 
@@ -177,6 +185,8 @@ DINA/BKT、2PL IRT、模型质量和自适应选择。
 | `get_student_assessment(...)` | 校验 actor/course/class/learner 后读取结果与反馈 | M8 评分、M7 反馈 |
 | `get_teacher_review_context(...)` | 校验教师课程/班级作用域并读取复核上下文 | M8/M5/M9 |
 | `review_assessment(...)` | 复用既有复核链并追加新审计版本 | M8/M5/M9 |
+
+学生起始页不再接收自由文本，而是把用户选择的测评类型映射为服务端固定意图后复用上述契约。`AssessmentProjectionReceipt` 记录会改变画像的诊断测评和阶段评测，学生只能查看自己的试卷 ID、得分、错题数和逐题反馈；随心练习、订正和独立答疑不写入画像统计。
 
 操作使用稳定幂等键、短 lease、CAS 版本与 checkpoint 恢复。相同操作重放返回
 同一权威结果；Repository 采用“同 ID 同 payload 成功、同 ID 不同 payload

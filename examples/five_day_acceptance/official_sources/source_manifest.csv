@@ -1,0 +1,8 @@
+﻿source_id,title,url,local_file,reuse,expected_sha256
+rfc4291,IP Version 6 Addressing Architecture,https://www.rfc-editor.org/rfc/rfc4291.txt,official_sources/rfc4291.txt,verbatim-unmodified,4d58dff6b432d5d524bf3a3b7f0337a4177fa65f92ed72f2a92e97b471de48b2
+rfc5952,A Recommendation for IPv6 Address Text Representation,https://www.rfc-editor.org/rfc/rfc5952.txt,official_sources/rfc5952.txt,verbatim-unmodified,c75e82c5f53bcec8148820fadf0d65935336ee2031fa6ce10504797ed4c1979d
+rfc9293,Transmission Control Protocol (TCP),https://www.rfc-editor.org/rfc/rfc9293.txt,official_sources/rfc9293.txt,verbatim-unmodified,6d9ac8be4b0286f8c3d337addf442b2eb6a9b14e1366594ea7fbc273f93dc2d9
+rfc768,User Datagram Protocol,https://www.rfc-editor.org/rfc/rfc768.txt,official_sources/rfc768.txt,verbatim-unmodified,7dc8880e1ecef9c3f9da0db4b876a16e96bfa4f0953cc9d977d414f8f680c2f0
+rfc4632,Classless Inter-domain Routing (CIDR),https://www.rfc-editor.org/rfc/rfc4632.txt,official_sources/rfc4632.txt,verbatim-unmodified,13694a39f586eb2054407780edccdf7c39332e57f067c8008bba4326bfc24fa9
+rfc1122,Requirements for Internet Hosts -- Communication Layers,https://www.rfc-editor.org/rfc/rfc1122.txt,official_sources/rfc1122.txt,verbatim-unmodified,9f526e6bebc868324fedb90aebbcf6e5b15c53fd373ca5d5ce1c2cdcd264e04f
+rfc9065,"Considerations around Transport Header Confidentiality, Network Operations, and the Evolution of Internet Transport Protocols",https://www.rfc-editor.org/rfc/rfc9065.txt,official_sources/rfc9065.txt,verbatim-unmodified,42301c88685e0defdcdc062396b1eae292724c39d4fb8b70da838a94813bcea6

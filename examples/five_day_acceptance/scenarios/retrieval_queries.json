@@ -1,0 +1,55 @@
+{
+  "queries": [
+    {
+      "concept_ids": [
+        "concept_ipv6_text"
+      ],
+      "expected_terms": [
+        "::",
+        "一次"
+      ],
+      "query_id": "q_ipv6",
+      "text": "IPv6 双冒号为什么只能出现一次"
+    },
+    {
+      "concept_ids": [
+        "concept_tcp_reliability"
+      ],
+      "expected_terms": [
+        "序号",
+        "确认",
+        "重传"
+      ],
+      "query_id": "q_tcp",
+      "text": "TCP 如何实现可靠传输"
+    },
+    {
+      "concept_ids": [
+        "concept_dns_resolution"
+      ],
+      "expected_terms": [
+        "UDP",
+        "TCP"
+      ],
+      "query_id": "q_dns",
+      "text": "DNS 查询什么时候使用 TCP"
+    },
+    {
+      "concept_ids": [
+        "concept_performance"
+      ],
+      "expected_terms": [
+        "传输",
+        "传播"
+      ],
+      "query_id": "q_perf",
+      "text": "带宽和传播时延的区别"
+    },
+    {
+      "concept_ids": [],
+      "expected": "low_relevance_or_empty",
+      "query_id": "q_no_match",
+      "text": "higgsboson_xqz_987"
+    }
+  ]
+}

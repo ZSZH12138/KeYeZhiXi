@@ -21,6 +21,7 @@ _DEFAULT_MEDIA_TYPES = {
     ".txt": "text/plain",
     ".pdf": "application/pdf",
     ".docx": "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    ".ppt": "application/vnd.ms-powerpoint",
     ".pptx": "application/vnd.openxmlformats-officedocument.presentationml.presentation",
 }
 _DEFAULT_CAPABILITIES = {
@@ -28,6 +29,7 @@ _DEFAULT_CAPABILITIES = {
     ".txt": frozenset({"byte-input", "text"}),
     ".pdf": frozenset({"byte-input", "paged"}),
     ".docx": frozenset({"byte-input", "structured"}),
+    ".ppt": frozenset({"byte-input", "converted", "paged", "structured"}),
     ".pptx": frozenset({"byte-input", "paged", "structured"}),
 }
 
@@ -203,11 +205,13 @@ class ParserRegistry:
         """Resolve a basename by its case-folded suffix."""
 
         extension = PurePath(file_name).suffix.casefold()
-        if extension == ".ppt":
-            raise UnsupportedParser("unsupported legacy powerpoint format")
         try:
             return self._entries[extension]
         except KeyError as error:
+            if extension == ".ppt":
+                raise UnsupportedParser(
+                    "legacy PowerPoint conversion is unavailable"
+                ) from error
             raise KeyError("unsupported parser extension") from error
 
     def parse(self, file_name: str, payload: bytes) -> object:

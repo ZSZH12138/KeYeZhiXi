@@ -8,6 +8,7 @@ from collections.abc import Callable
 
 from django.conf import settings
 from django.http import HttpRequest, HttpResponse
+from django.urls import Resolver404, resolve
 
 from course_insight.contracts.errors import DomainError
 from course_insight.infrastructure.log_context import bind_log_context
@@ -18,6 +19,7 @@ from course_insight.modules.m0_platform.django_app.error_mapping import (
 
 
 _REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:@-]{0,127}$")
+_KNOWLEDGE_UPLOAD_PERMISSION = "m0_platform_web.manage_course_knowledge"
 
 
 class M0RequestMiddleware:
@@ -66,7 +68,25 @@ class M0RequestMiddleware:
             length = int(raw_length)
         except (TypeError, ValueError):
             return True
-        return length < 0 or length > settings.DATA_UPLOAD_MAX_MEMORY_SIZE
+        maximum = settings.COURSE_INSIGHT_MAX_REQUEST_BODY_BYTES
+        if M0RequestMiddleware._may_use_upload_budget(request):
+            maximum = settings.COURSE_INSIGHT_MAX_UPLOAD_REQUEST_BODY_BYTES
+        return length < 0 or length > maximum
+
+    @staticmethod
+    def _may_use_upload_budget(request: HttpRequest) -> bool:
+        if request.method != "POST":
+            return False
+        user = getattr(request, "user", None)
+        if not getattr(user, "is_authenticated", False):
+            return False
+        try:
+            match = resolve(request.path_info)
+        except Resolver404:
+            return False
+        return match.url_name == "teacher-knowledge-upload" and bool(
+            user.has_perm(_KNOWLEDGE_UPLOAD_PERMISSION)
+        )
 
     @staticmethod
     def _safe_actor_id(request: HttpRequest) -> str | None:

@@ -1,0 +1,67 @@
+{% extends "course_insight/base.html" %}
+{% block title %}课程答疑 · 课业智析{% endblock %}
+{% block content %}
+  {% include "course_insight/student/_nav.html" with current_label="课程答疑" %}
+  <h1 class="page-title">课程答疑</h1>
+  <p class="muted">优先依据教师当前发布的课程文件；课程资料不足时会明确警告并补充外部检索。</p>
+  {% if not qa_available %}<p class="status">教师尚未为当前课程班级配置 DeepSeek API，答疑暂不可用。</p>{% endif %}
+  <form method="post">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">开始答疑</button>
+  </form>
+  {% if error_message %}<p class="errorlist">{{ error_message }}</p>{% endif %}
+  {% if answer %}
+    <div class="card">
+      {% if answer.status == 'answered' %}
+      {% if answer.warning %}<p class="errorlist">{{ answer.warning }}</p>{% endif %}
+      <p class="muted">课程资料覆盖状态：{{ answer.coverage }}</p>
+      <h2>涉及知识点</h2>
+      {% if answer.matched_concepts %}
+        <ul>
+          {% for concept in answer.matched_concepts %}
+            <li>{{ concept.name }}（{{ concept.concept_id }}）</li>
+          {% endfor %}
+        </ul>
+      {% else %}
+        <p>当前课程知识库未匹配到相关知识点。</p>
+      {% endif %}
+      <h2>知识点对应原文</h2>
+      {% for citation in answer.sources %}
+        <div class="card">
+          <p><strong>{{ citation.file_name }}</strong></p>
+          <p class="muted">位置：{{ citation.locator }}</p>
+          <p>{{ citation.quote }}</p>
+        </div>
+      {% empty %}<p>当前没有课程原文支撑。</p>{% endfor %}
+      <h2>分析</h2>
+      <p>{{ answer.analysis }}</p>
+      <h2>相关例题</h2>
+      {% for example in answer.examples %}
+        <div class="card">
+          <p><strong>{{ example.stem }}</strong></p>
+          {% if example.options %}
+            <ul>
+              {% for label, text in example.options %}
+                <li>{{ label }}. {{ text }}</li>
+              {% endfor %}
+            </ul>
+          {% endif %}
+          <p>参考答案：{{ example.answer }}</p>
+        </div>
+      {% empty %}<p>当前没有可用的相关例题。</p>{% endfor %}
+      {% if answer.external_sources %}
+      <h2>外部参考资料</h2>
+      <ul>
+        {% for source in answer.external_sources %}
+          <li><a href="{{ source.url }}" rel="noopener noreferrer" target="_blank">{{ source.title }}</a></li>
+        {% endfor %}
+      </ul>
+      {% endif %}
+      {% else %}
+      <h2>回答</h2>
+      <p>{{ answer.analysis }}</p>
+      {% endif %}
+    </div>
+  {% endif %}
+{% endblock %}

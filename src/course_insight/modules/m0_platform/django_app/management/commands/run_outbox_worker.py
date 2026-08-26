@@ -20,7 +20,9 @@ class Command(BaseCommand):
     def handle(self, *args, **options) -> None:
         del args
         try:
-            container = runtime.get_application_container()
+            container = runtime.get_application_container(
+                logging_filename=runtime.OUTBOX_WORKER_LOG_FILENAME,
+            )
             worker = container.outbox_worker
             if worker is None:
                 raise CommandError(

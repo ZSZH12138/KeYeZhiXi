@@ -47,6 +47,7 @@ def test_student_flow_uses_exact_scope_existing_contracts_csrf_and_prg(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("COURSE_INSIGHT_ALLOW_LEGACY_TEST_BUNDLE", "1")
     user = make_user(
         actor_id="pseudonym_student_001",
         role="student",
@@ -67,12 +68,13 @@ def test_student_flow_uses_exact_scope_existing_contracts_csrf_and_prg(
     )
     start_page = client.get(start_url)
     assert start_page.status_code == 200
+    assert "student_text" not in start_page.context["form"].fields
+    assert "<textarea" not in start_page.content.decode("utf-8")
     flow = start_page.context["form"].initial["flow_token"]
 
     denied = client.post(
         start_url,
         {
-            "student_text": "Create a governed practice assessment.",
             "task_type_hint": "practice",
             "flow_token": flow,
         },
@@ -82,7 +84,6 @@ def test_student_flow_uses_exact_scope_existing_contracts_csrf_and_prg(
     started = client.post(
         start_url,
         {
-            "student_text": "Create a governed practice assessment.",
             "task_type_hint": "practice",
             "flow_token": flow,
             "csrfmiddlewaretoken": _csrf(client),
@@ -90,6 +91,8 @@ def test_student_flow_uses_exact_scope_existing_contracts_csrf_and_prg(
     )
     assert started.status_code == 302
     assert "/assessments/paper_1/" in started["Location"]
+    assert coordinator.start_request is not None
+    assert coordinator.start_request["student_text"] == "请开始随心练习"
 
     paper_page = client.get(started["Location"])
     assert paper_page.status_code == 200
@@ -125,6 +128,7 @@ def test_student_flow_uses_exact_scope_existing_contracts_csrf_and_prg(
     assert result_page.status_code == 200
     content = result_page.content.decode("utf-8")
     assert "成绩正在复核中" in content
+    assert "返回掌握画像（首页）" in content
     assert "1.0 / 1.0" not in content
     assert "Review the cited course evidence." not in content
     assert "安全反馈" not in content
@@ -146,6 +150,7 @@ def test_student_cannot_cross_class_or_reuse_another_actor_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("COURSE_INSIGHT_ALLOW_LEGACY_TEST_BUNDLE", "1")
     owner = make_user(
         actor_id="pseudonym_student_owner",
         role="student",
@@ -177,7 +182,6 @@ def test_student_cannot_cross_class_or_reuse_another_actor_token(
     started = client.post(
         start.request["PATH_INFO"],
         {
-            "student_text": "practice",
             "task_type_hint": "practice",
             "flow_token": flow,
         },
@@ -195,3 +199,76 @@ def test_student_cannot_cross_class_or_reuse_another_actor_token(
     client.force_login(other)
     stolen = client.get(paper_url)
     assert stolen.status_code == 400
+
+
+def test_follow_up_result_links_back_to_source_correction(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("COURSE_INSIGHT_ALLOW_LEGACY_TEST_BUNDLE", "1")
+    import json
+
+    user = make_user(
+        actor_id="pseudonym_student_001",
+        role="student",
+        permissions=STUDENT_PERMISSIONS,
+    )
+    coordinator = FakeCoordinator(user.actor_id)
+    web_runtime = FakeWebRuntime(coordinator=coordinator, runtime_dir=tmp_path)
+    monkeypatch.setattr(runtime, "get_web_runtime", lambda: web_runtime)
+    (tmp_path / "correction_records.json").write_text(
+        json.dumps(
+            {
+                "paper_source": {
+                    "items": {
+                        "lost_instance": {
+                            "follow_up_paper_id": "paper_1",
+                            "follow_up_item_id": "item_1",
+                            "source_item_id": "item_1",
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    client = Client()
+    client.force_login(user)
+    start = client.get(
+        reverse(
+            "student-start",
+            kwargs={"course_id": "course_1", "class_id": "class_1"},
+        )
+    )
+    flow = start.context["form"].initial["flow_token"]
+    started = client.post(
+        start.request["PATH_INFO"],
+        {
+            "task_type_hint": "practice",
+            "flow_token": flow,
+        },
+    )
+    paper_flow = parse_qs(urlsplit(started["Location"]).query)["flow"][0]
+    answer_name = AssessmentSubmissionForm.answer_field_name("instance_1")
+    submitted = client.post(
+        reverse(
+            "student-submit",
+            kwargs={
+                "course_id": "course_1",
+                "class_id": "class_1",
+                "paper_id": "paper_1",
+            },
+        ),
+        {
+            answer_name: "governed response",
+            "flow_token": paper_flow,
+        },
+    )
+    result_page = client.get(submitted["Location"])
+
+    assert result_page.status_code == 200
+    content = result_page.content.decode("utf-8")
+    assert "返回原卷订正页" in content
+    assert "返回掌握画像（首页）" in content
+    assert "paper_source" in content
+    assert "#lost-lost_instance" in content

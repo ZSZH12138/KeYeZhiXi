@@ -44,6 +44,9 @@ from course_insight.modules.m0_platform.workflow import (
     WAITING_WORKFLOW_STATUSES,
     AssessmentRun,
 )
+from course_insight.modules.m8_assessment_scoring.selection_policy import (
+    AssessmentSelectionContext,
+)
 
 
 class AssessmentWorkflow:
@@ -81,6 +84,7 @@ class AssessmentWorkflow:
         learner_id: str,
         session_id: str,
         knowledge_bundle: KnowledgeBundle,
+        selection_context: AssessmentSelectionContext | None = None,
     ) -> dict[str, ContractModel]:
         dependencies = capture_assessment_dependencies(
             knowledge_bundle=knowledge_bundle,
@@ -103,12 +107,15 @@ class AssessmentWorkflow:
             knowledge_bundle=knowledge_bundle,
             learner_state_snapshot=learner_state,
         )
-        paper = self._m8.generate_paper(
-            task_plan=task,
-            knowledge_bundle=knowledge_bundle,
-            learner_state_snapshot=learner_state,
-            diagnosis_result=None,
-        )
+        generate_arguments = {
+            "task_plan": task,
+            "knowledge_bundle": knowledge_bundle,
+            "learner_state_snapshot": learner_state,
+            "diagnosis_result": None,
+        }
+        if selection_context is not None:
+            generate_arguments["selection_context"] = selection_context
+        paper = self._m8.generate_paper(**generate_arguments)
         now = self._now()
         operation_id = f"start:{task.task_id}"
         run = self._m0.record_assessment_run(
@@ -518,8 +525,10 @@ class AssessmentWorkflow:
         self._results.require_start(paper_id, learner_id=learner_id)
         run = self._results.effective_completed_run(paper_id)
         paper = self._results.require_paper(paper_id)
+        task = self._results.require_task(run.task_id)
         if run.status in WAITING_WORKFLOW_STATUSES:
             return {
+                "task_plan": task,
                 "assessment_paper": paper,
                 "waiting_status": run.status,
             }
@@ -527,6 +536,7 @@ class AssessmentWorkflow:
         feedback = self._m7.get_feedback(run.feedback_id)
         require_results(scoring, feedback)
         return {
+            "task_plan": task,
             "assessment_paper": paper,
             "scoring_result": scoring,
             "feedback": feedback,
@@ -542,10 +552,12 @@ class AssessmentWorkflow:
         start = self._results.require_scope(paper_id, course_id, class_id)
         run = self._results.effective_completed_run(paper_id)
         paper = self._results.require_paper(start.paper_id)
+        task = self._results.require_task(start.task_id)
         scoring = self._results.exact_scoring(run)
         if run.status in WAITING_WORKFLOW_STATUSES:
             require_results(paper, scoring)
             return {
+                "task_plan": task,
                 "assessment_paper": paper,
                 "scoring_result": scoring,
                 "waiting_status": run.status,
@@ -554,6 +566,7 @@ class AssessmentWorkflow:
         analytics = self._m9.get_analytics(run.report_id)
         require_results(paper, scoring, state, analytics)
         return {
+            "task_plan": task,
             "assessment_paper": paper,
             "scoring_result": scoring,
             "state_result": state,

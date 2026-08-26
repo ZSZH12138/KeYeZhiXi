@@ -10,39 +10,42 @@ from course_insight.modules.m0_platform.django_app.forms.start import (
 )
 
 
-def test_start_form_accepts_only_bounded_assessment_intent() -> None:
+def test_start_form_accepts_task_type_without_free_text() -> None:
     form = AssessmentStartForm(
         data={
-            "student_text": "  请生成一次练习。  ",
             "task_type_hint": "practice",
             "flow_token": "signed-value",
         }
     )
 
     assert form.is_valid(), form.errors
-    assert form.cleaned_data["student_text"] == "请生成一次练习。"
+    assert "student_text" not in form.fields
 
 
 def test_start_form_rejects_extra_duplicate_or_non_assessment_input() -> None:
     extra = AssessmentStartForm(
         data={
-            "student_text": "practice",
             "task_type_hint": "practice",
             "flow_token": "signed-value",
             "learner_id": "pseudonym_other",
         }
     )
     duplicate = QueryDict("", mutable=True)
-    duplicate.setlist("student_text", ["first", "second"])
-    duplicate["task_type_hint"] = "practice"
+    duplicate.setlist("task_type_hint", ["practice", "diagnostic"])
     duplicate["flow_token"] = "signed-value"
 
     assert not extra.is_valid()
     assert not AssessmentStartForm(data=duplicate).is_valid()
     assert not AssessmentStartForm(
         data={
-            "student_text": "qa",
             "task_type_hint": "qa",
+            "flow_token": "signed-value",
+        }
+    ).is_valid()
+    assert not AssessmentStartForm(
+        data={
+            "student_text": "这个字段不应再由学生提交",
+            "task_type_hint": "practice",
             "flow_token": "signed-value",
         }
     ).is_valid()

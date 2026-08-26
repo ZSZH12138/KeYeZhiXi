@@ -10,6 +10,18 @@
 [接口指南](docs/interface_guide.md)。契约 Schema、空示例和来源图位于
 [contracts/](contracts/)。
 
+### 2026-08-25 知识链更新
+
+教师知识管理已切换为“多文件上传/批量删除 → 确认处理 → 后台解析 → 原子发布”。系统支持长文本分块、DeepSeek 一次抽取多个知识点、合并概念时保留全部文件来源、题目自动多标签关联和学生可溯源 RAG 答疑。旧知识包审核页面和审核状态机不再参与当前运行；历史事实保存在 [旧架构快照](docs/legacy_architecture_snapshot_2026-08-25.md)，详细设计见 [新架构方案](docs/knowledge_ingestion_rag_redesign.md)。
+
+### 2026-08-26 课程班级学习流程
+
+教师 API、课程文件、知识点与题目现按课程和班级精确共享；学生答疑、四类出卷、简单权威掌握度、错题订正、逐题反馈以及备份后清空流程见 [课程班级学习流程](docs/course_class_learning_flow.md)。
+
+### 2026-08-27 学生测评与答疑闭环
+
+学生开始测评只选择诊断、随心练习、阶段评测或订正，不再提交自由文本。诊断和阶段评测完成后进入画像测评记录，可按试卷 ID 查看得分、错题、原题（含选择题选项）、正确答案、知识点和课程原文；逐题答疑按钮使用签名引用直接进入独立答疑，不改变画像。答疑严格使用当前课程班级的教师密钥，可匹配零到多个知识点；课程资料不足时允许外部检索，但必须提示学生核对事实。
+
 ### 2026-07-27 运维补充
 
 - Web、部署、进程角色与回滚边界见 [deployment.md](docs/deployment.md)；
@@ -24,7 +36,9 @@
 - 轻量词法证据索引、可定位课程证据；
 - M2 RAG：SQLite 离线/测试 lexical 基线，以及生产 PostgreSQL+pgvector 的 embedding、
   lexical/vector/hybrid 检索与脱敏审计；
-- 知识点/先修/误区/题卡/量规/蓝图/Q 矩阵引用校验；
+- 任意数量混合格式知识文件、固定格式题目 TXT、长文本语义分块、多知识点抽取、来源并集合并和活动发布版本；
+- 学生基于活动课程文件的 RAG 答疑，显示来源文件名、页码/幻灯片/行号和短引文；
+- 诊断/阶段画像试卷历史、四类确定性选题策略、逐题选项与答案反馈，以及签名题目答疑入口；
 - 幂等任务规划、固定蓝图组卷、客观规则评分和主观评分编排；
 - 版本化评分审计、教师复核 v2、个体/班级状态和 S0—S5 辅导；
 - M6 私有 `rules`/`shadow`/`active` 运行时、JSON-only LinUCB 制品、奖励/OPE、
@@ -38,7 +52,7 @@
 - SQLite 适配器用于 M1—M3 离线、测试和迁移演练，生产环境必须使用
   PostgreSQL+pgvector；生产 M1—M3 通过 `0016_m1_m2_m3_capabilities.sql`、
   `0017_vector_index_metadata.sql` 和共享的 `PostgresM1M2M3Repository` 持久化完整
-  制品、向量索引、检索审计与教师复核记录；
+  兼容制品、向量索引和检索审计；旧教师知识复核记录只读保留；
 - SQLite→PostgreSQL 导入器，以及离线/测试模式下 `runtime/artifacts/` 的完整、不可变、
   带 checksum 制品仍然保留；SQLite 不是生产权威后端；
 - M4 私有意图 adapter 的规则、shadow、active 三阶段运行方式；公开 `TaskPlan`
@@ -59,8 +73,8 @@ python -m pytest -q
 ```
 
 M0 Web/Worker 使用根 `manage.py`：`python manage.py runserver` 启动开发 Web，
-`python manage.py run_outbox_worker` 启动独立 Worker。生产配置与完整验收步骤见
-[部署说明](docs/deployment.md)。
+`python manage.py run_ingestion_worker` 处理知识入库，`python manage.py run_outbox_worker`
+投递学习事件。生产配置与完整验收步骤见 [部署说明](docs/deployment.md)。
 
 导出公开契约 Schema：
 
@@ -354,14 +368,9 @@ repository: M2Repository)`。
 源码：[service.py](src/course_insight/modules/m3_knowledge_bundle/service.py)。构造：
 `M3KnowledgeBundleService(repository: M3Repository, schema_validator: Any)`。
 
-- `build_knowledge_bundle(...) -> KnowledgeBundle`：离线/测试或生产审批前的校验入口；
-  生产组合根启用审批门时调用它会返回 `M3_REVIEW_REQUIRED`，不能作为生产发布入口。
-- `build_knowledge_bundle_after_approval(...) -> KnowledgeBundle`：生产正式发布入口；
-  只有教师复核 CAS 状态为 `approved` 且版本/checksum 匹配时，才重新捕获种子、校验
-  并持久化知识包，输出给 M4/M5/M8/M9。
-- M3 同时提供 `create_teacher_review_draft`、`submit_teacher_review`、
-  `approve_teacher_review`、`reject_teacher_review` 和 `recall_teacher_review` CAS
-  wrappers；现有 M0 教师 Web 的评分复核接口不等同于这条 M3 S4 工作流。
+- 当前生产入口是应用层 `KnowledgeIngestionProcessor.process(...)`：解析活动文件、合并知识点及全部来源、重建题目标注并原子发布 `CourseKnowledgeRelease`。
+- `knowledge_bundle_from_release(...)` 把新发布版本投影成现有 `KnowledgeBundle`，供 M4/M5/M8/M9 使用；公共契约数量和 `TaskPlan` 字段不变。
+- `build_knowledge_bundle(...)`、`build_knowledge_bundle_after_approval(...)` 和旧 review wrappers 仅为历史兼容保留，不再连接教师 Web 或当前生产发布。
 
 ### M4TaskOrchestrationService
 
@@ -518,8 +527,9 @@ suggestion_rule_engine: Any)`。
   source_authorization_path, output_dir, concept_seed_path, item_seed_path,
   rubric_seed_path, blueprint_seed_path, prerequisite_seed_path,
   misconception_seed_path, teacher_review_id=None, teacher_review_version=None)
-  -> dict[str,ContractModel]`，返回课程包、索引与知识包；生产必须同时提供已批准的
-  `teacher_review_id/version`，否则 M3 审批门会拒绝发布。
+  -> dict[str,ContractModel]`，返回课程包、索引与知识包；这是旧 S1-S6 兼容初始化器，
+  生产兼容调用仍要求已批准的 `teacher_review_id/version`。当前教师知识文件主流程不调用
+  该入口，而由 `KnowledgeIngestionProcessor` 在“确认处理”后校验并原子发布，无审核 ID。
 - `run_assessment_cycle(*, index_ref, knowledge_bundle, student_text,
   task_type_hint, course_id, class_id, learner_id, session_id,
   raw_answer_path: Path|AssessmentSubmission,
@@ -649,7 +659,7 @@ live tests 必须同时提供
 | `m1_m2_m3_artifacts` | PostgreSQL 生产 S1-S6 | module + object_id + object_version + checksum |
 | `m2_vector_indexes` / `m2_vector_documents` | PostgreSQL 生产 pgvector | index_id + index_version + dimension |
 | `m2_retrieval_audits` | PostgreSQL 生产 M2 | audit_id + query_id + index/version |
-| `m3_teacher_reviews` | PostgreSQL 生产 M3 S4 | review_id + subject_id + CAS version |
+| `m3_teacher_reviews` | PostgreSQL 旧 M3 S4 兼容（只读保留） | review_id + subject_id + CAS version |
 | `m4_task_plans` | M4 | task_id、idempotency_key |
 | `m4_intent_decisions` | M4 私有审计 | request_key、输入 checksum、决策/影子元数据；无原始学生文本 |
 | `m5_learner_states` | M5 | course_id + class_id + learner_id + state_version |
@@ -744,7 +754,7 @@ M7 的持久表保存现有学生反馈契约，不保存 DeepSeek 密钥、完�
 | M0 | 配置、日志、SQLite/PostgreSQL、真实 Django/权限/表单、流程恢复、leased Worker | 在目标环境完成生产容量、备份与真实 PostgreSQL 验收 |
 | M1 | 版本化 ParserRegistry、本地多格式解析、授权与确定性分块 | 通过同一端口增加受治理解析器，不绕过来源校验 |
 | M2 | SQLite/离线 lexical 基线；生产 PostgreSQL+pgvector 支持 embedding、vector/hybrid、审计；提供 bounded/target-scale exact-search 基准 profile | 以 disposable PostgreSQL+pgvector 实测结果完成目标规模验收，ANN 仍不自动启用 |
-| M3 | 教师种子校验与 CAS 复核门；`initialize_course` 可携带审批 ID/version，生产发布必须走 `build_knowledge_bundle_after_approval`；教师端提供基础知识包审核页面 | 在目标环境完成真实发布、备份和恢复验收 |
+| M3 | 从文件版本构建概念、来源并集、题库关系和不可变活动发布版本；向旧下游提供 `KnowledgeBundle` 投影 | 在目标环境完成真实发布、备份、删除重建和恢复验收 |
 | M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 91 个公开契约、`TaskPlan` 和八字段业务身份；当前不把可配置 adapter 写成已生产启用 |
 | M5 | 真实 DINA/BKT、完整历史、版本化模型与模型驱动状态 | 使用达到治理门槛的去标识化数据训练；数据不足时明确失败 |
 | M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索；提供 fail-closed 受控验证脚本 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline；M6 OPE 不接入 M9 |
@@ -775,13 +785,14 @@ M6 私有 OPE/approval 尚未正式接入 M9；当前 M9 公共质量入口只�
 复用现有 Pydantic 契约，补齐鉴权、限流、错误映射和审计，且不能让
 M1—M9 依赖 HTTP/ORM/SDK 类型。
 
-## S1-S6 生产能力（当前权威说明）
+## S1-S6 生产兼容能力（当前边界）
 
 S1-S6 已完成可替换端口与可恢复链路：M1 使用版本化 ParserRegistry；M2 提供
 OpenAI-compatible embedding、pgvector 两阶段建索引、lexical/vector/hybrid 排序；
-每次正式策略检索都可写入脱敏审计；M3 的生产发布必须经过教师复核的
-`draft -> submitted -> approved` CAS 流程。生产环境不使用 deterministic provider，
-缺失 embedding/vector/audit/review 依赖时 fail closed，不返回伪造的 `empty` 成功。
+每次正式策略检索都可写入脱敏审计。旧 M3 兼容入口仍保留教师复核的
+`draft -> submitted -> approved` CAS 流程，但不再连接教师页面或当前知识发布；当前
+主流程通过文件变更集直接校验并原子发布。生产环境不使用 deterministic provider，
+缺失 embedding/vector/audit 依赖时 fail closed；仅旧兼容入口继续校验 review 依赖。
 
 SQLite 适配器用于离线、测试和迁移演练，PostgreSQL + pgvector 是生产权威适配器。
 PostgreSQL 的 S1-S6 核心 migration 为 `0016_m1_m2_m3_capabilities.sql`，向量索引

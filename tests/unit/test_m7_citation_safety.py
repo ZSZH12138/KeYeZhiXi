@@ -78,6 +78,7 @@ def test_canonical_hashed_chunk_evidence_id_is_student_safe() -> None:
         ("source_id", "chapter 1"),
         ("source_id", "john-doe-home-address"),
         ("source_id", "source_john-doe-home-address"),
+        ("source_id", "source_network_notes"),
         ("source_id", "source_1\nlearner@example.com"),
         ("source_id", "source_13800138000"),
         ("source_id", "source_11010519491231002X"),

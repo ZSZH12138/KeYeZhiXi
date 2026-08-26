@@ -18,6 +18,10 @@ from course_insight.modules.m1_course_governance.parser_protocol import (
     ParserEntry,
     ParserRegistry,
 )
+from course_insight.modules.m1_course_governance.legacy_powerpoint import (
+    LegacyPowerPointConversionError,
+    LegacyPowerPointConverter,
+)
 
 _MAX_RAW_BYTES = DEFAULT_MAX_BYTES
 _MAX_PDF_PAGES = 200
@@ -72,6 +76,7 @@ def parse_source(
     payload: bytes,
     *,
     ocr_provider: OCRTextProvider | None = None,
+    legacy_powerpoint_converter: LegacyPowerPointConverter | None = None,
 ) -> ParsedSource:
     """Parse one supported source byte sequence without accessing the host."""
 
@@ -82,7 +87,20 @@ def parse_source(
 
     suffix = PurePath(file_name).suffix.casefold()
     if suffix == ".ppt":
-        raise _ParserError("unsupported legacy powerpoint format")
+        if legacy_powerpoint_converter is None:
+            raise _ParserError("legacy PowerPoint conversion is unavailable")
+        try:
+            converted = legacy_powerpoint_converter.convert(payload)
+        except LegacyPowerPointConversionError:
+            raise
+        except Exception as error:
+            raise _ParserError("legacy PowerPoint conversion failed") from error
+        parsed = _parse_pptx(converted)
+        return ParsedSource(
+            media_type="application/vnd.ms-powerpoint",
+            page_count=parsed.page_count,
+            blocks=parsed.blocks,
+        )
     if suffix == ".md":
         return _parse_plain_text(payload, media_type="text/markdown")
     if suffix == ".txt":
@@ -99,6 +117,7 @@ def parse_source(
 def default_parser_registry(
     *,
     ocr_provider: OCRTextProvider | None = None,
+    legacy_powerpoint_converter: LegacyPowerPointConverter | None = None,
 ) -> ParserRegistry:
     """Build the versioned registry for the built-in M1 byte parsers."""
 
@@ -114,8 +133,7 @@ def default_parser_registry(
     pdf_capabilities = frozenset({"byte-input", "paged"})
     if ocr_provider is not None:
         pdf_capabilities = frozenset({"byte-input", "paged", "ocr"})
-    return ParserRegistry(
-        (
+    entries = [
             ParserEntry(
                 extension=".md",
                 media_type="text/markdown",
@@ -169,8 +187,26 @@ def default_parser_registry(
                 parser=parse_source,
                 parser_id="m1.parse_source",
             ),
+    ]
+    if legacy_powerpoint_converter is not None:
+        entries.append(
+            ParserEntry(
+                extension=".ppt",
+                media_type="application/vnd.ms-powerpoint",
+                parser_version="parse-source-v1",
+                capabilities=frozenset(
+                    {"byte-input", "converted", "paged", "structured"}
+                ),
+                max_bytes=_MAX_RAW_BYTES,
+                parser=lambda file_name, payload: parse_source(
+                    file_name,
+                    payload,
+                    legacy_powerpoint_converter=legacy_powerpoint_converter,
+                ),
+                parser_id="m1.parse_source.powerpoint-com",
+            )
         )
-    )
+    return ParserRegistry(entries)
 
 
 def _parse_plain_text(payload: bytes, *, media_type: str) -> ParsedSource:

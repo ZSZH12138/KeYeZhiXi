@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from course_insight.contracts.knowledge import ParameterRule
-from course_insight.modules.m0_platform.follow_up import build_follow_up_bundle
+from course_insight.modules.m0_platform.follow_up import (
+    build_follow_up_bundle,
+    rebuild_follow_up_bundle,
+)
 from course_insight.modules.m8_assessment_scoring.paper_generator import (
     PaperGenerator,
 )
@@ -62,3 +65,49 @@ def test_follow_up_paper_has_one_item_and_different_parameters() -> None:
         follow_paper.all_items()[0].parameters.get("protocol")
         != original.all_items()[0].parameters.get("protocol")
     )
+
+
+def test_rebuild_follow_up_bundle_matches_start_checksum() -> None:
+    bundle = make_knowledge_bundle(subjective=False)
+    item = bundle.items[0]
+    salt_paper = "paper_lost_1"
+    instance_id = "item_2_instance"
+    follow_bundle, follow_item = build_follow_up_bundle(
+        bundle,
+        source_item=item,
+        salt=f"{salt_paper}:{instance_id}",
+    )
+    records = {
+        salt_paper: {
+            "items": {
+                instance_id: {
+                    "follow_up_paper_id": "paper_fu_1",
+                    "follow_up_item_id": follow_item.item_id,
+                    "source_item_id": item.item_id,
+                }
+            }
+        }
+    }
+
+    rebuilt = rebuild_follow_up_bundle(bundle, records, "paper_fu_1")
+
+    assert rebuilt is not None
+    assert rebuilt.content_checksum() == follow_bundle.content_checksum()
+    assert bundle.content_checksum() != follow_bundle.content_checksum()
+
+
+def test_follow_up_prefers_a_same_concept_sibling() -> None:
+    bundle = make_knowledge_bundle(subjective=False)
+    source = bundle.items[0]
+    sibling = source.model_copy(
+        update={"item_id": "item_2_variant", "stem": "Variant question"}
+    )
+    bundle = bundle.model_copy(update={"items": [source, sibling]})
+    _, follow_item = build_follow_up_bundle(
+        bundle,
+        source_item=source,
+        salt="paper_1:item_2_instance",
+    )
+
+    assert follow_item.item_id == "item_2_variant"
+    assert follow_item.stem == "Variant question"

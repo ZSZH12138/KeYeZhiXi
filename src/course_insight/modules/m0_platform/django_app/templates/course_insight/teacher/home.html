@@ -19,19 +19,26 @@
       <button type="submit">查看复核</button>
     </form>
   </div>
+  {% if can_manage_course_knowledge %}
   <div class="card">
-    <h2>知识包审核</h2>
-    <p class="muted">输入课程、班级和审核编号，查看并处理 M3 知识包审核状态。</p>
-    <form method="get" action="{% url 'teacher-knowledge-review-lookup' %}">
-      {{ knowledge_lookup_form.as_p }}
-      <button type="submit">查看知识包</button>
-    </form>
+    <h2>课程知识与题目文件</h2>
+    <p class="muted">直接上传、删除或编辑文件，然后确认一次；系统会解析知识点、更新题目标注并发布新版本。</p>
+    {% for scope in knowledge_scopes %}
+      <p><a href="{% url 'teacher-course-knowledge' course_id=scope.course_id class_id=scope.class_id %}">管理 {{ scope.course_id }} / {{ scope.class_id }}</a></p>
+    {% empty %}
+      <p class="muted">当前账号没有课程范围；系统管理员可通过课程管理入口指定课程。</p>
+    {% endfor %}
   </div>
+  {% endif %}
   {% if can_configure_deepseek %}
   <div class="card">
     <h2>DeepSeek 接口</h2>
-    <p class="muted">填写官方 API 密钥。密钥不会在页面回显，环境变量优先于本页保存的文件。</p>
-    <p><a href="{% url 'teacher-deepseek-settings' %}">打开 DeepSeek 配置</a></p>
+    <p class="muted">每个课程/班级单独填写官方 API 密钥；密钥加密保存且不会在页面回显。</p>
+    {% for scope in knowledge_scopes %}
+      <p><a href="{% url 'teacher-deepseek-settings' course_id=scope.course_id class_id=scope.class_id %}">配置 {{ scope.course_id }} / {{ scope.class_id }}</a></p>
+    {% empty %}
+      <p class="muted">当前没有可配置的课程班级。</p>
+    {% endfor %}
   </div>
   {% endif %}
 {% endblock %}

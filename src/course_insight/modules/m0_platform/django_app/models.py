@@ -127,6 +127,9 @@ class ActorGrant(models.Model):
             ("view_student_report", "Can view student reports"),
             ("review_score", "Can review assessment scores"),
             ("configure_deepseek", "Can configure the DeepSeek API"),
+            ("manage_course_knowledge", "Can manage course knowledge"),
+            ("ask_course_question", "Can ask cited course questions"),
+            ("view_course_files", "Can view published course files"),
             ("manage_course_roles", "Can manage course roles"),
             ("manage_platform", "Can manage the platform"),
         ]
@@ -280,3 +283,24 @@ class LoginFailureBucket(models.Model):
         """Never expose the keyed login identity in diagnostics."""
 
         return "LoginFailureBucket<redacted>"
+
+
+# Imported here so Django discovers the models while existing imports keep the
+# stable ``django_app.models`` public surface.
+from course_insight.modules.m0_platform.django_app.knowledge_models import (  # noqa: E402
+    AssessmentProjectionReceipt,
+    CourseClassWorkspace,
+    CourseKnowledgeRelease,
+    CourseSource,
+    CourseSourceVersion,
+    KnowledgeChangeOperation,
+    KnowledgeExtractionBatchCheckpoint,
+    KnowledgeIngestionJob,
+    LearnerConceptMastery,
+    ReleaseConcept,
+    ReleaseConceptSource,
+    ReleaseQuestion,
+    ReleaseQuestionConceptLink,
+    ScopedDeepSeekConfiguration,
+    WrongQuestionRecord,
+)

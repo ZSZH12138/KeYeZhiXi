@@ -1,0 +1,74 @@
+{"kind":"deck","id":"pr/ztxahi","name":"Deck"}
+{"kind":"layout","layoutId":"ae2ed6ff-13d3-4dbe-9111-de576c71fda3","name":"Master","type":"master"}
+{"kind":"layout","layoutId":"51ca197b-34cb-493d-a275-af9a40de9fbc","name":"Title Slide","type":"title"}
+{"kind":"slide","id":"sl/jw6w5c","slide":1,"title":"计算机网络核心原理与故障诊断","textShapes":3}
+{"kind":"textbox","id":"sh/alszit87","slide":1,"name":"cover-kicker","text":"计算机网络核心原理与故障诊断","textPreview":"计算机网络核心原理与故障诊断","textChars":14,"textLines":1,"bbox":[42,42,720,48]}
+{"kind":"textbox","id":"sh/xo3ido7y","slide":1,"name":"cover-title","text":"从现象到证据：网络故障诊断","textPreview":"从现象到证据：网络故障诊断","textChars":13,"textLines":1,"bbox":[42,175,1050,235]}
+{"kind":"textbox","id":"sh/cnuhkjqd","slide":1,"name":"cover-subtitle","text":"计算机网络核心原理与故障诊断","textPreview":"计算机网络核心原理与故障诊断","textChars":14,"textLines":1,"bbox":[42,490,800,80]}
+{"kind":"notes","id":"nt/jw6w5c","slide":1,"text":"[Sources]\n- https://www.rfc-editor.org/info/rfc9293/\n- https://www.rfc-editor.org/info/rfc1122/"}
+{"kind":"slide","id":"sl/dm9zvp","slide":2,"title":"先定位层次，再选择工具","textShapes":4}
+{"kind":"textbox","id":"sh/g3at47eh","slide":2,"name":"title-2","text":"先定位层次，再选择工具","textPreview":"先定位层次，再选择工具","textChars":11,"textLines":1,"bbox":[42,36,1196,110]}
+{"kind":"shape","id":"sh/f21sb2dw","slide":2,"name":"left-rule-2","bbox":[42,205,8,330]}
+{"kind":"textbox","id":"sh/u1sb2xwb","slide":2,"name":"left-2","text":"链路/网络层：接口、地址、路由、丢包","textPreview":"链路/网络层：接口、地址、路由、丢包","textChars":18,"textLines":1,"bbox":[75,218,515,310]}
+{"kind":"shape","id":"sh/t0ja9cvq","slide":2,"name":"right-panel-2","bbox":[648,205,552,330]}
+{"kind":"textbox","id":"sh/8zat07el","slide":2,"name":"right-2","text":"应用/传输层：端口、握手、DNS、HTTP","textPreview":"应用/传输层：端口、握手、DNS、HTTP","textChars":21,"textLines":1,"bbox":[684,235,480,270]}
+{"kind":"textbox","id":"sh/7ehs72d0","slide":2,"name":"footer-2","text":"2","textPreview":"2","textChars":1,"textLines":1,"bbox":[1184,658,54,25]}
+{"kind":"notes","id":"nt/dm9zvp","slide":2,"text":"[Sources]\n- https://www.rfc-editor.org/info/rfc9293/\n- https://www.rfc-editor.org/info/rfc1122/"}
+{"kind":"slide","id":"sl/q18sy3","slide":3,"title":"一次可复核的诊断闭环","textShapes":5}
+{"kind":"textbox","id":"sh/zq1czm18","slide":3,"name":"title-3","text":"一次可复核的诊断闭环","textPreview":"一次可复核的诊断闭环","textChars":10,"textLines":1,"bbox":[42,36,1196,110]}
+{"kind":"shape","id":"sh/0rat872t","slide":3,"name":"timeline-line-3","bbox":[92,352,776,0.03]}
+{"kind":"shape","id":"sh/lsju1cje","slide":3,"name":"timeline-node-3-0","bbox":[84,344,16,16]}
+{"kind":"shape","id":"sh/mtsbahkz","slide":3,"name":"timeline-node-3-1","bbox":[472,344,16,16]}
+{"kind":"shape","id":"sh/nulc3m1k","slide":3,"name":"timeline-node-3-2","bbox":[860,344,16,16]}
+{"kind":"textbox","id":"sh/8vutcr25","slide":3,"name":"timeline-body-3-0","text":"1  复现与记录","textPreview":"1  复现与记录","textChars":8,"textLines":1,"bbox":[74,405,300,125]}
+{"kind":"textbox","id":"sh/9w3u5wja","slide":3,"name":"timeline-body-3-1","text":"2  假设与取证","textPreview":"2  假设与取证","textChars":8,"textLines":1,"bbox":[462,405,300,125]}
+{"kind":"textbox","id":"sh/uxcbe10v","slide":3,"name":"timeline-body-3-2","text":"3  单变量验证","textPreview":"3  单变量验证","textChars":8,"textLines":1,"bbox":[850,405,300,125]}
+{"kind":"textbox","id":"sh/vylc761g","slide":3,"name":"footer-3","text":"3","textPreview":"3","textChars":1,"textLines":1,"bbox":[1184,658,54,25]}
+{"kind":"notes","id":"nt/q18sy3","slide":3,"text":"[Sources]\n- https://www.rfc-editor.org/info/rfc9293/\n- https://www.rfc-editor.org/info/rfc1122/"}
+{"kind":"slide","id":"sl/85tn7m","slide":4,"title":"能 ping IP，不能访问域名","textShapes":4}
+{"kind":"textbox","id":"sh/t8vydc7u","slide":4,"name":"title-4","text":"能 ping IP，不能访问域名","textPreview":"能 ping IP，不能访问域名","textChars":16,"textLines":1,"bbox":[42,36,1196,110]}
+{"kind":"shape","id":"sh/65kfih8j","slide":4,"name":"left-rule-4","bbox":[42,205,8,330]}
+{"kind":"textbox","id":"sh/r6dgb2p4","slide":4,"name":"left-4","text":"支持的假设：DNS 解析失败","textPreview":"支持的假设：DNS 解析失败","textChars":14,"textLines":1,"bbox":[75,218,515,310]}
+{"kind":"shape","id":"sh/432xg7qd","slide":4,"name":"right-panel-4","bbox":[648,205,552,330]}
+{"kind":"textbox","id":"sh/54by9cry","slide":4,"name":"right-4","text":"反证：直接访问 IP 仍失败则继续查端口与 HTTP","textPreview":"反证：直接访问 IP 仍失败则继续查端口与 HTTP","textChars":26,"textLines":1,"bbox":[684,235,480,270]}
+{"kind":"textbox","id":"sh/i1kfex87","slide":4,"name":"footer-4","text":"4","textPreview":"4","textChars":1,"textLines":1,"bbox":[1184,658,54,25]}
+{"kind":"notes","id":"nt/85tn7m","slide":4,"text":"[Sources]\n- https://www.rfc-editor.org/info/rfc9293/\n- https://www.rfc-editor.org/info/rfc1122/"}
+{"kind":"slide","id":"sl/qow5ro","slide":5,"title":"常用工具与证据","textShapes":2}
+{"kind":"textbox","id":"sh/jq5kzy50","slide":5,"name":"title-5","text":"常用工具与证据","textPreview":"常用工具与证据","textChars":7,"textLines":1,"bbox":[42,36,1196,100]}
+{"kind":"shape","id":"sh/lsn218n6","slide":5,"name":"table-accent-5","bbox":[42,155,1197,8]}
+{"kind":"textbox","id":"sh/6dw3ator","slide":5,"name":"footer-5","text":"5","textPreview":"5","textChars":1,"textLines":1,"bbox":[1184,658,54,25]}
+{"kind":"table","id":"tb/d4z2xg3m","slide":5,"name":"evidence-table-5","rows":5,"cols":3,"preview":"工具 | 主要证据 | 常见误读","bbox":[42,168,1197,430]}
+{"kind":"notes","id":"nt/qow5ro","slide":5,"text":"[Sources]\n- https://www.rfc-editor.org/info/rfc9293/\n- https://www.rfc-editor.org/info/rfc1122/"}
+{"kind":"slide","id":"sl/heh1pz","slide":6,"title":"TCP 握手抓包判读","textShapes":4}
+{"kind":"textbox","id":"sh/wv2t8jat","slide":6,"name":"title-6","text":"TCP 握手抓包判读","textPreview":"TCP 握手抓包判读","textChars":10,"textLines":1,"bbox":[42,36,1196,110]}
+{"kind":"shape","id":"sh/vutszet8","slide":6,"name":"left-rule-6","bbox":[42,205,8,330]}
+{"kind":"textbox","id":"sh/utkb69sn","slide":6,"name":"left-6","text":"只有 SYN：检查监听、防火墙与回程","textPreview":"只有 SYN：检查监听、防火墙与回程","textChars":18,"textLines":1,"bbox":[75,218,515,310]}
+{"kind":"shape","id":"sh/9srax4b2","slide":6,"name":"right-panel-6","bbox":[648,205,552,330]}
+{"kind":"textbox","id":"sh/8rit4zax","slide":6,"name":"right-6","text":"SYN/SYN-ACK 后无 ACK：检查客户端路径或状态","textPreview":"SYN/SYN-ACK 后无 ACK：检查客户端路径或状态","textChars":29,"textLines":1,"bbox":[684,235,480,270]}
+{"kind":"textbox","id":"sh/7q9svutc","slide":6,"name":"footer-6","text":"6","textPreview":"6","textChars":1,"textLines":1,"bbox":[1184,658,54,25]}
+{"kind":"notes","id":"nt/heh1pz","slide":6,"text":"[Sources]\n- https://www.rfc-editor.org/info/rfc9293/\n- https://www.rfc-editor.org/info/rfc1122/"}
+{"kind":"slide","id":"sl/m5adb7","slide":7,"title":"订正时必须补齐证据链","textShapes":5}
+{"kind":"textbox","id":"sh/uxojqpwz","slide":7,"name":"title-7","text":"订正时必须补齐证据链","textPreview":"订正时必须补齐证据链","textChars":10,"textLines":1,"bbox":[42,36,1196,110]}
+{"kind":"shape","id":"sh/hkz214va","slide":7,"name":"timeline-line-7","bbox":[92,352,776,0.03]}
+{"kind":"shape","id":"sh/wzq1szep","slide":7,"name":"timeline-node-7-0","bbox":[84,344,16,16]}
+{"kind":"shape","id":"sh/7ux0vud8","slide":7,"name":"timeline-node-7-1","bbox":[472,344,16,16]}
+{"kind":"shape","id":"sh/mtojmpwn","slide":7,"name":"timeline-node-7-2","bbox":[860,344,16,16]}
+{"kind":"textbox","id":"sh/9wfix4ve","slide":7,"name":"timeline-body-7-0","text":"1  原结论","textPreview":"1  原结论","textChars":6,"textLines":1,"bbox":[74,405,300,125]}
+{"kind":"textbox","id":"sh/8v61ozet","slide":7,"name":"timeline-body-7-1","text":"2  新证据","textPreview":"2  新证据","textChars":6,"textLines":1,"bbox":[462,405,300,125]}
+{"kind":"textbox","id":"sh/zqd0radc","slide":7,"name":"timeline-body-7-2","text":"3  修正后的结论","textPreview":"3  修正后的结论","textChars":9,"textLines":1,"bbox":[850,405,300,125]}
+{"kind":"textbox","id":"sh/yp4ji5wr","slide":7,"name":"footer-7","text":"7","textPreview":"7","textChars":1,"textLines":1,"bbox":[1184,658,54,25]}
+{"kind":"notes","id":"nt/m5adb7","slide":7,"text":"[Sources]\n- https://www.rfc-editor.org/info/rfc9293/\n- https://www.rfc-editor.org/info/rfc1122/"}
+{"kind":"slide","id":"sl/4dfuyo","slide":8,"title":"安全边界","textShapes":4}
+{"kind":"textbox","id":"sh/5cfe5wzi","slide":8,"name":"title-8","text":"安全边界","textPreview":"安全边界","textChars":4,"textLines":1,"bbox":[42,36,1196,110]}
+{"kind":"shape","id":"sh/ipofuh0r","slide":8,"name":"left-rule-8","bbox":[42,205,8,330]}
+{"kind":"textbox","id":"sh/3qxw3mhc","slide":8,"name":"left-8","text":"不泄漏标准答案，不执行破坏性命令","textPreview":"不泄漏标准答案，不执行破坏性命令","textChars":16,"textLines":1,"bbox":[75,218,515,310]}
+{"kind":"shape","id":"sh/gnmxsril","slide":8,"name":"right-panel-8","bbox":[648,205,552,330]}
+{"kind":"textbox","id":"sh/hofe1cz6","slide":8,"name":"right-8","text":"所有身份、地址与日志均使用测试数据","textPreview":"所有身份、地址与日志均使用测试数据","textChars":17,"textLines":1,"bbox":[684,235,480,270]}
+{"kind":"textbox","id":"sh/ul4fqh0v","slide":8,"name":"footer-8","text":"8","textPreview":"8","textChars":1,"textLines":1,"bbox":[1184,658,54,25]}
+{"kind":"notes","id":"nt/4dfuyo","slide":8,"text":"[Sources]\n- https://www.rfc-editor.org/info/rfc9293/\n- https://www.rfc-editor.org/info/rfc1122/"}
+{"kind":"slide","id":"sl/xs0oho","slide":9,"title":"课堂任务","textShapes":2}
+{"kind":"textbox","id":"sh/hg7et03q","slide":9,"name":"title-9","text":"课堂任务","textPreview":"课堂任务","textChars":4,"textLines":1,"bbox":[42,36,1196,100]}
+{"kind":"shape","id":"sh/vupwrql0","slide":9,"name":"table-accent-9","bbox":[42,155,1197,8]}
+{"kind":"textbox","id":"sh/8redgbm9","slide":9,"name":"footer-9","text":"9","textPreview":"9","textChars":1,"textLines":1,"bbox":[1184,658,54,25]}
+{"kind":"table","id":"tb/zilczy1g","slide":9,"name":"evidence-table-9","rows":4,"cols":3,"preview":"任务 | 交付物 | 通过标准","bbox":[42,168,1197,430]}
+{"kind":"notes","id":"nt/xs0oho","slide":9,"text":"[Sources]\n- https://www.rfc-editor.org/info/rfc9293/\n- https://www.rfc-editor.org/info/rfc1122/"}

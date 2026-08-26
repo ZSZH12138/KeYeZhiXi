@@ -34,6 +34,8 @@ ROLE_PERMISSIONS: Final[Mapping[str, frozenset[str]]] = {
             "submit_assessment",
             "view_own_result",
             "view_own_feedback",
+            "ask_course_question",
+            "view_course_files",
         }
     ),
     RoleName.TEACHER: frozenset(
@@ -42,6 +44,7 @@ ROLE_PERMISSIONS: Final[Mapping[str, frozenset[str]]] = {
             "view_student_report",
             "review_score",
             "configure_deepseek",
+            "manage_course_knowledge",
         }
     ),
     RoleName.COURSE_ADMIN: frozenset(
@@ -51,6 +54,7 @@ ROLE_PERMISSIONS: Final[Mapping[str, frozenset[str]]] = {
             "review_score",
             "manage_course_roles",
             "configure_deepseek",
+            "manage_course_knowledge",
         }
     ),
     RoleName.SYSTEM_ADMIN: frozenset(
@@ -65,6 +69,9 @@ ROLE_PERMISSIONS: Final[Mapping[str, frozenset[str]]] = {
             "manage_course_roles",
             "manage_platform",
             "configure_deepseek",
+            "manage_course_knowledge",
+            "ask_course_question",
+            "view_course_files",
         }
     ),
 }
@@ -75,7 +82,13 @@ PERMISSION_CODENAMES: Final[frozenset[str]] = frozenset(
 )
 _APP_LABEL = "m0_platform_web"
 _STUDENT_SELF_PERMISSIONS = frozenset(
-    {"submit_assessment", "view_own_result", "view_own_feedback"}
+    {
+        "submit_assessment",
+        "view_own_result",
+        "view_own_feedback",
+        "ask_course_question",
+        "view_course_files",
+    }
 )
 _scope_pattern = re.compile(SCOPE_ID_PATTERN)
 _actor_pattern = re.compile(PSEUDONYMOUS_ACTOR_PATTERN)
@@ -193,6 +206,79 @@ def authorize_deepseek_config(user: User | AnonymousUser) -> ActorContext:
         role=role,
         course_ids=[],
         class_ids=[],
+        issued_at=moment,
+    )
+
+
+def authorize_course_knowledge(
+    user: User | AnonymousUser,
+    course_id: str,
+    *,
+    at: datetime | None = None,
+) -> ActorContext:
+    """Authorize teacher administration against one exact course.
+
+    A teacher may have several class grants for the same course; those grants
+    represent one course-level management authority and are not treated as an
+    ambiguity. Grants from different roles are still rejected fail-closed.
+    """
+
+    moment = _validated_moment(at)
+    if not isinstance(course_id, str) or not _scope_pattern.fullmatch(course_id):
+        raise PermissionDenied
+    if (
+        not getattr(user, "is_authenticated", False)
+        or not getattr(user, "is_active", False)
+        or getattr(user, "pk", None) is None
+        or not user.has_perm(f"{_APP_LABEL}.manage_course_knowledge")
+    ):
+        raise PermissionDenied
+
+    grants = tuple(
+        ActorGrant.objects.filter(
+            user_id=user.pk,
+            is_active=True,
+            revoked_at__isnull=True,
+            valid_from__lte=moment,
+        )
+        .filter(Q(valid_until__isnull=True) | Q(valid_until__gt=moment))
+        .order_by("role", "course_id", "class_id", "pk")
+    )
+    roles = {grant.role for grant in grants}
+    if len(roles) != 1:
+        raise PermissionDenied
+    role = next(iter(roles))
+    if "manage_course_knowledge" not in ROLE_PERMISSIONS.get(role, frozenset()):
+        raise PermissionDenied
+
+    if role == RoleName.TEACHER:
+        matching = tuple(grant for grant in grants if grant.course_id == course_id)
+        if not matching:
+            raise PermissionDenied
+        class_ids = sorted(
+            {grant.class_id for grant in matching if grant.class_id is not None}
+        )
+    elif role == RoleName.COURSE_ADMIN:
+        matching = tuple(
+            grant
+            for grant in grants
+            if grant.course_id == course_id and grant.class_id is None
+        )
+        if len(matching) != 1:
+            raise PermissionDenied
+        class_ids = []
+    elif role == RoleName.SYSTEM_ADMIN:
+        if len(grants) != 1 or grants[0].course_id is not None:
+            raise PermissionDenied
+        class_ids = []
+    else:
+        raise PermissionDenied
+
+    return ActorContext(
+        actor_id=user.actor_id,
+        role=role,
+        course_ids=[course_id],
+        class_ids=class_ids,
         issued_at=moment,
     )
 

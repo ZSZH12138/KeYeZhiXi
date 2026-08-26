@@ -55,6 +55,9 @@ from course_insight.modules.m8_assessment_scoring.retry_equivalence import (
     same_paper_generation,
     same_scoring_result,
 )
+from course_insight.modules.m8_assessment_scoring.selection_policy import (
+    AssessmentSelectionContext,
+)
 
 
 class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
@@ -83,6 +86,7 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
         knowledge_bundle: KnowledgeBundle,
         learner_state_snapshot: LearnerStateSnapshot | None,
         diagnosis_result: DiagnosisResult | None,
+        selection_context: AssessmentSelectionContext | None = None,
     ) -> AssessmentPaper:
         """Generate one version-frozen personalized paper.
 
@@ -102,11 +106,21 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
                 details={"task_id": task_plan.task_id},
                 recoverable=True,
             )
-        paper = generator(
-            task_plan,
-            knowledge_bundle,
-            learner_state_snapshot,
-            diagnosis_result,
+        paper = (
+            generator(
+                task_plan,
+                knowledge_bundle,
+                learner_state_snapshot,
+                diagnosis_result,
+            )
+            if selection_context is None
+            else generator(
+                task_plan,
+                knowledge_bundle,
+                learner_state_snapshot,
+                diagnosis_result,
+                selection_context,
+            )
         )
         self._paper_event_context = {
             **self._paper_event_context,

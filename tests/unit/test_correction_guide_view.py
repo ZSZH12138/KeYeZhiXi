@@ -33,6 +33,9 @@ def test_correction_guide_lists_lost_items_without_revealing_the_answer_key() ->
 
     assert guide.available is True
     assert guide.lost_items
+    assert guide.lost_items[0].concept_ids == ("concept_2",)
+    assert guide.lost_items[0].concept_names == ("Concept 2",)
+    assert guide.lost_items[0].status == "尚未订正"
     assert "标准答案" not in guide.hint
     assert guide.hint_revealed is False
 
@@ -66,6 +69,15 @@ def test_item_correction_notes_are_per_lost_item() -> None:
 
     assert notes[0].status == "提示后改对"
     assert notes[0].item_instance_id == instance_id
+
+    guide = correction_guide_view(
+        paper,
+        scoring,
+        make_knowledge_bundle(subjective=False),
+        records=records,
+    )
+    assert guide.lost_items[0].status == "提示后改对"
+    assert guide.lost_items[0].concept_names == ("Concept 2",)
 
 
 def test_profile_uses_concept_names_and_progress_points() -> None:

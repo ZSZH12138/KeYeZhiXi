@@ -95,3 +95,40 @@ def test_student_profile_groups_concepts_and_shows_active_misconceptions() -> No
     assert profile.priority_support[0].misconceptions == ("重复使用双冒号",)
     assert profile.priority_support[0].source_locator == concept.chapter_id
     assert profile.next_practice_concept_ids == (concept.concept_id,)
+
+
+def test_student_profile_omits_concepts_without_attempt_evidence() -> None:
+    bundle = make_knowledge_bundle()
+    snapshot = LearnerStateSnapshot(
+        snapshot_id="snapshot_1",
+        course_id="course_1",
+        class_id="class_1",
+        learner_id="pseudonym_student_001",
+        state_version=1,
+        concept_states=[
+            ConceptState(
+                concept_id=bundle.concepts[0].concept_id,
+                mastery_probability=1.0,
+                mastery_confidence=0.5,
+                misconceptions=[],
+                hint_dependency=0.0,
+                recent_correction_rate=1.0,
+                evidence_count=0,
+                updated_at=UTC_TIME,
+            )
+        ],
+        overall_mastery=1.0,
+        evidence_count=1,
+        updated_at=UTC_TIME,
+    )
+
+    profile = student_profile_view(
+        snapshot=snapshot,
+        knowledge_bundle=bundle,
+        **_thresholds(),
+    )
+
+    assert profile.ready is True
+    assert profile.mastered == ()
+    assert profile.consolidating == ()
+    assert profile.priority_support == ()

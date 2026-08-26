@@ -1,7 +1,15 @@
 {% extends "course_insight/base.html" %}
 {% block title %}测评结果 · 课业智析{% endblock %}
 {% block content %}
+  {% include "course_insight/student/_nav.html" with current_label="测评结果" %}
   <h1>测评结果</h1>
+  {% if source_correction_url %}
+    <section class="card">
+      <h2>返回原卷订正</h2>
+      <p>本题跟练只对应一个失分点。请回到原来的订正页继续其他知识点，不要从首页重新开始。</p>
+      <p><a href="{{ source_correction_url }}">返回原卷订正页</a></p>
+    </section>
+  {% endif %}
   {% if result.score_pending_rescore %}
     <p class="status">成绩正在复核中，暂不公布最终得分。</p>
     <p class="muted">教师确认前不会展示分数、量规明细或学生反馈。</p>
@@ -17,6 +25,34 @@
         </ul>
       </section>
     {% endfor %}
+    <h2>逐题得分反馈</h2>
+    {% for item in question_details %}
+      <section class="card" id="result-item-{{ item.item_instance_id }}">
+        <h3>原题目</h3>
+        <p>{{ item.stem }}</p>
+        {% if item.options %}
+          <ul>
+            {% for label, text in item.options %}<li>{{ label }}. {{ text }}</li>{% endfor %}
+          </ul>
+        {% endif %}
+        <h3>题目正确答案</h3>
+        <p>{{ item.correct_answer }}</p>
+        <h3>题目涉及知识点</h3>
+        <p>{{ item.concept_names|join:"、" }}</p>
+        <h3>知识点对应原文件</h3>
+        {% for source in item.source_blocks %}
+          <div class="card">
+            <p><strong>{{ source.file_name }}</strong> · {{ source.locator }}</p>
+            <p>{{ source.text }}</p>
+          </div>
+        {% empty %}<p class="muted">当前没有可显示的有效课程原文。</p>{% endfor %}
+        <form method="post" action="{{ qa_url }}">
+          {% csrf_token %}
+          <input type="hidden" name="question_ref" value="{{ item.qa_token }}">
+          <button type="submit">答疑分析本题</button>
+        </form>
+      </section>
+    {% empty %}<p class="muted">当前没有可显示的逐题反馈。</p>{% endfor %}
     {% if result.feedback %}
     <h2>安全反馈</h2>
     <p>{{ result.feedback.message }}</p>

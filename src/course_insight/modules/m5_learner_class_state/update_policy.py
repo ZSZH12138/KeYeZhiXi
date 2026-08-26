@@ -360,6 +360,16 @@ class DeterministicStateUpdatePolicy:
         audits = latest_audits(bundle)
         score_ratio = bundle.total_score / bundle.max_score if bundle.max_score else 0.0
         review_required = bundle.requires_teacher_review()
+        assessed_concepts = {
+            concept_id
+            for row in diagnosis.item_diagnoses
+            for concept_id in row.concept_ids
+        }
+        previous_by_id = (
+            {}
+            if previous is None
+            else {item.concept_id: item for item in previous.concept_states}
+        )
         priority_concepts = set(diagnosis.priority_concept_ids)
         priority_misconceptions = set(diagnosis.priority_misconception_ids)
         if learning_model_run is not None:
@@ -376,6 +386,14 @@ class DeterministicStateUpdatePolicy:
                 )
         concept_states: list[ConceptState] = []
         for concept in knowledge.concepts:
+            prior = previous_by_id.get(concept.concept_id)
+            if (
+                learning_model_run is None
+                and concept.concept_id not in assessed_concepts
+            ):
+                if prior is not None:
+                    concept_states.append(prior.model_copy(deep=True))
+                    continue
             governed_misconceptions = [
                 item
                 for item in knowledge.misconception_tags
@@ -427,7 +445,7 @@ class DeterministicStateUpdatePolicy:
                 if model_mastery is not None
                 else score_ratio
                 if is_priority
-                else max(0.5, score_ratio)
+                else (prior.mastery_probability if prior is not None else 0.5)
             )
             confidence = (
                 0.5 + 0.5 * abs(diagnosis_mastery - 0.5) * 2.0
@@ -443,7 +461,11 @@ class DeterministicStateUpdatePolicy:
                     mastery_confidence=confidence,
                     misconceptions=misconception_states,
                     hint_dependency=(0.5 if is_priority and review_required else 0.0),
-                    recent_correction_rate=(0.0 if review_required else score_ratio),
+                    recent_correction_rate=(
+                        0.0
+                        if review_required or concept.concept_id not in assessed_concepts
+                        else score_ratio
+                    ),
                     evidence_count=(len(audits) if is_priority else 0),
                     updated_at=bundle.finalized_at,
                 )

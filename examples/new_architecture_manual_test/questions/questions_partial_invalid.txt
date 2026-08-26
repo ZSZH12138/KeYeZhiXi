@@ -1,0 +1,26 @@
+[QUESTION]
+id: tcp-valid-sibling-001
+type: choice
+stem: 下列哪个机制主要保护接收端缓冲能力？
+option.A: 流量控制
+option.B: 拥塞避免
+option.C: 路由选择
+answer: A
+explanation: 流量控制关注接收端处理和缓冲能力。
+[/QUESTION]
+
+[QUESTION]
+id: tcp-broken-001
+type: subjective
+stem: 解释慢启动。
+answer: 慢启动逐步探测可用容量。
+explanation: 本题故意缺少 subjective 必需的 rubric 字段。
+[/QUESTION]
+
+[QUESTION]
+id: tcp-valid-sibling-002
+type: fill_blank
+stem: 慢启动阈值之后通常进入 ____ 阶段。
+answer: 拥塞避免
+explanation: 达到阈值后使用更谨慎的增长策略。
+[/QUESTION]

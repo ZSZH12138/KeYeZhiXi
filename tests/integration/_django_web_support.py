@@ -256,9 +256,11 @@ class FakeCoordinator:
         self.rescore_submission: AssessmentSubmission | None = None
         self.rescore_audit_id: str | None = None
         self.raise_context: DomainError | None = None
+        self.start_request: dict[str, object] | None = None
 
     def start_assessment(self, **kwargs):
         assert kwargs["learner_id"] == self.paper.learner_id
+        self.start_request = dict(kwargs)
         return {"assessment_paper": self.paper.model_copy(deep=True)}
 
     def get_pending_assessment(self, **kwargs):

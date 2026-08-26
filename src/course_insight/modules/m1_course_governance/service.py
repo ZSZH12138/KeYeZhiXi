@@ -30,6 +30,7 @@ from course_insight.modules.m1_course_governance.parsers import (
     ParsedBlock,
     ParsedSource,
 )
+from course_insight.modules.m1_course_governance.chunking import split_parsed_blocks
 from course_insight.modules.m1_course_governance.repository import M1Repository
 from course_insight.modules.m1_course_governance.authorization import (
     _AuthorizationRow,
@@ -392,13 +393,17 @@ class M1CourseGovernanceService:
         try:
             result = parser.parse(path.name, raw_bytes)
             if isinstance(result, ParsedSource):
-                parsed = self._canonicalize_parsed_source(result)
+                parsed = self._chunk_parsed_source(
+                    self._canonicalize_parsed_source(result)
+                )
                 if parsed.media_type != parser.media_type:
                     raise ValueError("parser media type does not match registry entry")
                 return parsed, parser.metadata()
             if isinstance(result, str):
-                parsed = self._canonicalize_parsed_source(
-                    self._legacy_text_source(result)
+                parsed = self._chunk_parsed_source(
+                    self._canonicalize_parsed_source(
+                        self._legacy_text_source(result)
+                    )
                 )
                 if parsed.media_type != parser.media_type:
                     raise ValueError("parser media type does not match registry entry")
@@ -488,9 +493,15 @@ class M1CourseGovernanceService:
             blocks=tuple(sorted(canonical_blocks, key=lambda block: block.ordinal)),
         )
 
+    @staticmethod
+    def _chunk_parsed_source(source: ParsedSource) -> ParsedSource:
+        return ParsedSource(
+            media_type=source.media_type,
+            page_count=source.page_count,
+            blocks=split_parsed_blocks(source.blocks),
+        )
+
     def _resolve_parser(self, path: Path) -> ParserEntry:
-        if path.suffix.casefold() == ".ppt":
-            raise _domain("COURSE_PARSE_FAILED", "legacy PowerPoint sources are not supported", file_name=path.name)
         if self._parser_dispatch is None:
             raise _domain("COURSE_PARSE_FAILED", "parser registry is unavailable")
         try:

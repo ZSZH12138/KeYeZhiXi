@@ -1,0 +1,92 @@
+{
+  "misconception_tags": [
+    {
+      "concept_ids": [
+        "concept_network_layers"
+      ],
+      "description": "把同层通信误认为物理直连",
+      "evidence_rules": [
+        "detect:mis_layer_peer"
+      ],
+      "misconception_id": "mis_layer_peer",
+      "name": "把同层通信误认为物理直连"
+    },
+    {
+      "concept_ids": [
+        "concept_ipv4_cidr"
+      ],
+      "description": "把前缀长度直接当作主机位数",
+      "evidence_rules": [
+        "detect:mis_cidr_hosts"
+      ],
+      "misconception_id": "mis_cidr_hosts",
+      "name": "把前缀长度直接当作主机位数"
+    },
+    {
+      "concept_ids": [
+        "concept_ipv6_text"
+      ],
+      "description": "认为同一 IPv6 地址可多次使用 ::",
+      "evidence_rules": [
+        "detect:mis_ipv6_double_colon"
+      ],
+      "misconception_id": "mis_ipv6_double_colon",
+      "name": "认为同一 IPv6 地址可多次使用 ::"
+    },
+    {
+      "concept_ids": [
+        "concept_tcp_reliability"
+      ],
+      "description": "认为 ACK 必须携带应用数据",
+      "evidence_rules": [
+        "detect:mis_tcp_ack_data"
+      ],
+      "misconception_id": "mis_tcp_ack_data",
+      "name": "认为 ACK 必须携带应用数据"
+    },
+    {
+      "concept_ids": [
+        "concept_udp_datagram"
+      ],
+      "description": "认为 UDP 自带可靠重传",
+      "evidence_rules": [
+        "detect:mis_udp_reliable"
+      ],
+      "misconception_id": "mis_udp_reliable",
+      "name": "认为 UDP 自带可靠重传"
+    },
+    {
+      "concept_ids": [
+        "concept_performance"
+      ],
+      "description": "把带宽与传播时延当作同一指标",
+      "evidence_rules": [
+        "detect:mis_bandwidth_delay"
+      ],
+      "misconception_id": "mis_bandwidth_delay",
+      "name": "把带宽与传播时延当作同一指标"
+    },
+    {
+      "concept_ids": [
+        "concept_dns_resolution"
+      ],
+      "description": "认为 DNS 永远只使用 UDP",
+      "evidence_rules": [
+        "detect:mis_dns_transport"
+      ],
+      "misconception_id": "mis_dns_transport",
+      "name": "认为 DNS 永远只使用 UDP"
+    },
+    {
+      "concept_ids": [
+        "concept_http_semantics"
+      ],
+      "description": "认为 HTTP 协议自动保存全部用户会话",
+      "evidence_rules": [
+        "detect:mis_http_state"
+      ],
+      "misconception_id": "mis_http_state",
+      "name": "认为 HTTP 协议自动保存全部用户会话"
+    }
+  ]
+}

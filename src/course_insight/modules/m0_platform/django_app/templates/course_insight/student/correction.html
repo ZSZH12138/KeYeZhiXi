@@ -1,13 +1,31 @@
 {% extends "course_insight/base.html" %}
 {% block title %}测后订正 · 课业智析{% endblock %}
 {% block content %}
+  {% include "course_insight/student/_nav.html" with current_label="测后订正" %}
   <h1>测后订正</h1>
   {% if not guide.available %}
     <p class="muted">当前没有需要订正的失分题，或成绩仍在复核中。</p>
   {% else %}
+    <nav class="card" aria-label="失分点索引">
+      <h2>失分点索引</h2>
+      <p class="muted">跟练只对应一道失分题。做完后请回到本页继续其他知识点，不要从首页重新开始。</p>
+      <ul>
+        {% for item in guide.lost_items %}
+          <li>
+            <a href="#lost-{{ item.item_instance_id }}">第 {{ forloop.counter }} 题</a>
+            {% for name in item.concept_names %}<span class="tag">{{ name }}</span>{% endfor %}
+            · {{ item.status }}
+          </li>
+        {% endfor %}
+      </ul>
+    </nav>
     {% for item in guide.lost_items %}
-    <section class="card">
-      <h2>失分题</h2>
+    <section class="card" id="lost-{{ item.item_instance_id }}">
+      <h2>失分题 {{ forloop.counter }}</h2>
+      <p>
+        {% for name in item.concept_names %}<span class="tag">{{ name }}</span>{% empty %}<span class="muted">未标注知识点</span>{% endfor %}
+        · {{ item.status }}
+      </p>
       <p>{{ item.stem }}</p>
       <h3>1. 错因</h3>
       <p class="muted">{{ item.cause }}</p>

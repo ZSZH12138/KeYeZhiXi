@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import math
+import random
 from typing import Any
 
 from course_insight.contracts.assessment import (
@@ -22,6 +23,11 @@ from course_insight.contracts.state import DiagnosisResult, LearnerStateSnapshot
 from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m8_assessment_scoring.clock import Clock, SystemUTCClock
 from course_insight.modules.m8_assessment_scoring.rule_scorer import RuleScorer
+from course_insight.modules.m8_assessment_scoring.selection_policy import (
+    AssessmentSelectionContext,
+    SelectionItem,
+    select_items,
+)
 
 
 _SCORE_TOLERANCE = 1e-9
@@ -76,6 +82,7 @@ class PaperGenerator:
         knowledge_bundle: KnowledgeBundle,
         learner_state_snapshot: LearnerStateSnapshot | None,
         diagnosis_result: DiagnosisResult | None,
+        selection_context: AssessmentSelectionContext | None = None,
     ) -> AssessmentPaper:
         self._validate_references(
             task_plan,
@@ -94,6 +101,13 @@ class PaperGenerator:
             self._raise_unsatisfiable(
                 task_plan,
                 "assessment blueprint is not approved for the task course",
+            )
+        if selection_context is not None:
+            return self._generate_policy_paper(
+                task_plan,
+                knowledge_bundle,
+                blueprint,
+                selection_context,
             )
 
         used_item_ids: set[str] = set()
@@ -147,6 +161,65 @@ class PaperGenerator:
                 "paper maximum does not match the blueprint total",
             )
         return frozen
+
+    def _generate_policy_paper(
+        self,
+        task_plan: TaskPlan,
+        knowledge_bundle: KnowledgeBundle,
+        blueprint,
+        context: AssessmentSelectionContext,
+    ) -> AssessmentPaper:
+        approved = knowledge_bundle.approved_items()
+        seed = int.from_bytes(
+            hashlib.sha256(task_plan.task_id.encode("utf-8")).digest()[:8],
+            byteorder="big",
+        )
+        selected_ids = select_items(
+            task_plan.task_type,
+            tuple(
+                SelectionItem(
+                    item_id=item.item_id,
+                    concept_ids=tuple(item.concept_ids),
+                )
+                for item in approved
+            ),
+            mastery_by_concept=context.mastery_by_concept,
+            open_wrong_item_ids=context.open_wrong_item_ids,
+            rng=random.Random(seed),
+        )
+        item_by_id = {item.item_id: item for item in approved}
+        selected = [item_by_id[item_id] for item_id in selected_ids]
+        section_score = math.fsum(
+            item.max_score(knowledge_bundle) for item in selected
+        )
+        section = PaperSection(
+            section_id=f"policy-{task_plan.task_type}",
+            name={
+                "diagnostic": "诊断测评",
+                "practice": "随心练习",
+                "stage_assessment": "阶段评测",
+                "correction": "错题订正",
+            }[task_plan.task_type],
+            items=[
+                self._freeze_item(item, knowledge_bundle, task_plan.learner_id)
+                for item in selected
+            ],
+            score=section_score,
+        )
+        payload: dict[str, Any] = {
+            "paper_id": f"paper_{task_plan.task_id}",
+            "task_id": task_plan.task_id,
+            "blueprint_id": blueprint.blueprint_id,
+            "blueprint_version": blueprint.version,
+            "learner_id": task_plan.learner_id,
+            "sections": [section],
+            "generated_at": self._clock.now(),
+            "immutable_checksum": "pending",
+        }
+        candidate = AssessmentPaper(**payload)
+        return AssessmentPaper(
+            **{**payload, "immutable_checksum": candidate.freeze()}
+        )
 
     @staticmethod
     def _validate_references(
@@ -215,12 +288,14 @@ class PaperGenerator:
                 learner_state_snapshot,
                 diagnosis_result,
                 section.purpose,
+                learner_id,
             ),
             *self._personalize_candidates(
                 [item for item in remaining if not item.is_objective()],
                 learner_state_snapshot,
                 diagnosis_result,
                 section.purpose,
+                learner_id,
             ),
         ]
         if (
@@ -280,11 +355,17 @@ class PaperGenerator:
         learner_state_snapshot: LearnerStateSnapshot | None,
         diagnosis_result: DiagnosisResult | None,
         purpose: str | None = None,
+        learner_id: str = "",
     ) -> list[ItemCard]:
-        """Rank interchangeable items by current diagnosis and weakest mastery."""
+        """Rank interchangeable items by diagnosis, mastery, then learner-stable order."""
+
+        def learner_tie(item: ItemCard) -> str:
+            return hashlib.sha256(
+                f"{learner_id}\0{item.item_id}".encode("utf-8")
+            ).hexdigest()
 
         if learner_state_snapshot is None and diagnosis_result is None:
-            return list(candidates)
+            return sorted(candidates, key=learner_tie)
         priority_ranks = {
             concept_id: rank
             for rank, concept_id in enumerate(
@@ -506,7 +587,17 @@ class PaperGenerator:
             if separator and suffix.isdigit()
             else f"{item.item_id}_instance"
         )
-        parameters: dict[str, Any] = {}
+        choice_options = item.answer_key.get("options")
+        parameters: dict[str, Any] = (
+            {
+                "_choice_options": {
+                    str(label): str(text)
+                    for label, text in choice_options.items()
+                }
+            }
+            if isinstance(choice_options, dict) and choice_options
+            else {}
+        )
         for rule in item.parameter_rules:
             value = PaperGenerator._learner_parameter(rule, learner_id, item.item_id)
             if not rule.accepts(value):
@@ -546,13 +637,25 @@ class PaperGenerator:
             digest = hashlib.sha256(
                 f"{learner_id}\0{item_id}\0{rule.name}".encode("utf-8")
             ).digest()
-            return rule.choices[int.from_bytes(digest[:8], "big") % len(rule.choices)]
+            return PaperGenerator._coerce_choice(
+                rule,
+                rule.choices[int.from_bytes(digest[:8], "big") % len(rule.choices)],
+            )
         return PaperGenerator._fixed_parameter(rule)
+
+    @staticmethod
+    def _coerce_choice(rule: ParameterRule, value: str) -> Any:
+        normalized_type = " ".join(rule.value_type.split()).casefold()
+        if normalized_type in {"integer", "int"}:
+            return int(value)
+        if normalized_type in {"number", "float"}:
+            return float(value)
+        return value
 
     @staticmethod
     def _fixed_parameter(rule: ParameterRule) -> Any:
         if rule.choices:
-            return rule.choices[0]
+            return PaperGenerator._coerce_choice(rule, rule.choices[0])
         normalized_type = " ".join(rule.value_type.split()).casefold()
         if normalized_type in {"integer", "int"}:
             return int(rule.minimum) if rule.minimum is not None else 0

@@ -12,8 +12,8 @@ RAG、知识模型或 LLM。
 
 ## 输入来源
 
-- 调用方提供的授权 Markdown 课程原文和授权 CSV。
-- 调用方提供的 metadata JSON，其课程 ID、来源版本、时间和校验和必须完整。
+- M0 在课程权限下登记的 `0..N` 个活动来源文件版本，支持 `.md`、`.txt`、`.pdf`、`.docx`、`.ppt` 和 `.pptx` 混合上传。
+- 每个来源版本携带课程、版本、校验和和安全存储引用；旧批处理兼容入口仍可提供授权 CSV 与 metadata JSON。
 - 可替换 parser 适配器；边界始终输出同一契约。
 
 ## 输出
@@ -45,10 +45,16 @@ artifact 目录及 manifest，恢复前后都要验证身份、版本和 checksu
 ## S6 ParserRegistry
 
 M1 的默认解析器通过 `ParserRegistry` 绑定 `.md`、`.txt`、`.pdf`、`.docx` 和
-`.pptx`。扩展名大小写不敏感；每个 `ParserEntry` 固定 parser id、版本、媒体类型、
-能力标签和最大输入字节数，并在调用适配器前完成边界校验。`.ppt` 明确拒绝。
+`.pptx`；当调用方注入 `LegacyPowerPointConverter` 时再绑定 `.ppt`。扩展名大小写
+不敏感；每个 `ParserEntry` 固定 parser id、版本、媒体类型、能力标签和最大输入字节数，
+并在调用适配器前完成边界校验。生产 ingestion Worker 注入 Windows PowerPoint COM
+转换器；转换时关闭宏、只读打开且不显示文档窗口，临时 PPTX 解析完成后清理。
 导入快照只保存这些安全元数据，不保存主机路径或解析器原始输出；自定义解析器可通过
 同一协议注入，不能绕过 M1 的授权、哈希和字节上限。
+
+PPT/PPTX 的定位单位不是整页：先按幻灯片保留 `slide` 页码，再把页内文本框的每个
+段落和表格的每个可见单元格分别输出为最小解析块。后续长文本切割只会继续拆分过长
+块，不会丢失原始 slide/shape/table locator；旧 PPT 的文件名和来源版本始终保持原值。
 
 PDF 先读取文本层。扫描 PDF 没有文本层时会明确返回
 `COURSE_PDF_OCR_REQUIRED`，不会把空文本当成导入成功；部署方可通过
@@ -67,3 +73,7 @@ $env:COURSE_INSIGHT_OCR__LANGUAGE = "chi_sim+eng"
 （默认 30）和 `COURSE_INSIGHT_OCR__MAX_OUTPUT_BYTES` 可按部署资源调整。默认
 `backend=disabled`，未配置 OCR 时不会悄悄调用外部进程；OCR 结果仍受页数、
 单页和总文本字节上限约束。
+
+## 2026-08-25 长文本分块
+
+所有解析正文在规范化后进入 `split_parsed_blocks`。默认上限为 6,000 个非空白 Unicode 字符；先按段落组合，单段超限时依次尝试句末、较弱标点/空白，最后按字符硬切。每个子块保留原文件 locator 并获得稳定 chunk ID，供 M7 抽取和 M3 来源追踪。文件数量为 `0..N`，单文件失败不得影响同批其他文件。

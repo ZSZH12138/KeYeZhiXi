@@ -12,7 +12,6 @@ ASSESSMENT_TASK_TYPES = (
     ("correction", "订正"),
     ("stage_assessment", "阶段测评"),
 )
-_MAX_STUDENT_TEXT_LENGTH = 12_000
 _SCOPE_ID_PATTERN = r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$"
 _scope_validator = RegexValidator(
     regex=_SCOPE_ID_PATTERN,
@@ -21,14 +20,8 @@ _scope_validator = RegexValidator(
 
 
 class AssessmentStartForm(forms.Form):
-    """Validate learner intent while all identities remain server-owned."""
+    """Validate a bounded task choice while all free text stays server-owned."""
 
-    student_text = forms.CharField(
-        min_length=1,
-        max_length=_MAX_STUDENT_TEXT_LENGTH,
-        strip=True,
-        widget=forms.Textarea,
-    )
     task_type_hint = forms.ChoiceField(choices=ASSESSMENT_TASK_TYPES)
     flow_token = forms.CharField(
         min_length=1,

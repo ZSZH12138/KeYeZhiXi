@@ -42,6 +42,9 @@ from course_insight.modules.m5_learner_class_state.service import M5StateService
 from course_insight.modules.m6_tutoring_fsm.service import M6TutoringControlService
 from course_insight.modules.m7_local_model.service import M7LocalModelService
 from course_insight.modules.m8_assessment_scoring.service import M8AssessmentService
+from course_insight.modules.m8_assessment_scoring.selection_policy import (
+    AssessmentSelectionContext,
+)
 from course_insight.modules.m9_teacher_analytics.service import M9TeacherAnalyticsService
 
 
@@ -95,6 +98,7 @@ class AppCoordinator:
         learner_id: str,
         session_id: str,
         knowledge_bundle: KnowledgeBundle,
+        selection_context: AssessmentSelectionContext | None = None,
     ) -> dict[str, ContractModel]:
         """Create and durably index an assessment without copying its payload."""
 
@@ -106,6 +110,7 @@ class AppCoordinator:
             learner_id=learner_id,
             session_id=session_id,
             knowledge_bundle=knowledge_bundle,
+            selection_context=selection_context,
         )
 
     def submit_assessment(

@@ -118,6 +118,44 @@ def test_client_uses_current_deepseek_json_endpoint(
     )
 
     assert invocation.result.status == "succeeded"
+
+
+def test_explicit_api_key_ignores_global_environment_key(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "wrong-global-key")
+    transport = _FakeTransport(_response())
+
+    invocation = _client(
+        transport,
+        api_key="teacher-scoped-key",
+    ).invoke_json(
+        request=_request(),
+        messages=(
+            {"role": "system", "content": "Return json."},
+            {"role": "user", "content": "{}"},
+        ),
+    )
+
+
+def _web_request() -> LLMGenerationRequest:
+    return LLMGenerationRequest(
+        request_id="student_qa_web_1",
+        use_case="student_rag_qa",
+        model_ref=LLMModelRef(
+            model_name="deepseek-v4-flash",
+            model_version="runtime-api",
+            status="configured",
+        ),
+        prompt_template_id="student-qa-web-search",
+        prompt_template_version="1",
+        evidence_ids=[],
+        input_checksum="b" * 64,
+        created_at=NOW,
+    )
+
+    assert invocation.result.status == "succeeded"
+    assert transport.calls[0]["headers"]["Authorization"] == (
+        "Bearer teacher-scoped-key"
+    )
     assert invocation.result.citation_ids == ["evidence_1"]
     assert invocation.audit.status == "succeeded"
     assert invocation.audit.input_tokens == 11
@@ -132,6 +170,96 @@ def test_client_uses_current_deepseek_json_endpoint(
     assert transport.calls[0]["payload"]["temperature"] == 0.0
     assert transport.calls[0]["payload"]["max_tokens"] == 4096
     assert transport.calls[0]["payload"]["stream"] is False
+
+
+def test_web_search_uses_responses_api_and_returns_only_https_sources() -> None:
+    response = DeepSeekHTTPResponse(
+        status_code=200,
+        body=json.dumps(
+            {
+                "id": "response-1",
+                "object": "response",
+                "status": "completed",
+                "model": "deepseek-v4-flash",
+                "output": [
+                    {
+                        "type": "web_search_call",
+                        "id": "search-1",
+                        "status": "completed",
+                        "action": {"type": "search", "query": "TCP 慢启动"},
+                    },
+                    {
+                        "type": "message",
+                        "id": "message-1",
+                        "status": "completed",
+                        "role": "assistant",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "慢启动用于逐步增加拥塞窗口。",
+                                "annotations": [
+                                    {
+                                        "type": "url_citation",
+                                        "title": "RFC 5681",
+                                        "url": "https://www.rfc-editor.org/rfc/rfc5681",
+                                        "start_index": 0,
+                                        "end_index": 3,
+                                    },
+                                    {
+                                        "type": "url_citation",
+                                        "title": "Unsafe",
+                                        "url": "javascript:alert(1)",
+                                        "start_index": 0,
+                                        "end_index": 3,
+                                    },
+                                    {
+                                        "type": "url_citation",
+                                        "title": "Whitespace URL",
+                                        "url": "https://safe.example/path\njavascript:alert(1)",
+                                        "start_index": 0,
+                                        "end_index": 3,
+                                    },
+                                ],
+                            }
+                        ],
+                    },
+                ],
+                "usage": {"input_tokens": 15, "output_tokens": 9},
+                "error": None,
+                "incomplete_details": None,
+            },
+            ensure_ascii=False,
+        ).encode(),
+        headers={},
+    )
+    transport = _FakeTransport(response)
+
+    invocation = _client(
+        transport,
+        api_key="teacher-scoped-key",
+    ).invoke_web_search(
+        request=_web_request(),
+        question="慢启动有什么作用？",
+    )
+
+    assert invocation.result.status == "succeeded"
+    assert invocation.result.content == "慢启动用于逐步增加拥塞窗口。"
+    assert [(source.source_id, source.title, source.url) for source in invocation.sources] == [
+        (
+            "web-source-1",
+            "RFC 5681",
+            "https://www.rfc-editor.org/rfc/rfc5681",
+        )
+    ]
+    assert invocation.audit.input_tokens == 15
+    assert invocation.audit.output_tokens == 9
+    assert transport.calls[0]["url"] == "https://api.deepseek.com/responses"
+    assert transport.calls[0]["headers"]["Authorization"] == (
+        "Bearer teacher-scoped-key"
+    )
+    assert transport.calls[0]["payload"]["model"] == "deepseek-v4-flash"
+    assert transport.calls[0]["payload"]["tools"] == [{"type": "web_search"}]
+    assert transport.calls[0]["payload"]["tool_choice"] == {"type": "web_search"}
 
 
 def test_client_fails_closed_without_api_key(monkeypatch) -> None:

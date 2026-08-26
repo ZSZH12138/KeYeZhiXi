@@ -1,12 +1,12 @@
 {% extends "course_insight/base.html" %}
 {% block title %}DeepSeek 接口配置 · 课业智析{% endblock %}
 {% block content %}
-  <p class="breadcrumb">首页 / 教师端 / DeepSeek 接口</p>
+  <p class="breadcrumb">首页 / 教师端{% if scoped %} / {{ course_id }} / {{ class_id }}{% endif %} / DeepSeek 接口</p>
   <h1 class="page-title">DeepSeek 接口配置</h1>
   <div class="card">
     <p>接口地址固定为 <code>{{ status.endpoint }}</code>，教师只需填写密钥和模型。</p>
     <p class="muted">
-      {% if status.env_overrides_file %}
+      {% if not scoped and status.env_overrides_file %}
         当前密钥来自服务器环境变量 <code>DEEPSEEK_API_KEY</code>，环境变量优先于本页保存的文件。
       {% elif status.configured %}
         当前已保存密钥：<code>{{ status.masked_key }}</code>
@@ -14,10 +14,12 @@
         尚未配置密钥。未填写前，系统不会向 DeepSeek 发请求。
       {% endif %}
     </p>
-    {% if status.configured and not status.privacy_gate_ready %}
+    {% if not scoped and status.configured and not status.privacy_gate_ready %}
       <p class="muted">密钥已保存，但钉住的本地隐私复核工件尚未部署（{{ status.privacy_gate_reason }}）。主观评分仍保持失败关闭，不会出站。</p>
-    {% elif status.scoring_ready %}
+    {% elif not scoped and status.scoring_ready %}
       <p class="muted">密钥与隐私工件均已配置。应用启动时仍会做完整性校验；缺依赖或校验失败时不会发送评分请求。</p>
+    {% elif scoped and status.configured %}
+      <p class="muted">此密钥只供 {{ course_id }} / {{ class_id }} 的课程解析与学生答疑使用；其他班级不会读取它。配置版本：{{ status.api_revision }}。</p>
     {% endif %}
     <form method="post">
       {% csrf_token %}

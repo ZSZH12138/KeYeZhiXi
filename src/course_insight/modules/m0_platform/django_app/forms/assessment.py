@@ -101,6 +101,18 @@ class AssessmentSubmissionForm(forms.Form):
 
     @staticmethod
     def _field_for(item: ItemInstance) -> forms.Field:
+        choice_options = item.parameters.get("_choice_options")
+        if isinstance(choice_options, dict) and choice_options:
+            choices = tuple(
+                (label, f"{label}. {text}")
+                for label, text in sorted(choice_options.items())
+            )
+            return forms.ChoiceField(
+                choices=choices,
+                required=True,
+                label=item.stem,
+                widget=forms.RadioSelect,
+            )
         answer_type = (
             "str"
             if item.is_subjective()

@@ -1,8 +1,28 @@
 # 部署说明
 
+> 2026-08-27 当前知识链已经切换为文件入库与原子发布架构。旧 M3 知识包审核只保留历史兼容，不再连接教师页面或新发布流程；详见
+> [当前架构](architecture.md) 和 [历史快照](legacy_architecture_snapshot_2026-08-25.md)。
+
+新架构首次运行前执行：
+
+```shell
+python manage.py migrate
+python manage.py sync_roles --apply
+```
+
+本地人工测试建议分别启动：
+
+```shell
+python manage.py runserver
+python manage.py run_ingestion_worker
+python manage.py run_outbox_worker
+```
+
+`run_ingestion_worker` 负责知识文件解析、DeepSeek 多知识点抽取、题目标注和活动版本发布；`run_outbox_worker` 只负责既有学习事件投递，两者互不替代。只有核心配置、数据库或日志不可用时 `/health/ready/` 才返回 503。单个 Worker 缺失时返回 HTTP 200 + `degraded`，登录仍可使用，响应中的 `capabilities` 会指出不可用功能。
+
 ## 文档边界
 
-本文件描述截至 `2026-08-16` 已实现的 M0 部署面、M1—M3 S1-S6 能力、M5/M8
+本文件描述截至 `2026-08-27` 已实现的 M0 部署面、M1—M3 S1-S6 能力、M5/M8
 本地模型能力、M6 私有策略
 配置与进程角色。它不把未实测的 PostgreSQL+pgvector 联调写成“已通过”，也不把开发
 服务器当成生产 WSGI/ASGI 部署。SQLite 仅用于离线、测试和迁移演练；生产必须使用
@@ -10,8 +30,8 @@ PostgreSQL+pgvector。仓库已提供真实 HTTP embedding + PostgreSQL/pgvector
 恢复链路的 live 用例；本机没有受保护测试数据库时仍会明确 skip，只有 CI job 通过
 后才能记录为联调验收通过。
 M5 的 DINA/BKT、M8 的 2PL IRT/能力估计/自适应选择以及 M9 的本地模型质量
-已经实现，并仍受数据门槛、shadow 质量审核和教师批准约束。M7/M9 的 DeepSeek
-网络调用默认关闭；教师可填写密钥，但学生评分还必须部署钉住的本地隐私复核工件。M2 的 embedding/pgvector 代码、性能验收 CLI 和真实 live 验收用例已经实现；
+已经实现，并仍受数据门槛、shadow 质量审核和教师批准约束。旧 M7 主观评分和 M9
+教师解读仍默认关闭，并分别受隐私与质量门限制。知识抽取、题目标注和独立学生答疑使用教师按课程号、班级号保存的密钥；未配置时不出站，也不回退到全局密钥。M2 的 embedding/pgvector 代码、性能验收 CLI 和真实 live 验收用例已经实现；
 当前开发机若未提供受保护的 PostgreSQL 测试环境，性能 CLI 会 fail closed，不能
 把未执行写成通过。
 
@@ -77,6 +97,8 @@ default-off；发布说明不得把“代码可配置”写成“已生产启用
 数据库 URL、Django secret、Cookie/Authorization、DeepSeek key、学生原始答案和
 完整 prompt 都属于敏感值。配置错误只应暴露字段名与稳定错误码，不应打印值。
 
+默认请求体上限为 `5 GiB + 16 MiB`，用于避免 5 GiB 以内的请求在进入表单前被 Django 拒绝；单个知识文件仍执行独立的 `50 MiB` 业务上限、类型签名和容器校验。生产反向代理的请求体上限也必须不低于应用设置。
+
 登录失败限流同时使用 HMAC 后的 `actor+client IP`、纯 `actor` 和纯
 `client IP` 三层桶，分别防止换 actor、换 IP 与单组合重试绕过；数据库不保存原始
 actor hint 或 IP。成功登录只清理 actor 相关的两个桶，保留共享 IP 聚合历史直至
@@ -132,6 +154,15 @@ python manage.py run_outbox_worker
 runtime/outbox_worker/<worker_id>.status.json
 ```
 
+知识入库使用独立 Worker：
+
+```shell
+python manage.py run_ingestion_worker --once
+python manage.py run_ingestion_worker
+```
+
+它使用 `runtime/ingestion_worker/worker.lock` 保存进程号和心跳。各处理阶段和每批 DeepSeek 调用都会刷新心跳及数据库租约；进程异常结束后，其他 Worker 可以重新认领租约过期的任务。若启动失败，命令会明确报告锁文件中的 PID、心跳和是否过期；不会再用笼统的 `outbox worker could not start safely` 代表知识入库故障。
+
 ### Migration
 
 PostgreSQL 核心 schema migration 与 Django migration 是两套：
@@ -142,8 +173,8 @@ PostgreSQL 核心 schema migration 与 Django migration 是两套：
 SQLite 的 `m1_course_packages`、`m2_evidence_indexes`、`m3_knowledge_bundles`
 用于离线/测试和迁移演练；SQLite 不是生产权威后端。生产 PostgreSQL core migration
 0016 创建 `m1_m2_m3_artifacts`、`m2_vector_indexes`、`m2_vector_documents`、
-`m2_retrieval_audits` 和 `m3_teacher_reviews`，0017 为向量索引补充受治理的
-package/model metadata；当前 PostgreSQL core schema 为 v21。两者由共享的
+`m2_retrieval_audits` 和仅供旧发布兼容的 `m3_teacher_reviews`，0017 为向量索引补充
+受治理的 package/model metadata；当前 PostgreSQL core schema 为 v21。两者由共享的
 `PostgresM1M2M3Repository` 与 pgvector 适配器接收 M1—M3 业务写入。
 
 SQLite→PostgreSQL 数据迁移入口：
@@ -186,7 +217,7 @@ Web 第一次恢复课程上下文时读取
 当前 `schema_version=1` 的 manifest 协议要求随 manifest 保留三份
 `runtime/snapshots/` 契约快照。SQLite/离线模式下它们与完整
 `runtime/artifacts/` 一起用于恢复和 cross-check；生产 PostgreSQL 模式下，M1—M3
-制品、审计和 review 由共享仓储恢复，manifest/snapshot 仅作显式配置的引用和身份
+制品、审计和旧 review 兼容记录由共享仓储恢复，manifest/snapshot 仅作显式配置的引用和身份
 cross-check。部署备份和恢复必须覆盖所选后端的权威数据、manifest 与必要快照；不能
 只复制 manifest、单个契约 JSON 或数据库表。当前不把 ready 向量索引的自动发现写成
 已完成能力。
@@ -194,7 +225,7 @@ cross-check。部署备份和恢复必须覆盖所选后端的权威数据、man
 所有引用必须是 `runtime/` 内无 `..` 的相对路径。部署启动前必须先校验：
 
 - 校验 `runtime/artifacts/` 中 M1 完整课程导入、M2 完整 lexical snapshot，以及
-  M3 bundle + seed snapshot + validation report；
+  旧 S1-S6 兼容路径的 M3 bundle + seed snapshot + validation report；
 
 SQLite/离线启动时默认由共享 `SQLiteM1M2M3Repository` 读取完整制品；显式文件后端或
 导出恢复场景才由 `FileM1Repository.get_course_package`、
@@ -206,11 +237,11 @@ SQLite/离线启动时默认由共享 `SQLiteM1M2M3Repository` 读取完整制�
 
 生产 PostgreSQL 启动时还必须：
 
-- 通过 v17（0016/0017）schema 和 `PostgresM1M2M3Repository` 校验 M1—M3 制品、审计与 review；
+- 通过 v17（0016/0017）schema 和 `PostgresM1M2M3Repository` 校验 M1—M3 制品、审计与旧 review 兼容记录；
 - 为 vector/hybrid 检索显式提供并校验 `EvidenceIndexRef`，调用
   `restore_vector_index`；自动发现 ready 向量索引已通过 durable metadata 恢复路径实现，
   但本机未提供可执行的 PostgreSQL+pgvector 测试环境；CI `live-m1-m3` job 会执行
-  真实 HTTP embedding、M1 导入、M2 检索审计、M3 审批发布和重启恢复；
+  真实 HTTP embedding、M1 导入、M2 检索审计、旧 M3 兼容发布和重启恢复；
 - 用真实 `StatePolicy.from_path()` 和 `TeacherThresholdPolicy.from_path()` 解析两份
   policy，而不只是检查文件存在。
 
@@ -253,8 +284,9 @@ CSV；请求期间从 Django `User`、Group/Permission 与 `ActorGrant` 读取�
 审计；数据库评分审计和教师复核又是另一套追加历史，三者不能互换。
 
 - `logging.mode=rotating_file` 仅用于开发/测试的单进程独占写入。writer lock 会
-  拒绝第二个进程打开同一 `app.log`。
-- Web 与 Worker 并发或任何生产部署必须使用 `logging.mode=stdout`，由 systemd、
+  拒绝第二个进程打开同一日志文件。本机同时跑 Web 和 Outbox Worker 时，Worker
+  使用 `outbox.log`，Web 仍使用 `app.log`。
+- 生产部署必须使用 `logging.mode=stdout`，由 systemd、
   容器平台或日志代理采集、轮转和保留各进程 stdout。
 - 不要让 Web/Worker 各自使用普通 `RotatingFileHandler` 写同一文件。
 - 日志在格式化前递归脱敏，不记录答案、Cookie、Authorization、Session、密钥、
@@ -508,8 +540,9 @@ manifest。
 python -c "from pathlib import Path; from course_insight.infrastructure.config import load_platform_settings; s=load_platform_settings(project_root=Path.cwd()); print(s.logging.mode)"
 ```
 
-预期：输出 `stdout`。失败时检查环境变量优先级。开发 `rotating_file` 只能让一个
-进程独占；若出现 `LOG_SINK_IN_USE`，不要移除 writer lock 后强行多进程写文件。
+预期：输出 `stdout`。失败时检查环境变量优先级。开发 `rotating_file` 下同一文件
+只能一个进程独占；本机 Web 写 `app.log`，Worker 写 `outbox.log`。若出现
+`LOG_SINK_IN_USE`，不要移除 writer lock 后强行多进程写同一文件。
 
 ### 12. 验证一次投递并启动常驻 Worker
 
@@ -766,17 +799,11 @@ outbox 投递和外部日志保留策略都可能不可逆；执行前必须解�
 
 M1 导入保存 parser id/version 和完整输入快照；M2 使用 lexical、vector 或 hybrid
 策略，正式业务入口是 `retrieve_with_policy`，对成功/无结果写入脱敏审计；旧
-`retrieve` 仅兼容已有 lexical 调用。M3 生产发布必须先完成教师复核 CAS，再使用
-`build_knowledge_bundle_after_approval`。重启时从所选后端恢复 M1/M2/M3 制品、审计和
-review，并显式校验 lexical 或 ready pgvector 引用；向量恢复调用
+`retrieve` 仅兼容已有 lexical 调用。M3 当前由 `KnowledgeIngestionProcessor` 构建完整候选版本并在事务中原子发布，不再等待知识包复核 CAS。重启时恢复活动 `CourseKnowledgeRelease`、文件版本和检索引用；旧 M1/M2/M3 制品及 review 表只作兼容读取。向量恢复调用
 `restore_vector_index`，不会重新请求 embedding。自动发现 ready 向量索引已通过 durable
 metadata 恢复路径实现。当前 `AppCoordinator` 和 `assessment_workflow` 已通过
 `retrieve_for_application -> retrieve_with_policy` 进入正式 M2 边界；旧 `retrieve` 仅作
-兼容。完整 vector/hybrid 生产链须以 CI `live-m1-m3` job 的实际结果作为生产验收依据。
-`AppCoordinator.initialize_course` 生产调用必须同时提供已批准的
-`teacher_review_id`/`teacher_review_version`；现有 M0 教师 Web 的
-`TeacherReviewSubmission` 仍属于 M8/M9 评分复核；M3 S4 已提供应用层 CAS 门面，
-专用 Django 操作页仍需在上层产品界面中接入。
+兼容。完整 vector/hybrid 生产链须以 CI `live-m1-m3` job 的实际结果作为生产验收依据。现有 M0 教师 Web 的 `TeacherReviewSubmission` 只用于 M8/M9 成绩复核，与知识发布无关。
 
 ### 向量性能验收与 ANN 索引
 

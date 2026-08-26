@@ -312,7 +312,7 @@ def test_unweighted_generation_keeps_anchor_while_backtracking() -> None:
     ]
 
 
-def test_unweighted_generation_chooses_the_first_stable_valid_combination() -> None:
+def test_unweighted_generation_is_stable_for_the_same_learner() -> None:
     bundle = _unweighted_score_bundle(
         [1.0, 1.0],
         item_count=1,
@@ -324,7 +324,27 @@ def test_unweighted_generation_chooses_the_first_stable_valid_combination() -> N
     second = generator.generate(make_task_plan(), bundle, None, None)
 
     assert first == second
-    assert first.all_items()[0].item_id == "item_score_0"
+
+
+def test_equivalent_items_can_differ_across_learners() -> None:
+    bundle = _unweighted_score_bundle(
+        [1.0, 1.0],
+        item_count=1,
+        section_score=1.0,
+    )
+    generator = PaperGenerator(FixedClock(UTC_TIME))
+    seen = {
+        generator.generate(
+            make_task_plan(learner_id=f"learner_{index}"),
+            bundle,
+            None,
+            None,
+        ).all_items()[0].item_id
+        for index in range(24)
+    }
+
+    assert seen <= {"item_score_0", "item_score_1"}
+    assert len(seen) > 1
 
 
 def test_generation_prefers_the_learners_weaker_concept_within_blueprint() -> None:

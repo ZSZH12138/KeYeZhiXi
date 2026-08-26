@@ -1,0 +1,28 @@
+﻿module,feature_id,feature,external_data_required,data_paths,actor,expected_result
+M0,M0-AUTH-01,有效登录、角色菜单与退出,yes,accounts/account_roles.csv,student|teacher|admin,有效账号进入对应首页
+M0,M0-AUTH-02,跨课程越权、撤销授权与失败锁定,yes,accounts/account_roles.csv,unauthorized|revoked,拒绝访问且不泄漏数据
+M0,M0-INT-01,会话、审计、幂等、outbox 内部传递,no,,system,由自动测试验证
+M1,M1-PARSE-01,MD/TXT/DOCX/PDF/PPTX 合法解析,yes,courseware,course_admin,生成 ready CoursePackage
+M1,M1-AUTH-01,授权清单、哈希绑定与来源许可,yes,governance,course_admin,合法通过，篡改/缺行失败
+M1,M1-FAIL-01,旧 PPT、空文本、损坏文件、OCR 边界,yes,invalid_fixtures,course_admin,返回稳定安全错误码
+M2,M2-LEX-01,词法检索、top-k、低相关查询与引用,yes,scenarios/retrieval_queries.json,student,命中对应概念证据且审计可追踪
+M2,M2-VEC-01,向量/混合检索与 pgvector 性能,no,,system,生产配置与自动基准验证
+M3,M3-KB-01,概念、前置关系、误区、题库、Q 矩阵,yes,seeds,teacher,教师审核后发布知识包
+M3,M3-RUBRIC-01,评分量规与三类蓝图,yes,seeds,teacher,总分守恒且引用完整
+M3,M3-REVIEW-01,草稿、批准、拒绝、撤回与 CAS 冲突,yes,seeds,teacher,状态转换和冲突处理正确
+M4,M4-INTENT-01,五类任务意图与超范围拒绝,yes,scenarios/intent_examples.jsonl,student,标签、置信与 abstain 符合预期
+M4,M4-ROUTE-01,意图路由到任务计划,no,,system,契约内部传输由自动测试验证
+M5,M5-STATE-01,弱/中/强学生与班级状态,yes,model_data/learner_profiles.csv|model_data/learning_observations.jsonl,teacher,掌握度和薄弱点呈梯度
+M5,M5-DINA-01,DINA 估计、数据不足与重放,yes,model_data/learning_observations.jsonl,system,200 人且每题至少 50 条
+M5,M5-BKT-01,BKT 参数拟合与序列追踪,yes,model_data/bkt_sequences.jsonl,system,每概念 120 人且每人 6 步
+M6,M6-FSM-01,S0-S5 全部合法迁移和终态拒绝,yes,scenarios/tutoring_state_paths.json,student,8 条迁移与 1 条非法迁移匹配
+M6,M6-POLICY-01,rules/shadow/active 门禁、回退与安全包络,no,,system,私有策略制品由自动测试验证
+M7,M7-SCORE-01,主观题评分、低置信与证据引用,yes,scenarios/privacy_and_subjective_answers.json|scenarios/manual_student_answers.json,student,量规分项、引用和复核标志完整
+M7,M7-PRIV-01,邮箱、电话、姓名、提示注入和答案泄漏,yes,scenarios/privacy_and_subjective_answers.json,student,脱敏、阻断或安全失败
+M8,M8-PAPER-01,诊断卷、阶段卷、主观卷与个性化组卷,yes,seeds/blueprint.json|scenarios/manual_student_answers.json,student,题量、总分、锚点与版本冻结正确
+M8,M8-SCORE-01,客观评分、主观评分、双评分和审计,yes,scenarios/manual_student_answers.json|scenarios/teacher_review_cases.json,student|teacher,得分守恒且审计追加不可改
+M8,M8-REVIEW-01,批准、覆盖、拒绝、重评分和幂等,yes,scenarios/teacher_review_cases.json,teacher,版本追加且拒绝分数不下游
+M8,M8-IRT-01,2PL 校准、质量门与审批,yes,model_data/learning_observations.jsonl,system|teacher,200 人/50 每题后可影子校准
+M9,M9-REPORT-01,个人报告、班级概念和误区汇总,yes,model_data/learner_profiles.csv|model_data/learning_observations.jsonl,teacher,弱中强梯度和班级聚合一致
+M9,M9-SUGGEST-01,教学建议、采纳、拒绝和版本冲突,yes,scenarios/teacher_review_cases.json,teacher,建议决策可审计且不自动写回
+M9,M9-PRIV-01,小样本抑制与去标识解释,yes,model_data/learner_profiles.csv,teacher,低于聚合门槛的数据不外发

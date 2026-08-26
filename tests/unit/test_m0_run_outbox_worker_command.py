@@ -23,14 +23,14 @@ from course_insight.modules.m0_platform.django_app import runtime  # noqa: E402
 def test_run_outbox_worker_command_uses_application_container_only(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls: list[tuple[str, bool | None]] = []
+    calls: list[tuple[str, object]] = []
 
     class _Worker:
         def run(self, *, once: bool = False) -> None:
             calls.append(("run", once))
 
-    def _get_application_container() -> object:
-        calls.append(("container", None))
+    def _get_application_container(**kwargs: object) -> object:
+        calls.append(("container", kwargs.get("logging_filename")))
         return SimpleNamespace(outbox_worker=_Worker())
 
     def _close_application_container() -> None:
@@ -54,7 +54,7 @@ def test_run_outbox_worker_command_uses_application_container_only(
     call_command("run_outbox_worker", once=True)
 
     assert calls == [
-        ("container", None),
+        ("container", "outbox.log"),
         ("run", True),
         ("close", None),
     ]
@@ -73,7 +73,7 @@ def test_run_outbox_worker_once_fails_when_worker_reports_error(
     monkeypatch.setattr(
         runtime,
         "get_application_container",
-        lambda: SimpleNamespace(outbox_worker=_Worker()),
+        lambda **kwargs: SimpleNamespace(outbox_worker=_Worker()),
     )
     monkeypatch.setattr(
         runtime,

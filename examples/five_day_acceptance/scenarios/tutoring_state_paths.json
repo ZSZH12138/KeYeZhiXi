@@ -1,0 +1,82 @@
+{
+  "cases": [
+    {
+      "case_id": "transition_S0_S1",
+      "current_state": "S0",
+      "expected_action_id": "m6.transition.s0_to_s1.v1",
+      "expected_state": "S1",
+      "signals": [
+        "initialize"
+      ]
+    },
+    {
+      "case_id": "transition_S1_S2",
+      "current_state": "S1",
+      "expected_action_id": "m6.transition.s1_to_s2.v1",
+      "expected_state": "S2",
+      "signals": [
+        "active_misconception"
+      ]
+    },
+    {
+      "case_id": "transition_S1_S3",
+      "current_state": "S1",
+      "expected_action_id": "m6.transition.s1_to_s3.v1",
+      "expected_state": "S3",
+      "signals": [
+        "clean_diagnosis"
+      ]
+    },
+    {
+      "case_id": "transition_S2_S3",
+      "current_state": "S2",
+      "expected_action_id": "m6.transition.s2_to_s3.v1",
+      "expected_state": "S3",
+      "signals": [
+        "remediation_delivered"
+      ]
+    },
+    {
+      "case_id": "transition_S3_S4",
+      "current_state": "S3",
+      "expected_action_id": "m6.transition.s3_to_s4.v1",
+      "expected_state": "S4",
+      "signals": [
+        "practice_completed"
+      ]
+    },
+    {
+      "case_id": "transition_S4_S2",
+      "current_state": "S4",
+      "expected_action_id": "m6.transition.s4_to_s2.v1",
+      "expected_state": "S2",
+      "signals": [
+        "misconception_persists"
+      ]
+    },
+    {
+      "case_id": "transition_S4_S3",
+      "current_state": "S4",
+      "expected_action_id": "m6.transition.s4_to_s3.v1",
+      "expected_state": "S3",
+      "signals": [
+        "insufficient_stability"
+      ]
+    },
+    {
+      "case_id": "transition_S4_S5",
+      "current_state": "S4",
+      "expected_action_id": "m6.transition.s4_to_s5.v1",
+      "expected_state": "S5",
+      "signals": [
+        "mastery_stable"
+      ]
+    },
+    {
+      "case_id": "terminal_reject",
+      "current_state": "S5",
+      "expected_error": "INVALID_STATE_TRANSITION",
+      "signals": []
+    }
+  ]
+}

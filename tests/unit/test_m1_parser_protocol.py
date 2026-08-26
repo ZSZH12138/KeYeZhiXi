@@ -138,7 +138,7 @@ def test_registry_rejects_path_like_parser_identity() -> None:
         )
 
 
-def test_registry_keeps_legacy_ppt_rejection_and_built_in_entries() -> None:
+def test_registry_requires_converter_before_registering_legacy_ppt() -> None:
     registry = default_parser_registry()
 
     assert {
@@ -147,6 +147,24 @@ def test_registry_keeps_legacy_ppt_rejection_and_built_in_entries() -> None:
     } == {".md", ".txt", ".pdf", ".docx", ".pptx"}
     with pytest.raises(UnsupportedParser):
         registry.resolve("legacy.PPT")
+
+
+def test_registry_registers_legacy_ppt_when_converter_is_supplied() -> None:
+    class _Converter:
+        def convert(self, payload: bytes) -> bytes:
+            del payload
+            raise AssertionError("metadata resolution must not run conversion")
+
+    registry = default_parser_registry(legacy_powerpoint_converter=_Converter())
+
+    assert registry.metadata_for("legacy.PPT") == {
+        "extension": ".ppt",
+        "media_type": "application/vnd.ms-powerpoint",
+        "parser_id": "m1.parse_source.powerpoint-com",
+        "parser_version": "parse-source-v1",
+        "capabilities": ["byte-input", "converted", "paged", "structured"],
+        "max_bytes": 25 * 1024 * 1024,
+    }
 
 
 def test_registry_enforces_size_before_parser_execution() -> None:

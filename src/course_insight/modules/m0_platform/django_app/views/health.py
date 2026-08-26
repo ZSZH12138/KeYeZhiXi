@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import json
 from pathlib import Path
 from typing import cast
 
@@ -49,7 +50,8 @@ def ready(request: HttpRequest) -> HttpResponse:
         "runtime": "unavailable",
         "logging": "unavailable",
         "outbox": "unavailable",
-        "capabilities": "unavailable",
+        "ingestion": "unavailable",
+        "legacy_capabilities": "unavailable",
     }
     try:
         web_runtime = runtime.get_web_runtime()
@@ -101,7 +103,8 @@ def ready(request: HttpRequest) -> HttpResponse:
                     container.settings.outbox.lease_seconds
                 ),
             ),
-            "capabilities": (
+            "ingestion": _ingestion_status(container.settings.runtime_dir),
+            "legacy_capabilities": (
                 "ok"
                 if capability_readiness["status"] == "ready"
                 else "unavailable"
@@ -109,12 +112,69 @@ def ready(request: HttpRequest) -> HttpResponse:
         }
     except Exception:
         pass
-    is_ready = all(value == "ok" for value in components.values())
-    payload = {
-        "status": "ready" if is_ready else "not_ready",
-        **components,
+    core_ready = all(
+        components[name] == "ok"
+        for name in ("config", "database", "migrations", "runtime", "logging")
+    )
+    optional_ready = all(
+        components[name] == "ok"
+        for name in ("outbox", "ingestion", "legacy_capabilities")
+    )
+    if not core_ready:
+        status = "not_ready"
+    elif optional_ready:
+        status = "ready"
+    else:
+        status = "degraded"
+    capabilities = {
+        "web_auth": "ready" if all(
+            components[name] == "ok"
+            for name in ("config", "database", "migrations", "logging")
+        ) else "not_ready",
+        "course_runtime": "ready" if components["runtime"] == "ok" else "not_ready",
+        "student_read": "ready" if (
+            components["runtime"] == "ok"
+            and components["legacy_capabilities"] == "ok"
+        ) else "not_ready",
+        "learning_outbox": "ready" if components["outbox"] == "ok" else "not_ready",
+        "knowledge_ingestion": "ready" if components["ingestion"] == "ok" else "not_ready",
     }
-    return JsonResponse(payload, status=200 if is_ready else 503)
+    payload = {
+        "status": status,
+        **components,
+        "capabilities": capabilities,
+    }
+    return JsonResponse(payload, status=503 if status == "not_ready" else 200)
+
+
+def _ingestion_status(runtime_dir: Path) -> str:
+    runtime_root = Path(runtime_dir).resolve()
+    status_root = (runtime_root / "ingestion_worker").resolve()
+    lock_path = (status_root / "worker.lock").resolve()
+    if (
+        not status_root.is_relative_to(runtime_root)
+        or not lock_path.is_relative_to(status_root)
+        or not lock_path.is_file()
+    ):
+        return "unavailable"
+    try:
+        if lock_path.stat().st_size > _MAX_STATUS_BYTES:
+            return "unavailable"
+        value = json.loads(lock_path.read_text(encoding="utf-8"))
+        if type(value) is not dict or set(value) != {"pid", "heartbeat_at"}:
+            return "unavailable"
+        if type(value["pid"]) is not int or value["pid"] <= 0:
+            return "unavailable"
+        heartbeat = _parse_heartbeat(value["heartbeat_at"])
+        now = datetime.now(timezone.utc)
+        if (
+            heartbeat is not None
+            and now - timedelta(minutes=6) <= heartbeat <= now + timedelta(seconds=5)
+        ):
+            return "ok"
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return "unavailable"
+    return "unavailable"
 
 
 def _outbox_status(

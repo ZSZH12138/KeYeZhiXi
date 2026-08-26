@@ -1,0 +1,124 @@
+{% extends "course_insight/base.html" %}
+{% block title %}课程知识文件 · 课业智析{% endblock %}
+{% block content %}
+  <p class="breadcrumb"><a href="{% url 'teacher-home' %}">教师端</a> / {{ course_id }} / {{ class_id }} / 知识文件</p>
+  <h1 class="page-title">课程知识文件</h1>
+  <p class="muted">上传任意数量的指定格式文件。只有点击“确认处理”后，系统才会重新解析知识点、更新题目标注并生成新的学生可用版本。</p>
+
+  {% for message in messages %}<p class="status">{{ message }}</p>{% endfor %}
+
+  <div class="card">
+    <h2>1. 上传文件</h2>
+    <form method="post" enctype="multipart/form-data" action="{% url 'teacher-knowledge-upload' course_id=course_id class_id=class_id %}">
+      {% csrf_token %}
+      {{ upload_form.as_p }}
+      <button type="submit">上传到待处理列表</button>
+    </form>
+    <p><a href="{% url 'teacher-deepseek-settings' course_id=course_id class_id=class_id %}">配置本课程班级的 DeepSeek API</a></p>
+  </div>
+
+  <div class="card">
+    <h2>2. 检查、编辑或删除</h2>
+    {% if rows %}
+      <form method="post" action="{% url 'teacher-knowledge-stage-delete' course_id=course_id class_id=class_id %}">
+        {% csrf_token %}
+        <table>
+          <thead><tr><th>选择</th><th>文件</th><th>用途</th><th>状态</th><th>版本</th><th>操作</th></tr></thead>
+          <tbody>
+          {% for row in rows %}
+            <tr>
+              <td>{% if row.source.status != 'deleted' %}<input type="checkbox" name="source_ids" value="{{ row.source.source_id }}" aria-label="选择 {{ row.source.display_name }}">{% endif %}</td>
+              <td>{{ row.source.display_name }}</td>
+              <td>{{ row.source.get_source_type_display }}</td>
+              <td>{{ row.source.get_status_display }}</td>
+              <td>{% if row.latest %}{{ row.latest.version_number }}{% else %}-{% endif %}</td>
+              <td>{% if row.source.source_type == 'question' and row.source.status != 'deleted' %}<a href="{% url 'teacher-knowledge-question-edit' course_id=course_id class_id=class_id source_id=row.source.source_id %}">编辑题目 TXT</a>{% else %}-{% endif %}</td>
+            </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+        <p><button type="submit">将选中文件加入待删除列表</button></p>
+      </form>
+    {% else %}<p>尚未上传文件。</p>{% endif %}
+  </div>
+
+  <div class="card">
+    <h2>3. 确认处理</h2>
+    <form method="post" action="{% url 'teacher-knowledge-confirm' course_id=course_id class_id=class_id %}">
+      {% csrf_token %}
+      {{ confirm_form.as_p }}
+      <button type="submit">确认处理</button>
+    </form>
+  </div>
+
+  {% if job %}
+  <div class="card" id="job-panel" data-url="{{ job_url }}">
+    <h2>处理进度</h2>
+    <style>
+      .job-progress-track { height: 18px; overflow: hidden; border-radius: 9px; background: #e5e7eb; }
+      .job-progress-fill { position: relative; height: 100%; width: {{ job.progress }}%; background: #2563eb; transition: width .35s ease; }
+      .job-progress-track.active .job-progress-fill::after { content: ""; position: absolute; inset: 0; width: 45%; background: linear-gradient(90deg, transparent, rgba(255,255,255,.65), transparent); animation: job-progress-pulse 1.2s linear infinite; }
+      @keyframes job-progress-pulse { from { transform: translateX(-120%); } to { transform: translateX(280%); } }
+    </style>
+    <div id="job-progress-track" class="job-progress-track active">
+      <div id="job-progress-bar" class="job-progress-fill" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="{{ job.progress }}"></div>
+    </div>
+    <p id="job-status" class="status">{{ job.get_status_display }} · {{ job.progress }}%</p>
+    <p id="job-detail" class="muted" aria-live="polite">正在读取最新进度……</p>
+  </div>
+  <script>
+    (() => {
+      const panel = document.getElementById("job-panel");
+      const track = document.getElementById("job-progress-track");
+      const progress = document.getElementById("job-progress-bar");
+      const status = document.getElementById("job-status");
+      const detail = document.getElementById("job-detail");
+      const terminal = new Set(["succeeded", "partially_succeeded", "failed"]);
+      let latest = null;
+
+      function detailText(data) {
+        if (data.worker_state === "waiting_for_worker") return data.status_message;
+        if (data.detail_message) return data.detail_message;
+        const value = data.detail || {};
+        if (value.total_batches) {
+          return `正在分析第 ${value.current_batch}/${value.total_batches} 批；已完成 ${value.completed_characters}/${value.total_characters} 字`;
+        }
+        if (value.unit_kind === "files") {
+          return `已读取 ${value.completed_units}/${value.total_units} 个文件`;
+        }
+        if (value.unit_kind === "questions") {
+          return `已标注 ${value.completed_units}/${value.total_units} 道题目`;
+        }
+        return data.status_message || data.stage || "正在处理";
+      }
+
+      function render() {
+        if (!latest) return;
+        const active = latest.status === "running" && latest.worker_state === "active";
+        const elapsed = active && latest.activity_at
+          ? Math.max(0, Math.floor((Date.now() - Date.parse(latest.activity_at)) / 1000))
+          : 0;
+        progress.style.width = `${latest.progress}%`;
+        progress.setAttribute("aria-valuenow", String(latest.progress));
+        track.classList.toggle("active", active);
+        status.textContent = `${latest.status_message} · ${latest.progress}%${latest.error_code ? ` · ${latest.error_code}` : ""}`;
+        detail.textContent = `${detailText(latest)}${active ? ` · 本步骤已等待 ${elapsed} 秒` : ""}`;
+      }
+
+      async function poll() {
+        try {
+          const response = await fetch(panel.dataset.url, {credentials: "same-origin"});
+          if (!response.ok) throw new Error("progress unavailable");
+          latest = await response.json();
+          render();
+        } catch (error) {
+          detail.textContent = "暂时无法读取最新进度，正在重试……";
+        }
+        if (!latest || !terminal.has(latest.status)) window.setTimeout(poll, 1500);
+      }
+      window.setInterval(render, 1000);
+      window.setTimeout(poll, 800);
+    })();
+  </script>
+  {% endif %}
+{% endblock %}

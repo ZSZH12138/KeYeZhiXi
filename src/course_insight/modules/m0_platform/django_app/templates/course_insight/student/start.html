@@ -1,22 +1,21 @@
 {% extends "course_insight/base.html" %}
 {% block title %}开始测评 · 课业智析{% endblock %}
 {% block content %}
+  {% include "course_insight/student/_nav.html" with current_label="掌握画像" %}
   <h1>开始测评</h1>
   {% if profile %}
   <section class="card">
     <h2>我的掌握画像</h2>
-    {% if not profile.ready %}
-      <p class="muted">{{ profile.message }}</p>
-    {% else %}
-      <p class="muted">{{ profile.message }}</p>
+    <p class="muted">{{ profile.message }}</p>
+    {% if profile.ready %}
       <h3>已掌握</h3>
-      <ul>{% for item in profile.mastered %}<li>{{ item.name }}{% if item.source_locator %}（资料：{{ item.source_locator }}）{% endif %}</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
+      <ul>{% for item in profile.mastered %}<li>{{ item.name }}：{{ item.mastery }}（答对 {{ item.correct_count }} / 已做 {{ item.attempted_count }}）</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
       <h3>正在巩固</h3>
-      <ul>{% for item in profile.consolidating %}<li>{{ item.name }}{% if item.source_locator %}（资料：{{ item.source_locator }}）{% endif %}</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
+      <ul>{% for item in profile.consolidating %}<li>{{ item.name }}：{{ item.mastery }}（答对 {{ item.correct_count }} / 已做 {{ item.attempted_count }}）</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
       <h3>优先补学</h3>
       <ul>
         {% for item in profile.priority_support %}
-          <li>{{ item.name }}{% if item.source_locator %}（资料：{{ item.source_locator }}）{% endif %}{% if item.misconceptions %}；误区：{{ item.misconceptions|join:"、" }}{% endif %}</li>
+          <li>{{ item.name }}：{{ item.mastery }}（答对 {{ item.correct_count }} / 已做 {{ item.attempted_count }}）</li>
         {% empty %}<li>暂无</li>
         {% endfor %}
       </ul>
@@ -32,8 +31,40 @@
       <p>建议下一步练习：{{ profile.next_practice_names|join:"、" }}</p>
       {% endif %}
     {% endif %}
+    <h3>尚未作答</h3>
+    <ul>{% for item in profile.unseen %}<li>{{ item.name }}（未做过，不等同于掌握度为 0）</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
   </section>
   {% endif %}
+  <section class="card">
+    <h2>画像测评记录</h2>
+    <p class="muted">这里只显示会更新掌握画像的诊断测评和阶段评测；练习与订正不计入。</p>
+    {% if assessment_history %}
+      <table>
+        <thead>
+          <tr><th>试卷 ID</th><th>类型</th><th>完成时间</th><th>得分</th><th>错误情况</th><th>详情</th></tr>
+        </thead>
+        <tbody>
+          {% for item in assessment_history %}
+            <tr>
+              <td>{{ item.paper_id }}</td>
+              <td>{{ item.task_label }}</td>
+              <td>{{ item.completed_at|date:"Y-m-d H:i" }}</td>
+              {% if item.result_available %}
+                <td>{{ item.total_score }} / {{ item.max_score }}</td>
+                <td>错题 {{ item.wrong_count }} 道</td>
+                <td><a href="{{ item.result_url }}">查看得分与错题详情</a></td>
+              {% else %}
+                <td colspan="3" class="muted">结果记录暂不可读取，请联系教师检查。</td>
+              {% endif %}
+            </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+    {% else %}
+      <p class="muted">还没有会更新画像的已完成试卷。</p>
+    {% endif %}
+  </section>
+  <p class="muted">订正跟练只换同构变式，不会重抽整卷。不同学生的新诊断卷才会按题库与参数模板组出不同题目。</p>
   <form method="post">
     {% csrf_token %}
     {{ form.as_p }}

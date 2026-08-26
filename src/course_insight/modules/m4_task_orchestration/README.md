@@ -103,3 +103,9 @@ SQLite→PostgreSQL 导入以 `request_key` 做 identity，并保留 first-write
 - M4 只访问自己的 `M4Repository`，不读取其他模块业务表。
 - M4 不调用 Django request/ORM、HTTP、外部 SDK、DeepSeek、RAG、embedding、
   DINA、BKT 或 IRT。
+
+## 新知识发布版本兼容
+
+M4 不感知文件入库细节。应用层先把活动 `CourseKnowledgeRelease` 投影为现有 `KnowledgeBundle`，M4 再把该 release UUID 冻结到原有 `knowledge_bundle_id` 字段。公共 `TaskPlan` 字段和幂等身份不变；新任务使用新版本，已创建任务继续使用旧版本。
+
+当前学生 Web 不再提供自由文本任务框。M0 根据学生选择的任务类型生成固定、有限的 `student_text` 和合法 `task_type_hint`，继续复用本服务契约；浏览器不能借该入口输入任意意图文本。

@@ -1,58 +1,47 @@
-# M3 知识包
-
-## 负责人
-
-谢
+# M3 知识发布版本
 
 ## 职责
 
-验证知识点、先修、误区、题卡、量规、蓝图与 Q 矩阵的引用完整性。
-M3 冻结题目和知识版本，为 M5 DINA 认知诊断、M8 IRT 标定与自适应
-选题提供不可变的 Q 矩阵/题目依据；它本身不估计学习或题目参数。
+M3 把 M1 解析出的来源块和 M7 返回的知识候选整理成不可变课程知识发布版本，并为 M4、M5、M8、M9 提供兼容的 `KnowledgeBundle` 投影。
 
-## 输入来源
+当前生产流程不再使用知识包审核 ID 或审核状态机。具有课程知识管理权限的教师在文件页点击“确认处理”，即授权系统构建候选版本；系统校验通过后原子发布。
 
-- M1 `CoursePackage`。
-- `data/seeds/` 中由教师确认的知识、先修、误区、题目、量规和蓝图 JSON。
-- 题目版本与 Q 矩阵关系，侜 M5/M8 后续标定使用。
+## 当前输入
 
-## 输出
+- M1 产生的文件版本、正文块和原文定位；
+- M7 产生的零个或多个知识候选及其证据跨度；
+- 固定格式题目 TXT；
+- 当前课程的活动文件集合。
 
-`KnowledgeBundle`，供 M4 任务编排、M5 诊断/追踪、M8 出卷/标定和 M9
-分析原样消费。题目、Q 矩阵和参数标定的关联必须使用 `(item_id, item_version)`。
+## 当前输出
 
-## 持久化与 D3 边界
+- 规范化、稳定编号的知识点；
+- 每个知识点的完整来源并集；
+- 选择题、填空题、主观题及其多知识点关联；
+- 不可变 `CourseKnowledgeRelease`；
+- 供旧 M4–M9 服务消费的 `KnowledgeBundle`、题卡和 Q 矩阵投影。
 
-离线/测试模式下默认使用共享 `SQLiteM1M2M3Repository`；需要文件导出或显式文件后端时，
-`FileM3Repository` 将完整、不可变、带 checksum 的知识制品写入
-`runtime/artifacts/`；已发布制品必须同时包含 bundle、seed snapshot 和 validation
-report，被拒绝的 validation 也要保留对应的 seed snapshot/report。生产模式下，
-`PostgresM1M2M3Repository` 使用 0016/0017 migrations 持久化 M3 artifact 和
-`m3_teacher_reviews` CAS 复核记录；PostgreSQL 是生产权威后端，SQLite 不是生产后端。
-备份、恢复、checksum 校验、清理和回滚必须覆盖所选后端的权威数据，不能只备份
-`KnowledgeBundle` JSON 或教师 seed 源文件。
+## 合并规则
 
-## 禁止事项
+同义知识候选可以合并为一个概念，但来源按以下身份做集合并集，任何一个文件或位置都不能被覆盖：
 
-不得发布未审核题目、放宽量规守恒、覆盖旧版本、自动生成未经教师
-确认的知识，或在 M3 中实现 DINA/BKT/IRT 计算。
+```text
+(source_version_id, chunk_id, span_start, span_end, relation_type)
+```
 
-## S4 教师复核门
+合并后的每个活动知识点必须至少保留一条可解析来源。删除文件后，系统从剩余活动文件重新构建版本；没有剩余来源的知识点和题目关联不进入新版本。
 
-`TeacherReviewWorkflow` 使用不可变记录和 compare-and-swap 版本，状态为
-`draft -> submitted -> approved|rejected -> recalled`。记录只含输入 checksum、验证报告
-引用、教师 pseudonym、理由、时间和历史，不含课程原文。生产组合根将 M3 绑定到
-PostgreSQL CAS 仓储，并在 approved 发布回调与 recall/其他状态迁移之间持有事务级 advisory lock；
-SQLite CAS 仅用于离线/测试。发布还会校验 review subject 与 CoursePackage ID 一致。生产调用旧的无审批发布入口会返回
-`M3_REVIEW_REQUIRED`。正式发布必须使用 `build_knowledge_bundle_after_approval`，
-并重新捕获 seed snapshot、校验 checksum、验证报告和 bundle 后才提交完整制品。
-M1—M3 的真实 PostgreSQL+pgvector live 用例已纳入
-`tests/integration/test_postgres_m1_m2_m3_live.py` 和 CI `live-m1-m3` job；本机缺少
-受保护测试数据库时仍会明确 skip，不能把 skip 记为 live 验收通过。
-M3 service 暴露 `create_teacher_review_draft`、`submit_teacher_review`、
-`approve_teacher_review`、`reject_teacher_review` 和 `recall_teacher_review` CAS wrappers；
-`AppCoordinator.initialize_course` 可选接收 `teacher_review_id` 与
-`teacher_review_version`，提供两者时走审批后发布入口。
-现有 M0 教师 Web 的 `TeacherReviewSubmission` 属于 M8/M9 评分复核，不等同于 M3 S4。
-`AppCoordinator` 已提供 S4 草稿、提交、批准、拒绝和召回门面；若需要在 Django 中操作 S4，
-应调用上述应用门面并复用同一 CAS review id/version，不得绕过 M3 审批门。
+## 发布规则
+
+1. 候选版本在后台完整构建；
+2. 单个坏文件被隔离，已有活动版本可作为该文件的回退；
+3. 知识点、来源、题目和关联全部写完后才允许激活；
+4. 活动指针在一个数据库事务中切换；
+5. 构建失败不改变旧活动版本；
+6. 历史试卷继续引用旧发布版本。
+
+新增题目文件时只解析和标注本次变化的题目。新增知识文件后先合并同名知识点的来源；只有出现新的知识点 ID 时才重新标注全部活动题目，仅增加已有知识点来源时在本地刷新关联证据。删除知识文件时不调用 LLM：系统移除对应来源、删除失去全部来源的知识点，并同步清理题目关联。
+
+## 旧实现
+
+`TeacherReviewWorkflow`、`build_knowledge_bundle_after_approval` 和旧审核表仅为历史兼容保留，不再连接教师 Web 或新知识发布流程。历史说明见 [`docs/legacy_architecture_snapshot_2026-08-25.md`](../../../../docs/legacy_architecture_snapshot_2026-08-25.md)。

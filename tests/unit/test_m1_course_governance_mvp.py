@@ -136,6 +136,25 @@ def test_blocks_follow_parser_ordinal_not_lexical_locator_order(tmp_path: Path) 
     assert [chunk.text for chunk in package.content_chunks] == ["first", "second"]
 
 
+def test_import_splits_long_parser_block_and_keeps_source_locator(tmp_path: Path) -> None:
+    source = tmp_path / "long.txt"
+    source.write_text("甲" * 4_000 + "\n\n" + "乙" * 4_000, encoding="utf-8")
+    payload = source.read_bytes()
+
+    package = _service(_Repository(), hash_tool=_sha).import_course(
+        [source],
+        _metadata(tmp_path / "metadata.json"),
+        _manifest(tmp_path / "authorization.csv", [_row("long.txt", "source-long", payload)]),
+        tmp_path / "output",
+    )
+
+    assert [len(chunk.text) for chunk in package.content_chunks] == [4_000, 4_000]
+    assert [chunk.locator for chunk in package.content_chunks] == [
+        "paragraph:1;segment:1;chars:0-4000",
+        "paragraph:1;segment:2;chars:4002-8002",
+    ]
+
+
 @pytest.mark.parametrize("field,value", [
     ("file_name", "../unsafe.txt"), ("source_id", "../unsafe"), ("expected_sha256", "A" * 64), ("authorized_by", ""), ("authorized_at", ""), ("license_note", ""),
 ])
@@ -221,12 +240,32 @@ def test_parse_failures_are_aggregated_and_do_not_save(tmp_path: Path, name: str
     assert repository.saved == [] and not (tmp_path / "output" / "course_package.json").exists()
 
 
-def test_ppt_is_rejected_even_if_a_registry_entry_is_supplied(tmp_path: Path) -> None:
+def test_ppt_can_use_an_explicitly_registered_converter_parser(tmp_path: Path) -> None:
     source = tmp_path / "legacy.ppt"
     source.write_bytes(b"x")
-    service = M1CourseGovernanceService({".ppt": _parsed}, _sha, _Repository())
-    with pytest.raises(DomainError, match="COURSE_PARSE_FAILED"):
-        service.import_course([source], _metadata(tmp_path / "metadata.json"), _manifest(tmp_path / "authorization.csv", [_row("legacy.ppt", "a", b"x")]), tmp_path / "output")
+
+    def parsed_ppt(name: str, payload: bytes) -> ParsedSource:
+        del name
+        return ParsedSource(
+            "application/vnd.ms-powerpoint",
+            1,
+            (ParsedBlock(payload.decode(), "slide:1;shape:1;paragraph:1", 1),),
+        )
+
+    service = M1CourseGovernanceService({".ppt": parsed_ppt}, _sha, _Repository())
+
+    package = service.import_course(
+        [source],
+        _metadata(tmp_path / "metadata.json"),
+        _manifest(
+            tmp_path / "authorization.csv",
+            [_row("legacy.ppt", "a", b"x")],
+        ),
+        tmp_path / "output",
+    )
+
+    assert package.source_documents[0].media_type == "application/vnd.ms-powerpoint"
+    assert package.content_chunks[0].locator == "slide:1;shape:1;paragraph:1"
 
 
 def test_failures_are_sorted_and_use_priority_without_host_paths(tmp_path: Path) -> None:

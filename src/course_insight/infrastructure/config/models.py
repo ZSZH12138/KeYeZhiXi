@@ -318,6 +318,11 @@ class SecuritySettings(_FrozenModel):
         ge=1024,
         le=100 * 1024 * 1024,
     )
+    max_upload_request_body_bytes: int = Field(
+        default=5 * 1024**3 + 16 * 1024**2,
+        ge=1024,
+        le=6 * 1024**3,
+    )
     login_failure_limit: int = Field(default=5, ge=1, le=100)
     login_failure_window_seconds: int = Field(default=300, ge=1, le=86_400)
 

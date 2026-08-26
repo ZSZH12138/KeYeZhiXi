@@ -1,8 +1,37 @@
 {% extends "course_insight/base.html" %}
 {% block title %}学习反馈 · 课业智析{% endblock %}
 {% block content %}
+  {% include "course_insight/student/_nav.html" with current_label="学习反馈" %}
   <h1>学习反馈</h1>
   <p>{{ feedback.message }}</p>
+  <h2>逐题反馈</h2>
+  {% for item in question_details %}
+    <section class="card" id="feedback-{{ item.item_instance_id }}">
+      <h3>原题目</h3>
+      <p>{{ item.stem }}</p>
+      {% if item.options %}
+        <ul>
+          {% for label, text in item.options %}<li>{{ label }}. {{ text }}</li>{% endfor %}
+        </ul>
+      {% endif %}
+      <h3>题目涉及知识点</h3>
+      <p>{{ item.concept_names|join:"、" }}</p>
+      <h3>题目正确答案</h3>
+      <p>{{ item.correct_answer }}</p>
+      <h3>知识点对应原文件</h3>
+      {% for source in item.source_blocks %}
+        <div class="card">
+          <p><strong>{{ source.file_name }}</strong> · {{ source.locator }}</p>
+          <p>{{ source.text }}</p>
+        </div>
+      {% empty %}<p class="muted">当前没有可显示的有效课程原文。</p>{% endfor %}
+      <form method="post" action="{{ qa_url }}">
+        {% csrf_token %}
+        <input type="hidden" name="question_ref" value="{{ item.qa_token }}">
+        <button type="submit">答疑分析本题</button>
+      </form>
+    </section>
+  {% empty %}<p class="muted">当前没有可显示的逐题反馈。</p>{% endfor %}
   <h2>量规分项</h2>
   <ul>
     {% for item in feedback.rubric_feedback %}

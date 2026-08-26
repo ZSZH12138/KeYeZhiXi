@@ -52,6 +52,7 @@
     "session_cookie_httponly": true,
     "session_cookie_samesite": "Lax",
     "max_request_body_bytes": 1048576,
+    "max_upload_request_body_bytes": 5385486336,
     "login_failure_limit": 5,
     "login_failure_window_seconds": 300
   },

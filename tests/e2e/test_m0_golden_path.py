@@ -618,6 +618,7 @@ def test_sqlite_web_golden_path_delivers_student_and_teacher_events(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    monkeypatch.setenv("COURSE_INSIGHT_ALLOW_LEGACY_TEST_BUNDLE", "1")
     container, web_runtime = _build_web_runtime(tmp_path)
     monkeypatch.setattr(
         django_runtime,
@@ -649,7 +650,6 @@ def test_sqlite_web_golden_path_delivers_student_and_teacher_events(
         started = student_client.post(
             start_url,
             {
-                "student_text": "Start a governed practice assessment.",
                 "task_type_hint": "practice",
                 "flow_token": start_flow,
                 "csrfmiddlewaretoken": _csrf(student_client),

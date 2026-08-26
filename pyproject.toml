@@ -17,6 +17,7 @@ dependencies = [
     "python-pptx>=1,<2",
     "numpy>=2.0,<3",
     "scipy>=1.13,<2",
+    "cryptography>=45,<47; platform_system != 'Windows'",
 ]
 
 [project.optional-dependencies]

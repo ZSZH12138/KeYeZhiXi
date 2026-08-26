@@ -197,3 +197,7 @@ rejected 不重入。
 ```shell
 python -m pytest -q tests/unit/test_m9_deepseek.py
 ```
+
+## 新知识发布质量输入
+
+M9 可从活动 `CourseKnowledgeRelease` 汇总知识点数、来源数、题目数、题目关联数、无来源概念和无标签题目。知识发布不再产生审批状态；M9 原有教师成绩复核和模型质量审核保持不变，不能将二者重新解释为知识包审批。
