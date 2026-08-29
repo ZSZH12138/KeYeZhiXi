@@ -25,6 +25,10 @@ _storage_key_validator = RegexValidator(
 class CourseClassWorkspace(models.Model):
     """Current publication and configuration revisions for one class."""
 
+    class Status(models.TextChoices):
+        ACTIVE = "active", "Active"
+        ARCHIVED = "archived", "Archived"
+
     workspace_id = models.UUIDField(
         primary_key=True,
         default=uuid.uuid4,
@@ -32,6 +36,21 @@ class CourseClassWorkspace(models.Model):
     )
     course_id = models.CharField(max_length=128, validators=[_scope_validator])
     class_id = models.CharField(max_length=128, validators=[_scope_validator])
+    course_display_name = models.CharField(max_length=255, blank=True, default="")
+    class_display_name = models.CharField(max_length=255, blank=True, default="")
+    owner_teacher = models.ForeignKey(
+        "m0_platform_web.User",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="owned_course_class_workspaces",
+    )
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.ACTIVE,
+    )
+    roster_version = models.PositiveBigIntegerField(default=0)
     active_release = models.OneToOneField(
         "CourseKnowledgeRelease",
         on_delete=models.SET_NULL,
@@ -57,6 +76,15 @@ class CourseClassWorkspace(models.Model):
                 name="m0_workspace_scope_idx",
             )
         ]
+
+    def is_owned_by(self, user: object) -> bool:
+        """Return whether ``user`` is the active owner of this workspace."""
+
+        return (
+            self.status == self.Status.ACTIVE
+            and self.owner_teacher_id is not None
+            and self.owner_teacher_id == getattr(user, "pk", None)
+        )
 
 
 class ScopedDeepSeekConfiguration(models.Model):
@@ -418,7 +446,9 @@ class TeacherItemReviewNote(models.Model):
     )
     reviewed_by = models.ForeignKey(
         "m0_platform_web.User",
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="authored_item_review_notes",
     )
     attempt_id = models.CharField(max_length=128)
@@ -570,7 +600,9 @@ class CourseSource(models.Model):
     status = models.CharField(max_length=16, choices=Status.choices, default=Status.STAGED)
     created_by = models.ForeignKey(
         "m0_platform_web.User",
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="course_sources",
     )
     created_at = models.DateTimeField(auto_now_add=True)
@@ -655,7 +687,9 @@ class KnowledgeIngestionJob(models.Model):
     )
     requested_by = models.ForeignKey(
         "m0_platform_web.User",
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
         related_name="knowledge_ingestion_jobs",
     )
     change_set_checksum = models.CharField(

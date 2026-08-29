@@ -40,6 +40,14 @@ class RoleName(models.TextChoices):
     SYSTEM_ADMIN = "system_admin", "System administrator"
 
 
+class AccountType(models.TextChoices):
+    """The single platform-level identity type assigned to an account."""
+
+    STUDENT = "student", "Student"
+    TEACHER = "teacher", "Teacher"
+    ADMINISTRATOR = "administrator", "Administrator"
+
+
 class User(AbstractUser):
     """Django account keyed to a non-identifying stable actor ID."""
 
@@ -48,9 +56,18 @@ class User(AbstractUser):
         unique=True,
         validators=[_actor_validator],
     )
+    account_type = models.CharField(
+        max_length=16,
+        choices=AccountType.choices,
+        default=AccountType.STUDENT,
+    )
 
     class Meta(AbstractUser.Meta):
         constraints = [
+            models.CheckConstraint(
+                condition=Q(account_type__in=AccountType.values),
+                name="m0_user_account_type_valid",
+            ),
             models.CheckConstraint(
                 condition=Q(actor_id__regex=PSEUDONYMOUS_ACTOR_PATTERN),
                 name="m0_user_actor_id_pseudonymous",
@@ -132,6 +149,9 @@ class ActorGrant(models.Model):
             ("view_course_files", "Can view published course files"),
             ("manage_course_roles", "Can manage course roles"),
             ("manage_platform", "Can manage the platform"),
+            ("manage_accounts", "Can create and delete accounts"),
+            ("open_class", "Can create a course class"),
+            ("manage_class_members", "Can manage class members"),
         ]
         constraints = [
             models.CheckConstraint(
@@ -309,4 +329,10 @@ from course_insight.modules.m0_platform.django_app.knowledge_models import (  # 
     SuggestedTeacherReviewItem,
     TeacherItemReviewNote,
     WrongQuestionRecord,
+)
+from course_insight.modules.m0_platform.django_app.governance_models import (  # noqa: E402
+    AccountLifecycleEvent,
+    AuthenticatedSession,
+    ClassMembership,
+    DeletedActorFingerprint,
 )
