@@ -18,6 +18,9 @@ _TASK_TABLE = "m4_task_plans"
 class M4Repository(Protocol):
     """Persistence operations owned exclusively by M4."""
 
+    def purge_actor(self, actor_id: str) -> int:
+        """Physically delete module-owned rows for one actor."""
+
     def insert_or_get_task_plan(
         self,
         plan: TaskPlan,

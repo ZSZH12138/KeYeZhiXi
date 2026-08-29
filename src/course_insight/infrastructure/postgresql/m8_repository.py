@@ -29,6 +29,7 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.infrastructure.postgresql.actor_erasure import purge_postgres_actor
 from course_insight.modules.m8_assessment_scoring.paper_record import (
     FrozenAssessmentRecord,
 )
@@ -92,6 +93,9 @@ class PostgresM8Repository:
 
     def __init__(self, pool: PostgresPool) -> None:
         self._pool = pool
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_postgres_actor(self._pool, module="m8", actor_id=actor_id)
 
     def insert_or_get_paper(
         self,

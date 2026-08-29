@@ -25,10 +25,23 @@ def evidence_index_for_assessment(
 ):
     """Load or build the index belonging to the assessment's frozen release."""
 
-    configured = course.course_context.evidence_index_ref
-    if configured.course_package_id == knowledge_bundle.course_package_id:
+    course_context = getattr(course, "course_context", None)
+    configured = (
+        None if course_context is None else course_context.evidence_index_ref
+    )
+    if (
+        configured is not None
+        and configured.course_package_id == knowledge_bundle.course_package_id
+    ):
         return configured
     if type(task) is not TaskPlan:
+        if configured is None:
+            raise DomainError(
+                code="RUNTIME_CONTEXT_UNAVAILABLE",
+                module="m0",
+                message="课程运行配置不可用。",
+                recoverable=True,
+            )
         return configured
     release = _release_for_task(
         task,

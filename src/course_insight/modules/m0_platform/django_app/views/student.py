@@ -32,7 +32,10 @@ from course_insight.modules.m5_learner_class_state.update_policy import (
 )
 from course_insight.infrastructure.log_context import bind_log_context
 from course_insight.modules.m0_platform.django_app import runtime
-from course_insight.modules.m0_platform.django_app.authz import authorize_scope
+from course_insight.modules.m0_platform.django_app.authz import (
+    authorize_scope,
+    resolve_account_type,
+)
 from course_insight.modules.m0_platform.django_app.assessment_feedback import (
     question_feedback_details,
     teacher_notes_for_attempt,
@@ -57,6 +60,7 @@ from course_insight.modules.m0_platform.django_app.suggested_review import (
     sync_suggested_review_case,
 )
 from course_insight.modules.m0_platform.django_app.models import (
+    AccountType,
     CourseClassWorkspace,
     CourseKnowledgeRelease,
     LearnerConceptMastery,
@@ -102,8 +106,11 @@ logger = logging.getLogger(__name__)
 @login_required
 @require_GET
 def home(request: HttpRequest) -> HttpResponse:
-    if not request.user.has_perm(
+    if (
+        resolve_account_type(request.user) != AccountType.STUDENT
+        or not request.user.has_perm(
         "m0_platform_web.start_assessment"
+        )
     ):
         raise PermissionDenied
     return render(
@@ -737,7 +744,17 @@ def correction(
         )
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
     hint_requested = str(request.GET.get("hint", "")).strip() == "1"
-    bundle = _knowledge_bundle(course)
+    task_value = response.get("task_plan")
+    bundle = (
+        _bundle_for_task(
+            task_value,
+            course_id=course_id,
+            class_id=class_id,
+            legacy_course=course,
+        )
+        if type(task_value) is TaskPlan
+        else _legacy_test_bundle(course)
+    )
     guide = correction_guide_view(
         paper,
         scoring,
@@ -839,7 +856,17 @@ def follow_up(
     )
     paper = _contract(response, "assessment_paper", AssessmentPaper)
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
-    bundle = _knowledge_bundle(course)
+    task_value = response.get("task_plan")
+    bundle = (
+        _bundle_for_task(
+            task_value,
+            course_id=course_id,
+            class_id=class_id,
+            legacy_course=course,
+        )
+        if type(task_value) is TaskPlan
+        else _legacy_test_bundle(course)
+    )
     guide = correction_guide_view(paper, scoring, bundle)
     if instance_id not in {item.item_instance_id for item in guide.lost_items}:
         raise DomainError(
@@ -1064,6 +1091,13 @@ def _legacy_student_profile(web_runtime, course, *, class_id: str, learner_id: s
 
 
 def _course_bundle(course):
+    if course.course_context is None:
+        raise DomainError(
+            code="COURSE_KNOWLEDGE_NOT_PUBLISHED",
+            module="m0",
+            message="课程尚未发布可用题目。",
+            recoverable=True,
+        )
     bundle = bundle_with_overlays(
         course.course_context.knowledge_bundle,
         course.state_policy_path,
@@ -1103,7 +1137,7 @@ def _active_release_bundle(course_id: str, class_id: str):
         raise DomainError(
             code="TEACHER_QUESTION_BANK_EMPTY",
             module="m0",
-            message="教师尚未上传并发布可用题目，试卷生成失败。",
+            message="课程尚未发布可用题目：教师尚未上传并发布可用题目，试卷生成失败。",
             recoverable=True,
         )
     bundle = knowledge_bundle_from_release(workspace.active_release)
@@ -1111,7 +1145,7 @@ def _active_release_bundle(course_id: str, class_id: str):
         raise DomainError(
             code="TEACHER_QUESTION_BANK_EMPTY",
             module="m0",
-            message="教师尚未上传并发布可用题目，试卷生成失败。",
+            message="课程尚未发布可用题目：教师尚未上传并发布可用题目，试卷生成失败。",
             recoverable=True,
         )
     return bundle

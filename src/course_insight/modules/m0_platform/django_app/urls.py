@@ -30,6 +30,16 @@ urlpatterns = [
         account_admin.create_student,
         name="account-admin-create-student",
     ),
+    path(
+        "account-admin/accounts/teachers/<str:actor_id>/delete/",
+        account_admin.delete_teacher,
+        name="account-admin-delete-teacher",
+    ),
+    path(
+        "account-admin/accounts/students/<str:actor_id>/delete/",
+        account_admin.delete_student,
+        name="account-admin-delete-student",
+    ),
     path("student/", student.home, name="student-home"),
     path(
         "student/courses/<str:course_id>/classes/<str:class_id>/qa/",

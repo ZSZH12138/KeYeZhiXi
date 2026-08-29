@@ -22,6 +22,7 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.infrastructure.postgresql.actor_erasure import purge_postgres_actor
 from course_insight.modules.m9_teacher_analytics.repository import (
     M9ModelAuditRecord,
     M9ReviewDecisionConflict,
@@ -75,6 +76,9 @@ class PostgresM9Repository:
 
     def __init__(self, pool: PostgresPool) -> None:
         self._pool = pool
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_postgres_actor(self._pool, module="m9", actor_id=actor_id)
 
     def save_model_audit(self, record: M9ModelAuditRecord) -> None:
         """Persist one idempotent privacy-minimized model-call record."""

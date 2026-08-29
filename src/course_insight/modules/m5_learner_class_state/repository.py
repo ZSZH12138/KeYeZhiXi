@@ -25,6 +25,9 @@ _CLASS_TABLE = "m5_class_states"
 class M5Repository(Protocol):
     """Persistence operations owned exclusively by M5."""
 
+    def purge_actor(self, actor_id: str) -> int:
+        """Physically delete module-owned rows for one actor."""
+
     def insert_or_get_learning_observation_batch(
         self,
         batch: LearningObservationBatch,

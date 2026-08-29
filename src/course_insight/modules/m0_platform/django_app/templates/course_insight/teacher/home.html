@@ -38,7 +38,7 @@
     {% for scope in knowledge_scopes %}
       <p><a href="{% url 'teacher-course-knowledge' course_id=scope.course_id class_id=scope.class_id %}">管理 {{ scope.course_id }} / {{ scope.class_id }}</a></p>
     {% empty %}
-      <p class="muted">当前账号没有课程范围；系统管理员可通过课程管理入口指定课程。</p>
+      <p class="muted">当前账号没有可管理的课程班级。</p>
     {% endfor %}
   </div>
   {% endif %}

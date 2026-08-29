@@ -17,6 +17,9 @@ class M0Repository(Protocol):
     def initialize(self) -> None:
         """Create or migrate the repository storage."""
 
+    def purge_actor(self, actor_id: str) -> int:
+        """Physically delete module-owned rows for one actor."""
+
     def append_events(
         self,
         events: Sequence[LearningEvent],

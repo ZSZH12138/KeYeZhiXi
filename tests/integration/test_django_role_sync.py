@@ -21,6 +21,7 @@ if not apps.ready:
     django.setup()
 
 from course_insight.modules.m0_platform.django_app.models import (  # noqa: E402
+    AccountType,
     ActorGrant,
     RoleSyncState,
     User,
@@ -71,7 +72,7 @@ def test_check_and_dry_run_validate_without_mutating_database(
     assert str(tmp_path) not in check_output + dry_run_output
 
 
-def test_apply_creates_pseudonymous_users_grants_and_canonical_groups(
+def test_apply_bootstraps_only_account_administrator(
     tmp_path: Path,
 ) -> None:
     roles_path = tmp_path / "roles.csv"
@@ -85,23 +86,25 @@ def test_apply_creates_pseudonymous_users_grants_and_canonical_groups(
 
     output = _run_sync(tmp_path, "apply")
 
-    assert User.objects.count() == 4
-    assert ActorGrant.objects.count() == 4
+    assert User.objects.count() == 1
+    assert ActorGrant.objects.count() == 1
     assert set(Group.objects.values_list("name", flat=True)) >= {
         "student",
         "teacher",
         "course_admin",
         "system_admin",
     }
-    student = User.objects.get(actor_id="pseudonym_student_001")
-    assert not student.has_usable_password()
-    assert student.email == ""
-    assert student.groups.filter(name="student").exists()
-    assert student.has_perm("m0_platform_web.submit_assessment")
-    assert not student.has_perm("m0_platform_web.review_score")
+    administrator = User.objects.get(actor_id="pseudonym_system_admin_001")
+    assert not administrator.has_usable_password()
+    assert administrator.email == ""
+    assert administrator.account_type == AccountType.ADMINISTRATOR
+    assert administrator.groups.filter(name="system_admin").exists()
+    assert administrator.has_perm("m0_platform_web.manage_accounts")
+    assert not administrator.has_perm("m0_platform_web.view_class_analytics")
+    assert not administrator.has_perm("m0_platform_web.start_assessment")
     state = RoleSyncState.objects.get(pk="roles")
     assert len(state.source_checksum) == 64
-    assert state.grant_count == 4
+    assert state.grant_count == 1
     assert "pseudonym_" not in output
     assert str(tmp_path) not in output
 
@@ -110,7 +113,7 @@ def test_repeated_apply_is_idempotent(tmp_path: Path) -> None:
     roles_path = tmp_path / "roles.csv"
     _write_roles(
         roles_path,
-        "pseudonym_teacher_001,teacher,course_a,class_1,true",
+        "pseudonym_system_admin_001,system_admin,,,true",
     )
 
     _run_sync(tmp_path, "apply")
@@ -131,8 +134,8 @@ def test_explicit_inactive_seed_revokes_and_can_reactivate_grant(
     tmp_path: Path,
 ) -> None:
     roles_path = tmp_path / "roles.csv"
-    active = "pseudonym_teacher_001,teacher,course_a,class_1,true"
-    inactive = "pseudonym_teacher_001,teacher,course_a,class_1,false"
+    active = "pseudonym_system_admin_001,system_admin,,,true"
+    inactive = "pseudonym_system_admin_001,system_admin,,,false"
     _write_roles(roles_path, active)
     _run_sync(tmp_path, "apply")
 
@@ -142,14 +145,14 @@ def test_explicit_inactive_seed_revokes_and_can_reactivate_grant(
     user = revoked.user
     assert revoked.is_active is False
     assert revoked.revoked_at is not None
-    assert not user.groups.filter(name="teacher").exists()
+    assert not user.groups.filter(name="system_admin").exists()
     first_revoked_at = revoked.revoked_at
     first_state_time = RoleSyncState.objects.get(pk="roles").synchronized_at
 
     _run_sync(tmp_path, "apply")
     repeated = ActorGrant.objects.get()
     assert repeated.revoked_at == first_revoked_at
-    assert not repeated.user.groups.filter(name="teacher").exists()
+    assert not repeated.user.groups.filter(name="system_admin").exists()
     assert RoleSyncState.objects.get(pk="roles").synchronized_at == (
         first_state_time
     )
@@ -159,32 +162,33 @@ def test_explicit_inactive_seed_revokes_and_can_reactivate_grant(
     reactivated = ActorGrant.objects.get()
     assert reactivated.is_active is True
     assert reactivated.revoked_at is None
-    assert reactivated.user.groups.filter(name="teacher").exists()
+    assert reactivated.user.groups.filter(name="system_admin").exists()
 
 
 def test_omitted_grant_is_revoked_by_apply_and_reported_by_dry_run(
     tmp_path: Path,
 ) -> None:
     roles_path = tmp_path / "roles.csv"
-    teacher = "pseudonym_teacher_001,teacher,course_a,class_1,true"
-    student = "pseudonym_student_001,student,course_a,class_1,true"
-    _write_roles(roles_path, teacher, student)
+    administrator = "pseudonym_system_admin_001,system_admin,,,true"
+    _write_roles(roles_path, administrator)
     _run_sync(tmp_path, "apply")
 
-    _write_roles(roles_path, student)
+    _write_roles(roles_path)
     dry_run_output = _run_sync(tmp_path, "dry-run")
 
-    teacher_grant = ActorGrant.objects.get(user__actor_id="pseudonym_teacher_001")
-    assert teacher_grant.is_active is True
-    assert teacher_grant.user.groups.filter(name="teacher").exists()
+    administrator_grant = ActorGrant.objects.get(
+        user__actor_id="pseudonym_system_admin_001"
+    )
+    assert administrator_grant.is_active is True
+    assert administrator_grant.user.groups.filter(name="system_admin").exists()
     assert "revoke=1" in dry_run_output
 
     _run_sync(tmp_path, "apply")
 
-    teacher_grant = ActorGrant.objects.get(user__actor_id="pseudonym_teacher_001")
-    assert teacher_grant.is_active is False
-    assert teacher_grant.revoked_at is not None
-    assert not teacher_grant.user.groups.filter(name="teacher").exists()
+    administrator_grant.refresh_from_db()
+    assert administrator_grant.is_active is False
+    assert administrator_grant.revoked_at is not None
+    assert not administrator_grant.user.groups.filter(name="system_admin").exists()
 
 
 def test_invalid_seed_fails_before_writes_and_preserves_previous_state(
@@ -193,7 +197,7 @@ def test_invalid_seed_fails_before_writes_and_preserves_previous_state(
     roles_path = tmp_path / "roles.csv"
     _write_roles(
         roles_path,
-        "pseudonym_teacher_001,teacher,course_a,class_1,true",
+        "pseudonym_system_admin_001,system_admin,,,true",
     )
     _run_sync(tmp_path, "apply")
     previous_state = RoleSyncState.objects.get(pk="roles")

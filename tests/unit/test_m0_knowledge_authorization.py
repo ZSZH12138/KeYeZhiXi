@@ -38,7 +38,6 @@ def _authorized_user(actor_id: str, role: str, course_id: str | None, class_id: 
     [
         ("teacher", "course_1", "class_1"),
         ("course_admin", "course_1", None),
-        ("system_admin", None, None),
     ],
 )
 def test_course_knowledge_authorizes_governing_roles(role, course_id, class_id) -> None:
@@ -53,6 +52,18 @@ def test_course_knowledge_authorizes_governing_roles(role, course_id, class_id) 
 
     assert context.role == role
     assert context.course_ids == ["course_1"]
+
+
+def test_account_administrator_cannot_manage_course_knowledge() -> None:
+    user = _authorized_user(
+        "pseudonym_system_admin_knowledge",
+        "system_admin",
+        None,
+        None,
+    )
+
+    with pytest.raises(PermissionDenied):
+        authorize_course_knowledge(user, "course_1")
 
 
 def test_course_knowledge_denies_cross_course_teacher() -> None:

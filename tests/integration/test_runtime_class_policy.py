@@ -2,7 +2,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from course_insight.contracts.state import ConceptState, LearnerStateSnapshot
-from course_insight.infrastructure.config.roles import load_role_seeds
 from course_insight.modules.m5_learner_class_state.aggregation import (
     DeterministicClassAggregationPolicy,
 )
@@ -13,26 +12,19 @@ PROJECT_ROOT = Path(__file__).resolve().parents[2]
 CONFIG_ROOT = PROJECT_ROOT / "config"
 
 
-def test_active_development_class_roster_fits_the_class_aggregation_policy() -> None:
-    role_document = load_role_seeds(
-        CONFIG_ROOT / "roles.csv",
-        config_root=CONFIG_ROOT,
+def test_configured_class_aggregation_policy_fits_three_active_students() -> None:
+    active_students = (
+        "pseudonym_policy_student_001",
+        "pseudonym_policy_student_002",
+        "pseudonym_policy_student_003",
     )
-    active_students = [
-        grant
-        for grant in role_document.grants
-        if grant.is_active
-        and grant.role == "student"
-        and grant.course_id == "course_network"
-        and grant.class_id == "class_01"
-    ]
     now = datetime(2026, 8, 29, tzinfo=timezone.utc)
     learner_states = [
         LearnerStateSnapshot(
-            snapshot_id=f"{grant.actor_id}_state_v1",
+            snapshot_id=f"{actor_id}_state_v1",
             course_id="course_network",
             class_id="class_01",
-            learner_id=grant.actor_id,
+            learner_id=actor_id,
             state_version=1,
             concept_states=[
                 ConceptState(
@@ -50,7 +42,7 @@ def test_active_development_class_roster_fits_the_class_aggregation_policy() -> 
             evidence_count=1,
             updated_at=now,
         )
-        for grant in active_students
+        for actor_id in active_students
     ]
 
     snapshot = DeterministicClassAggregationPolicy().aggregate_all(

@@ -21,6 +21,7 @@ from course_insight.modules.m9_teacher_analytics.repository import (
     analytics_learner_scope,
 )
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
+from course_insight.infrastructure.sqlite.actor_erasure import purge_sqlite_actor
 from course_insight.infrastructure.sqlite.migrations import migrate
 
 
@@ -49,6 +50,13 @@ class SQLiteM9Repository:
             migrate(connection)
         finally:
             connection.close()
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_sqlite_actor(
+            self._database_path,
+            module="m9",
+            actor_id=actor_id,
+        )
 
     def save_model_audit(self, record: M9ModelAuditRecord) -> None:
         """Persist one idempotent privacy-minimized model-call record."""

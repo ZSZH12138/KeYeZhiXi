@@ -109,7 +109,7 @@ class ScopedDeepSeekConfiguration(models.Model):
     thinking_enabled = models.BooleanField(default=False)
     updated_by = models.ForeignKey(
         "m0_platform_web.User",
-        on_delete=models.PROTECT,
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name="scoped_deepseek_updates",

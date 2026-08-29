@@ -15,6 +15,7 @@ from course_insight.contracts.tutoring import (
 )
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
+from course_insight.infrastructure.sqlite.actor_erasure import purge_sqlite_actor
 from course_insight.infrastructure.sqlite.migrations import migrate
 from course_insight.modules.m6_tutoring_fsm.identity import EvidenceIdentity
 from course_insight.modules.m6_tutoring_fsm.repository import (
@@ -57,6 +58,13 @@ class SQLiteM6Repository:
             migrate(connection)
         finally:
             connection.close()
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_sqlite_actor(
+            self._database_path,
+            module="m6",
+            actor_id=actor_id,
+        )
 
     def save_session_state(self, snapshot: SessionStateSnapshot) -> None:
         """Insert one immutable snapshot without overwriting existing history."""

@@ -260,23 +260,30 @@ Artifact 只允许 UTF-8 canonical JSON；拒绝 pickle/joblib、绝对路径、
 完整字段和 promotion/rollback 见
 [M6 策略学习运维指南](m6_policy_operations.md)。
 
-### roles.csv 是完整期望状态
+### roles.csv 只引导账户管理员
 
-`config/roles.csv` 一行表示一个伪匿名授权关系。`sync_roles` 只在命令运行时读取
-CSV；请求期间从 Django `User`、Group/Permission 与 `ActorGrant` 读取两层权限。
+`config/roles.csv` 现在只保留 `system_admin` 恢复账号。教师和学生必须由管理员 Web
+控制台创建、物理注销；旧 CSV 中的教师、学生、课程管理员行仍可被解析和检查，但
+`sync_roles` 不会用它们新建或复活账号。
 
 - `--check` 只校验 CSV 和 checksum，不读写授权差异；
 - `--dry-run` 读取数据库并输出 `create/activate/revoke/unchanged`，不写入；
-- `--apply` 在一个事务中同步 Group 权限、用户、grant、membership 和同步元数据；
+- `--apply` 在一个事务中同步管理员 Group 权限、管理员 grant 和同步元数据；
 - 同一文件重复 apply 幂等；
-- 文件是该来源管理 grant 的完整期望状态：之前存在但本次省略的 grant 会撤销，
+- 文件是管理员引导 grant 的完整期望状态：之前存在但本次省略的 grant 会撤销，
   写入 `is_active=false` 和 `revoked_at`；若用户不再有该角色的有效 grant，
   对应 Group membership 也会删除；
 - CSV 中 `is_active=false` 同样表示显式撤销；
-- 命令创建的账号初始为 unusable password，密码不写入 CSV。
+- 命令创建的管理员初始为 unusable password，密码不写入 CSV；教师和学生的初始密码
+  只在管理员创建表单中提交，并按 Django 密码散列保存。
 
 先比较 `--dry-run`，确认省略撤销符合预期后再 `--apply`。错误 actor、冲突角色、
 非法 scope 或缺少 Django permission 时命令 fail closed。
+
+管理员物理注销不是一个数据库软删除标记。流程先禁用账号，再顺序清除各模块个人
+数据和全部会话，最后删除 Django 用户行。若页面提示“目标账户已冻结”，表示某个底层
+清除步骤失败：先查看服务日志和数据库可用性，修复后在账户控制台重试同一账号。不要
+手工重新启用该账号，也不要直接删 User 行跳过跨模块清除。
 
 ### 日志并发策略
 

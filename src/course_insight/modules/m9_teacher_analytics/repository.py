@@ -341,6 +341,9 @@ class M9ModelAuditRecord:
 class M9Repository(Protocol):
     """Persistence operations owned exclusively by M9."""
 
+    def purge_actor(self, actor_id: str) -> int:
+        """Physically delete module-owned rows for one actor."""
+
     def save_model_audit(self, record: M9ModelAuditRecord) -> None:
         """Persist one privacy-minimized M9 DeepSeek call record."""
 

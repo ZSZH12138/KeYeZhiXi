@@ -27,6 +27,7 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.infrastructure.postgresql.actor_erasure import purge_postgres_actor
 from course_insight.modules.m7_local_model.repository import M7ModelAuditRecord
 
 
@@ -66,6 +67,9 @@ class PostgresM7Repository:
 
     def __init__(self, pool: PostgresPool) -> None:
         self._pool = pool
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_postgres_actor(self._pool, module="m7", actor_id=actor_id)
 
     def save_model_audit(
         self,

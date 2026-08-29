@@ -25,6 +25,7 @@ from course_insight.modules.m0_platform.django_app.authz import (
     ROLE_PERMISSIONS,
 )
 from course_insight.modules.m0_platform.django_app.models import (
+    AccountType,
     ActorGrant,
     RoleSyncState,
     User,
@@ -102,9 +103,17 @@ def _load_configured_document():
         configured_path = Path(settings.COURSE_INSIGHT_ROLES_PATH)
     except (AttributeError, TypeError):
         raise CommandError("role seed configuration is unavailable") from None
-    return load_role_seeds(
+    document = load_role_seeds(
         configured_path,
         config_root=config_root,
+    )
+    # The CSV is now a recovery bootstrap only. Legacy rows remain parseable
+    # so upgrades can diagnose old files, but they never create live accounts.
+    return type(document)(
+        grants=tuple(
+            seed for seed in document.grants if seed.role == "system_admin"
+        ),
+        checksum=document.checksum,
     )
 
 
@@ -245,7 +254,27 @@ def _apply_grants(
 ) -> bool:
     changed = False
     for seed in seeds:
-        user, user_created = _get_or_create_user(seed.actor_id)
+        user = User.objects.select_for_update().filter(
+            actor_id=seed.actor_id
+        ).first()
+        user_created = False
+        if user is None:
+            if seed.role != "system_admin":
+                # Live teacher/student accounts are owned by the account
+                # administrator UI. Legacy rows must never resurrect them.
+                continue
+            user, user_created = _get_or_create_user(seed.actor_id)
+        expected_type = (
+            AccountType.ADMINISTRATOR
+            if seed.role == "system_admin"
+            else AccountType.TEACHER
+            if seed.role in {"teacher", "course_admin"}
+            else AccountType.STUDENT
+        )
+        if user.account_type != expected_type:
+            user.account_type = expected_type
+            user.save(update_fields=("account_type",))
+            changed = True
         grant = (
             ActorGrant.objects.select_for_update()
             .filter(
@@ -352,6 +381,7 @@ def _get_or_create_user(actor_id: str) -> tuple[User, bool]:
         first_name="",
         last_name="",
         is_active=True,
+        account_type=AccountType.ADMINISTRATOR,
     )
     user.set_unusable_password()
     user.full_clean()

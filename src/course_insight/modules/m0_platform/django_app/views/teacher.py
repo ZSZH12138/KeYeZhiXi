@@ -42,6 +42,7 @@ from course_insight.modules.m0_platform.django_app.authz import (
     authorize_course_knowledge,
     authorize_deepseek_config,
     authorize_scope,
+    resolve_account_type,
 )
 from course_insight.modules.m0_platform.django_app.flow_tokens import (
     flow_issued_at,
@@ -80,6 +81,7 @@ from course_insight.modules.m0_platform.django_app.assessment_feedback import (
 )
 from course_insight.modules.m0_platform.django_app.models import (
     ActorGrant,
+    AccountType,
     ClassMembership,
     CourseClassWorkspace,
     CourseKnowledgeRelease,
@@ -158,8 +160,11 @@ class TeacherQuestionReviewView:
 @login_required
 @require_GET
 def home(request: HttpRequest) -> HttpResponse:
-    if not request.user.has_perm(
+    if (
+        resolve_account_type(request.user) != AccountType.TEACHER
+        or not request.user.has_perm(
         "m0_platform_web.view_class_analytics"
+        )
     ):
         raise PermissionDenied
     grant_scopes = {
@@ -213,8 +218,16 @@ def home(request: HttpRequest) -> HttpResponse:
 @login_required
 @require_POST
 def open_class(request: HttpRequest) -> HttpResponse:
+    _authorize_teacher_account(request, "open_class")
     form = OpenClassForm(data=request.POST)
-    if not form.is_valid():
+    valid = form.is_valid()
+    if not _has_exact_post_fields(
+        request,
+        {"course_name", "class_name", "request_token"},
+    ):
+        form.add_error(None, "提交字段不完整或包含未允许字段")
+        valid = False
+    if not valid:
         return render(
             request,
             "course_insight/teacher/home.html",
@@ -254,13 +267,17 @@ def add_class_student(
     course_id: str,
     class_id: str,
 ) -> HttpResponse:
+    _authorize_teacher_account(request, "manage_class_members")
     workspace = get_object_or_404(
         CourseClassWorkspace,
         course_id=course_id,
         class_id=class_id,
     )
     form = ClassMemberForm(data=request.POST)
-    if not form.is_valid():
+    if (
+        not form.is_valid()
+        or not _has_exact_post_fields(request, {"student_account"})
+    ):
         return HttpResponse("学生账户名无效", status=400)
     try:
         add_student(
@@ -281,6 +298,9 @@ def remove_class_student(
     class_id: str,
     actor_id: str,
 ) -> HttpResponse:
+    _authorize_teacher_account(request, "manage_class_members")
+    if not _has_exact_post_fields(request, set()):
+        return HttpResponse("提交字段无效", status=400)
     workspace = get_object_or_404(
         CourseClassWorkspace,
         course_id=course_id,
@@ -295,6 +315,27 @@ def remove_class_student(
     except ValidationError as error:
         return HttpResponse(str(error.message), status=400)
     return redirect("teacher-class", course_id=course_id, class_id=class_id)
+
+
+def _authorize_teacher_account(
+    request: HttpRequest,
+    permission: str,
+) -> None:
+    if (
+        resolve_account_type(request.user) != AccountType.TEACHER
+        or not request.user.has_perm(f"m0_platform_web.{permission}")
+    ):
+        raise PermissionDenied
+
+
+def _has_exact_post_fields(
+    request: HttpRequest,
+    expected: set[str],
+) -> bool:
+    supplied = set(request.POST) - {"csrfmiddlewaretoken"}
+    return supplied == expected and all(
+        len(request.POST.getlist(name)) == 1 for name in supplied
+    )
 
 
 @login_required

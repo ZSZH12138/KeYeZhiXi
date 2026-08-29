@@ -99,6 +99,9 @@ class TutoringDecisionRecord:
 class M6Repository(Protocol):
     """Persistence operations owned exclusively by M6."""
 
+    def purge_actor(self, actor_id: str) -> int:
+        """Physically delete module-owned rows for one actor."""
+
     def save_session_state(self, snapshot: SessionStateSnapshot) -> None:
         """Persist one immutable tutoring turn snapshot."""
 

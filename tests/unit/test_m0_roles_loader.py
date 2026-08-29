@@ -244,12 +244,7 @@ def test_repository_roles_example_is_valid_and_complete() -> None:
         config_root=project_root / "config",
     )
 
-    assert {grant.role for grant in document.grants} == {
-        "student",
-        "teacher",
-        "course_admin",
-        "system_admin",
-    }
+    assert {grant.role for grant in document.grants} == {"system_admin"}
     assert len(document.checksum) == 64
 
 

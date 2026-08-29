@@ -77,6 +77,9 @@ def assert_review_transition(
 class M8Repository(Protocol):
     """Persistence operations owned exclusively by M8."""
 
+    def purge_actor(self, actor_id: str) -> int:
+        """Physically delete module-owned rows for one actor."""
+
     def save_paper(self, paper: AssessmentPaper) -> None:
         """Persist one immutable generated assessment paper."""
 

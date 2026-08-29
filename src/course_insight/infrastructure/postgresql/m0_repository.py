@@ -14,6 +14,7 @@ from course_insight.infrastructure.postgresql.m0_outbox_repository import (
     m0_transaction,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.infrastructure.postgresql.actor_erasure import purge_postgres_actor
 from course_insight.modules.m0_platform.workflow import (
     AssessmentRun,
     advance_run,
@@ -46,6 +47,9 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
         )
 
         run_migrations(self._pool)
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_postgres_actor(self._pool, module="m0", actor_id=actor_id)
 
     def schema_is_current(self) -> bool:
         """Return whether the database is at the latest verified migration."""

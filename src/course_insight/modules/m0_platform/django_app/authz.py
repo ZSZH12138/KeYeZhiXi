@@ -60,23 +60,7 @@ ROLE_PERMISSIONS: Final[Mapping[str, frozenset[str]]] = {
             "manage_course_knowledge",
         }
     ),
-    RoleName.SYSTEM_ADMIN: frozenset(
-        {
-            "start_assessment",
-            "submit_assessment",
-            "view_own_result",
-            "view_own_feedback",
-            "view_class_analytics",
-            "view_student_report",
-            "review_score",
-            "manage_course_roles",
-            "manage_platform",
-            "configure_deepseek",
-            "manage_course_knowledge",
-            "ask_course_question",
-            "view_course_files",
-        }
-    ),
+    RoleName.SYSTEM_ADMIN: frozenset({"manage_accounts"}),
 }
 PERMISSION_CODENAMES: Final[frozenset[str]] = frozenset(
     permission
@@ -160,7 +144,7 @@ def authorize_scope(
         or getattr(user, "pk", None) is None
     ):
         raise PermissionDenied
-    if getattr(user, "account_type", None) == AccountType.ADMINISTRATOR:
+    if resolve_account_type(user) == AccountType.ADMINISTRATOR:
         raise PermissionDenied
     if not user.has_perm(f"{_APP_LABEL}.{permission}"):
         raise PermissionDenied
@@ -234,7 +218,7 @@ def authorize_deepseek_config(user: User | AnonymousUser) -> ActorContext:
         or getattr(user, "pk", None) is None
     ):
         raise PermissionDenied
-    if getattr(user, "account_type", None) == AccountType.ADMINISTRATOR:
+    if resolve_account_type(user) == AccountType.ADMINISTRATOR:
         raise PermissionDenied
     if not user.has_perm(f"{_APP_LABEL}.configure_deepseek"):
         raise PermissionDenied
@@ -287,7 +271,7 @@ def authorize_course_knowledge(
     ):
         raise PermissionDenied
 
-    if getattr(user, "account_type", None) == AccountType.ADMINISTRATOR:
+    if resolve_account_type(user) == AccountType.ADMINISTRATOR:
         raise PermissionDenied
     if (
         resolve_account_type(user) == AccountType.TEACHER

@@ -356,12 +356,11 @@ def test_course_admin_and_system_admin_respect_role_scope() -> None:
         course_id=None,
         class_id=None,
     )
-    platform_context = authorize_scope(
-        system_admin,
-        "manage_platform",
-    )
-    assert platform_context.course_ids == []
-    assert platform_context.class_ids == []
+    with pytest.raises(PermissionDenied):
+        authorize_scope(
+            system_admin,
+            "manage_platform",
+        )
 
 
 def test_cross_role_or_ambiguous_active_grants_fail_closed() -> None:

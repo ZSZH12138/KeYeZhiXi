@@ -19,6 +19,7 @@ from course_insight.contracts.state import (
 )
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
+from course_insight.infrastructure.sqlite.actor_erasure import purge_sqlite_actor
 from course_insight.infrastructure.sqlite.migrations import migrate
 from course_insight.infrastructure.sqlite import m5_bkt_runtime
 from course_insight.modules.m5_learner_class_state.learning_observation_evidence import (
@@ -42,6 +43,13 @@ class SQLiteM5Repository:
             migrate(connection)
         finally:
             connection.close()
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_sqlite_actor(
+            self._database_path,
+            module="m5",
+            actor_id=actor_id,
+        )
 
     def insert_or_get_state_update(
         self,

@@ -10,6 +10,7 @@ import sqlite3
 
 from course_insight.contracts.errors import DomainError
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
+from course_insight.infrastructure.sqlite.actor_erasure import purge_sqlite_actor
 from course_insight.infrastructure.sqlite.m0_outbox_repository import (
     SQLiteM0OutboxRepositoryMixin,
 )
@@ -51,6 +52,13 @@ class SQLiteM0Repository(SQLiteM0OutboxRepositoryMixin):
             migrate(connection)
         finally:
             connection.close()
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_sqlite_actor(
+            self._database_path,
+            module="m0",
+            actor_id=actor_id,
+        )
 
     def schema_is_current(self) -> bool:
         """Check the migration version and M0 storage structure."""

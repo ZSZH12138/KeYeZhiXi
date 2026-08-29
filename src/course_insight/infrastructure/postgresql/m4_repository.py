@@ -14,6 +14,7 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.infrastructure.postgresql.actor_erasure import purge_postgres_actor
 from course_insight.modules.m4_task_orchestration.intent import IntentStatus
 from course_insight.modules.m4_task_orchestration.intent_service import (
     StoredIntentDecision,
@@ -32,6 +33,9 @@ class PostgresM4Repository:
 
     def __init__(self, pool: PostgresPool) -> None:
         self._pool = pool
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_postgres_actor(self._pool, module="m4", actor_id=actor_id)
 
     def initialize(self) -> None:
         """Apply every verified PostgreSQL migration."""

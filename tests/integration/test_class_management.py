@@ -193,3 +193,62 @@ def test_teacher_cannot_manage_another_teachers_class() -> None:
             teacher=outsider,
             actor_id=student.actor_id,
         )
+
+
+def test_student_cannot_use_open_class_endpoint() -> None:
+    student = _student("pseudonym_student_cannot_open")
+    client = Client()
+    client.force_login(student)
+
+    response = client.post(
+        reverse("teacher-open-class"),
+        {"unexpected": "value"},
+    )
+
+    assert response.status_code == 403
+    assert not CourseClassWorkspace.objects.exists()
+
+
+def test_class_governance_rejects_extra_post_fields() -> None:
+    teacher = _teacher("pseudonym_teacher_strict_fields")
+    student = _student("pseudonym_student_strict_fields")
+    client = Client()
+    client.force_login(teacher)
+
+    opened = client.post(
+        reverse("teacher-open-class"),
+        {
+            "course_name": "数据结构",
+            "class_name": "一班",
+            "request_token": "open-class-request-strict-001",
+            "owner_teacher": student.actor_id,
+        },
+    )
+
+    assert opened.status_code == 400
+    assert not CourseClassWorkspace.objects.exists()
+
+    workspace = CourseClassWorkspace.objects.create(
+        course_id="course_strict_fields",
+        class_id="class_strict_fields",
+        owner_teacher=teacher,
+    )
+    added = client.post(
+        reverse(
+            "teacher-class-add-student",
+            kwargs={
+                "course_id": workspace.course_id,
+                "class_id": workspace.class_id,
+            },
+        ),
+        {
+            "student_account": student.actor_id,
+            "status": ClassMembership.Status.ACTIVE,
+        },
+    )
+
+    assert added.status_code == 400
+    assert not ClassMembership.objects.filter(
+        workspace=workspace,
+        student=student,
+    ).exists()

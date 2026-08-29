@@ -22,6 +22,7 @@ from course_insight.contracts.learning_models import (
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite import m8_model_runtime
 from course_insight.infrastructure.sqlite.connection import connect_sqlite
+from course_insight.infrastructure.sqlite.actor_erasure import purge_sqlite_actor
 from course_insight.infrastructure.sqlite.migrations import migrate
 from course_insight.modules.m8_assessment_scoring.paper_record import (
     FrozenAssessmentRecord,
@@ -49,6 +50,13 @@ class SQLiteM8Repository:
             migrate(connection)
         finally:
             connection.close()
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_sqlite_actor(
+            self._database_path,
+            module="m8",
+            actor_id=actor_id,
+        )
 
     def insert_or_get_paper(
         self,

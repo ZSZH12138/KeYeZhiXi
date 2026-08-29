@@ -26,6 +26,7 @@ from course_insight.infrastructure.postgresql.base import (
     PostgresOperationError,
 )
 from course_insight.infrastructure.postgresql.pool import PostgresPool
+from course_insight.infrastructure.postgresql.actor_erasure import purge_postgres_actor
 from course_insight.infrastructure.postgresql import m5_bkt_runtime
 from course_insight.modules.m5_learner_class_state.learning_observation_evidence import (
     learning_observation_evidence_checksum,
@@ -98,6 +99,9 @@ class PostgresM5Repository:
 
     def __init__(self, pool: PostgresPool) -> None:
         self._pool = pool
+
+    def purge_actor(self, actor_id: str) -> int:
+        return purge_postgres_actor(self._pool, module="m5", actor_id=actor_id)
 
     def insert_or_get_learning_observation_batch(
         self,

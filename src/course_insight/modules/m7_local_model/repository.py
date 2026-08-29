@@ -354,6 +354,9 @@ class M7ModelAuditRecord:
 class M7Repository(Protocol):
     """Persistence operations owned exclusively by M7."""
 
+    def purge_actor(self, actor_id: str) -> int:
+        """Physically delete module-owned rows for one actor."""
+
     def save_execution_audit(self, record: M7ModelAuditRecord) -> None:
         """Atomically retain one privacy-minimized, idempotent call audit."""
 
