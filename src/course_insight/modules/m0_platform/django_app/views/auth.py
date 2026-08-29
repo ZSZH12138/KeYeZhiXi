@@ -16,7 +16,12 @@ from django.views.decorators.http import require_http_methods, require_POST
 from course_insight.modules.m0_platform.django_app.authz import (
     is_login_allowed,
     register_login_failure,
+    resolve_account_type,
     reset_login_failures,
+)
+from course_insight.modules.m0_platform.django_app.models import (
+    AccountType,
+    AuthenticatedSession,
 )
 
 
@@ -63,7 +68,13 @@ def login(request: HttpRequest) -> HttpResponse:
             clear_shared_ip=False,
         )
         django_login(request, user)
-        if next_url:
+        request.session.save()
+        if request.session.session_key:
+            AuthenticatedSession.objects.update_or_create(
+                session_key=request.session.session_key,
+                defaults={"user": user},
+            )
+        if next_url and _next_matches_account(next_url, user):
             return redirect(next_url)
         return _home_redirect(request)
 
@@ -91,6 +102,10 @@ def login(request: HttpRequest) -> HttpResponse:
 @login_required
 @require_POST
 def logout(request: HttpRequest) -> HttpResponse:
+    if request.session.session_key:
+        AuthenticatedSession.objects.filter(
+            session_key=request.session.session_key
+        ).delete()
     django_logout(request)
     return redirect("login")
 
@@ -122,6 +137,19 @@ def _safe_next(request: HttpRequest) -> str:
 
 
 def _home_redirect(request: HttpRequest) -> HttpResponse:
-    if request.user.has_perm("m0_platform_web.start_assessment"):
+    account_type = resolve_account_type(request.user)
+    if account_type == AccountType.ADMINISTRATOR:
+        return redirect("account-admin-home")
+    if account_type == AccountType.STUDENT:
         return redirect("student-home")
     return redirect("teacher-home")
+
+
+def _next_matches_account(next_url: str, user: object) -> bool:
+    account_type = resolve_account_type(user)  # type: ignore[arg-type]
+    prefixes = {
+        AccountType.STUDENT: "/student/",
+        AccountType.TEACHER: "/teacher/",
+        AccountType.ADMINISTRATOR: "/account-admin/",
+    }
+    return next_url.startswith(prefixes.get(account_type, "\0"))

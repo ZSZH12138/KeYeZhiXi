@@ -6,5 +6,18 @@ from course_insight.modules.m0_platform.django_app.forms.assessment import (
 from course_insight.modules.m0_platform.django_app.forms.review import (
     TeacherReviewForm,
 )
+from course_insight.modules.m0_platform.django_app.forms.governance import (
+    AccountDeletionConfirmationForm,
+    ClassMemberForm,
+    ManagedAccountCreationForm,
+    OpenClassForm,
+)
 
-__all__ = ["AssessmentSubmissionForm", "TeacherReviewForm"]
+__all__ = [
+    "AccountDeletionConfirmationForm",
+    "AssessmentSubmissionForm",
+    "ClassMemberForm",
+    "ManagedAccountCreationForm",
+    "OpenClassForm",
+    "TeacherReviewForm",
+]

@@ -18,7 +18,10 @@ from django.utils import timezone
 
 from course_insight.contracts.platform import ActorContext
 from course_insight.modules.m0_platform.django_app.models import (
+    AccountType,
     ActorGrant,
+    ClassMembership,
+    CourseClassWorkspace,
     LoginFailureBucket,
     PSEUDONYMOUS_ACTOR_PATTERN,
     RoleName,
@@ -94,6 +97,41 @@ _scope_pattern = re.compile(SCOPE_ID_PATTERN)
 _actor_pattern = re.compile(PSEUDONYMOUS_ACTOR_PATTERN)
 
 
+def resolve_account_type(user: User | AnonymousUser) -> str | None:
+    """Resolve the global account type, with read-only legacy-grant support."""
+
+    if not getattr(user, "is_authenticated", False):
+        return None
+    account_type = getattr(user, "account_type", None)
+    if account_type in {AccountType.TEACHER, AccountType.ADMINISTRATOR}:
+        return str(account_type)
+    roles = set(
+        ActorGrant.objects.filter(
+            user_id=getattr(user, "pk", None),
+            is_active=True,
+            revoked_at__isnull=True,
+        ).values_list("role", flat=True)
+    )
+    if roles and roles <= {RoleName.TEACHER, RoleName.COURSE_ADMIN}:
+        return AccountType.TEACHER
+    if roles == {RoleName.SYSTEM_ADMIN}:
+        return AccountType.ADMINISTRATOR
+    return AccountType.STUDENT
+
+
+def authorize_account_admin(user: User | AnonymousUser) -> None:
+    """Allow only the dedicated global account administrator."""
+
+    if (
+        not getattr(user, "is_authenticated", False)
+        or not getattr(user, "is_active", False)
+        or getattr(user, "pk", None) is None
+        or getattr(user, "account_type", None) != AccountType.ADMINISTRATOR
+        or not user.has_perm(f"{_APP_LABEL}.manage_accounts")
+    ):
+        raise PermissionDenied
+
+
 def authorize_scope(
     user: User | AnonymousUser,
     permission: str,
@@ -122,8 +160,21 @@ def authorize_scope(
         or getattr(user, "pk", None) is None
     ):
         raise PermissionDenied
+    if getattr(user, "account_type", None) == AccountType.ADMINISTRATOR:
+        raise PermissionDenied
     if not user.has_perm(f"{_APP_LABEL}.{permission}"):
         raise PermissionDenied
+
+    relationship_context = _relationship_authorization(
+        user,
+        permission=permission,
+        course_id=course_id,
+        class_id=class_id,
+        learner_id=learner_id,
+        moment=moment,
+    )
+    if relationship_context is not None:
+        return relationship_context
 
     grants = tuple(
         ActorGrant.objects.filter(
@@ -183,6 +234,8 @@ def authorize_deepseek_config(user: User | AnonymousUser) -> ActorContext:
         or getattr(user, "pk", None) is None
     ):
         raise PermissionDenied
+    if getattr(user, "account_type", None) == AccountType.ADMINISTRATOR:
+        raise PermissionDenied
     if not user.has_perm(f"{_APP_LABEL}.configure_deepseek"):
         raise PermissionDenied
     grants = tuple(
@@ -234,6 +287,33 @@ def authorize_course_knowledge(
     ):
         raise PermissionDenied
 
+    if getattr(user, "account_type", None) == AccountType.ADMINISTRATOR:
+        raise PermissionDenied
+    if (
+        resolve_account_type(user) == AccountType.TEACHER
+        and CourseClassWorkspace.objects.filter(
+            owner_teacher_id=user.pk,
+            course_id=course_id,
+            status=CourseClassWorkspace.Status.ACTIVE,
+        ).exists()
+    ):
+        class_ids = list(
+            CourseClassWorkspace.objects.filter(
+                owner_teacher_id=user.pk,
+                course_id=course_id,
+                status=CourseClassWorkspace.Status.ACTIVE,
+            )
+            .order_by("class_id")
+            .values_list("class_id", flat=True)
+        )
+        return ActorContext(
+            actor_id=user.actor_id,
+            role=RoleName.TEACHER,
+            course_ids=[course_id],
+            class_ids=class_ids,
+            issued_at=moment,
+        )
+
     grants = tuple(
         ActorGrant.objects.filter(
             user_id=user.pk,
@@ -279,6 +359,64 @@ def authorize_course_knowledge(
         role=role,
         course_ids=[course_id],
         class_ids=class_ids,
+        issued_at=moment,
+    )
+
+
+def _relationship_authorization(
+    user: User,
+    *,
+    permission: str,
+    course_id: str | None,
+    class_id: str | None,
+    learner_id: str | None,
+    moment: datetime,
+) -> ActorContext | None:
+    if course_id is None or class_id is None:
+        return None
+    workspace = CourseClassWorkspace.objects.filter(
+        course_id=course_id,
+        class_id=class_id,
+        status=CourseClassWorkspace.Status.ACTIVE,
+    ).first()
+    if workspace is None:
+        return None
+
+    account_type = resolve_account_type(user)
+    role: str | None = None
+    if account_type == AccountType.TEACHER:
+        if workspace.owner_teacher_id is None:
+            return None
+        if workspace.owner_teacher_id != user.pk:
+            raise PermissionDenied
+        role = RoleName.TEACHER
+    elif account_type == AccountType.STUDENT:
+        is_member = ClassMembership.objects.filter(
+            workspace=workspace,
+            student_id=user.pk,
+            status=ClassMembership.Status.ACTIVE,
+            removed_at__isnull=True,
+        ).exists()
+        if not is_member:
+            if workspace.owner_teacher_id is None:
+                return None
+            raise PermissionDenied
+        role = RoleName.STUDENT
+    else:
+        raise PermissionDenied
+
+    if permission not in ROLE_PERMISSIONS[role]:
+        raise PermissionDenied
+    if role == RoleName.STUDENT:
+        if learner_id is not None and learner_id != user.actor_id:
+            raise PermissionDenied
+        if permission in _STUDENT_SELF_PERMISSIONS and learner_id is None:
+            raise PermissionDenied
+    return ActorContext(
+        actor_id=user.actor_id,
+        role=role,
+        course_ids=[course_id],
+        class_ids=[class_id],
         issued_at=moment,
     )
 

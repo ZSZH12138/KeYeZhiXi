@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import secrets
 from collections.abc import Mapping
 from dataclasses import dataclass, replace
 from decimal import Decimal
@@ -11,7 +12,7 @@ from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
 from django.db.models import Q
 from django.http import Http404, HttpRequest, HttpResponse, QueryDict
-from django.shortcuts import redirect, render
+from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
 from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
@@ -32,6 +33,11 @@ from course_insight.infrastructure.deepseek_secrets import (
 )
 from course_insight.infrastructure.log_context import bind_log_context
 from course_insight.modules.m0_platform.django_app import runtime
+from course_insight.modules.m0_platform.django_app.class_management import (
+    add_student,
+    create_owned_workspace,
+    remove_student,
+)
 from course_insight.modules.m0_platform.django_app.authz import (
     authorize_course_knowledge,
     authorize_deepseek_config,
@@ -45,6 +51,10 @@ from course_insight.modules.m0_platform.django_app.flow_tokens import (
 )
 from course_insight.modules.m0_platform.django_app.forms.deepseek import (
     DeepSeekSettingsForm,
+)
+from course_insight.modules.m0_platform.django_app.forms.governance import (
+    ClassMemberForm,
+    OpenClassForm,
 )
 from course_insight.modules.m0_platform.django_app.learning_projection import (
     PROFILE_TASK_TYPES,
@@ -70,6 +80,7 @@ from course_insight.modules.m0_platform.django_app.assessment_feedback import (
 )
 from course_insight.modules.m0_platform.django_app.models import (
     ActorGrant,
+    ClassMembership,
     CourseClassWorkspace,
     CourseKnowledgeRelease,
     LearnerConceptMastery,
@@ -151,15 +162,25 @@ def home(request: HttpRequest) -> HttpResponse:
         "m0_platform_web.view_class_analytics"
     ):
         raise PermissionDenied
+    grant_scopes = {
+        (course_id, class_id)
+        for course_id, class_id in request.user.actor_grants.filter(
+            is_active=True,
+            revoked_at__isnull=True,
+            class_id__isnull=False,
+        ).values_list("course_id", "class_id")
+        if course_id and class_id
+    }
+    owned_workspaces = tuple(
+        CourseClassWorkspace.objects.filter(
+            owner_teacher=request.user,
+            status=CourseClassWorkspace.Status.ACTIVE,
+        ).order_by("course_display_name", "class_display_name", "course_id")
+    )
     knowledge_scopes = sorted(
         {
-            (course_id, class_id)
-            for course_id, class_id in request.user.actor_grants.filter(
-                is_active=True,
-                revoked_at__isnull=True,
-                class_id__isnull=False,
-            ).values_list("course_id", "class_id")
-            if course_id and class_id
+            *grant_scopes,
+            *((item.course_id, item.class_id) for item in owned_workspaces),
         }
     )
     return render(
@@ -168,6 +189,10 @@ def home(request: HttpRequest) -> HttpResponse:
         {
             "lookup_form": ReviewLookupForm(),
             "class_form": ScopeSelectionForm(),
+            "open_class_form": OpenClassForm(
+                initial={"request_token": secrets.token_urlsafe(32)}
+            ),
+            "owned_workspaces": owned_workspaces,
             "can_configure_deepseek": request.user.has_perm(
                 "m0_platform_web.configure_deepseek"
             ),
@@ -183,6 +208,93 @@ def home(request: HttpRequest) -> HttpResponse:
             ),
         },
     )
+
+
+@login_required
+@require_POST
+def open_class(request: HttpRequest) -> HttpResponse:
+    form = OpenClassForm(data=request.POST)
+    if not form.is_valid():
+        return render(
+            request,
+            "course_insight/teacher/home.html",
+            {
+                "lookup_form": ReviewLookupForm(),
+                "class_form": ScopeSelectionForm(),
+                "open_class_form": form,
+                "owned_workspaces": CourseClassWorkspace.objects.none(),
+                "knowledge_scopes": (),
+                "knowledge_courses": (),
+                "can_configure_deepseek": request.user.has_perm(
+                    "m0_platform_web.configure_deepseek"
+                ),
+                "can_manage_course_knowledge": request.user.has_perm(
+                    "m0_platform_web.manage_course_knowledge"
+                ),
+            },
+            status=400,
+        )
+    workspace = create_owned_workspace(
+        teacher=request.user,
+        course_name=str(form.cleaned_data["course_name"]),
+        class_name=str(form.cleaned_data["class_name"]),
+        request_token=str(form.cleaned_data["request_token"]),
+    )
+    return redirect(
+        "teacher-class",
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
+    )
+
+
+@login_required
+@require_POST
+def add_class_student(
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+) -> HttpResponse:
+    workspace = get_object_or_404(
+        CourseClassWorkspace,
+        course_id=course_id,
+        class_id=class_id,
+    )
+    form = ClassMemberForm(data=request.POST)
+    if not form.is_valid():
+        return HttpResponse("学生账户名无效", status=400)
+    try:
+        add_student(
+            workspace=workspace,
+            teacher=request.user,
+            actor_id=str(form.cleaned_data["student_account"]),
+        )
+    except ValidationError as error:
+        return HttpResponse(str(error.message), status=400)
+    return redirect("teacher-class", course_id=course_id, class_id=class_id)
+
+
+@login_required
+@require_POST
+def remove_class_student(
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+    actor_id: str,
+) -> HttpResponse:
+    workspace = get_object_or_404(
+        CourseClassWorkspace,
+        course_id=course_id,
+        class_id=class_id,
+    )
+    try:
+        remove_student(
+            workspace=workspace,
+            teacher=request.user,
+            actor_id=actor_id,
+        )
+    except ValidationError as error:
+        return HttpResponse(str(error.message), status=400)
+    return redirect("teacher-class", course_id=course_id, class_id=class_id)
 
 
 @login_required
@@ -510,7 +622,11 @@ def _render_class_context(
 
     web_runtime = runtime.get_web_runtime()
     course = web_runtime.require_course(course_id)
-    bundle = _knowledge_bundle(course)
+    bundle = _scoped_knowledge_bundle(
+        course,
+        course_id=course_id,
+        class_id=class_id,
+    )
     # M5 rebuilds only when profile counters, the active roster, or the active
     # release changed.  M9's teacher presentation consumes this named view.
     class_snapshot = ensure_current_class_learning_snapshot(
@@ -522,7 +638,7 @@ def _render_class_context(
     getter = getattr(m9, "get_latest_analytics", None) if m9 is not None else None
     if callable(getter):
         raw = getter(course_id=course_id, class_id=class_id)
-        if raw is not None:
+        if raw is not None and bundle is not None:
             learner_states = _list_learner_states(
                 web_runtime,
                 course_id=course_id,
@@ -539,6 +655,24 @@ def _render_class_context(
                 course_id=course_id,
             )
     advice_status = scoped_deepseek_status(course_id, class_id)
+    workspace = CourseClassWorkspace.objects.filter(
+        course_id=course_id,
+        class_id=class_id,
+    ).first()
+    can_manage_roster = (
+        workspace is not None and workspace.is_owned_by(request.user)
+    )
+    memberships = (
+        ClassMembership.objects.filter(
+            workspace=workspace,
+            status=ClassMembership.Status.ACTIVE,
+            removed_at__isnull=True,
+        )
+        .select_related("student")
+        .order_by("student__actor_id")
+        if can_manage_roster
+        else ClassMembership.objects.none()
+    )
     teaching_advice_flow = None
     if class_snapshot is not None and advice_status.configured:
         teaching_advice_flow = issue_flow_token(
@@ -553,6 +687,11 @@ def _render_class_context(
         {
             "course_id": course_id,
             "class_id": class_id,
+            "workspace": workspace,
+            "can_manage_roster": can_manage_roster,
+            "active_memberships": memberships,
+            "active_student_count": memberships.count(),
+            "member_form": ClassMemberForm(),
             "analytics": analytics,
             "class_snapshot": class_snapshot,
             "teaching_advice": teaching_advice,
@@ -1264,8 +1403,14 @@ def objective_answers(
     )
     web_runtime = runtime.get_web_runtime()
     course = web_runtime.require_course(course_id)
-    published = course.course_context.knowledge_bundle
-    items = [item for item in published.items if item.is_objective()]
+    published = _scoped_knowledge_bundle(
+        course,
+        course_id=course_id,
+        class_id=class_id,
+    )
+    items = [] if published is None else [
+        item for item in published.items if item.is_objective()
+    ]
     if request.method == "POST":
         overlays: dict[str, list[str]] = {}
         for item in items:
@@ -1283,7 +1428,11 @@ def objective_answers(
             course_id=course_id,
             class_id=class_id,
         )
-    merged = bundle_with_overlays(published, course.state_policy_path)
+    merged = (
+        None
+        if published is None
+        else bundle_with_overlays(published, course.state_policy_path)
+    )
     rows = []
     for item in items:
         current = merged.get_item(item.item_id, item.version)
@@ -1325,7 +1474,11 @@ def blueprint(
     )
     web_runtime = runtime.get_web_runtime()
     course = web_runtime.require_course(course_id)
-    published = course.course_context.knowledge_bundle
+    published = _scoped_knowledge_bundle(
+        course,
+        course_id=course_id,
+        class_id=class_id,
+    )
     path = blueprint_overlay_path(course.state_policy_path)
     if request.method == "POST":
         sections: list[dict[str, object]] = []
@@ -1386,13 +1539,21 @@ def blueprint(
             class_id=class_id,
         )
     stored = load_overlay(path)
-    overlay = stored if stored.get("sections") else default_overlay(published)
-    merged = _knowledge_bundle(course)
-    preview = _preview_paper(
-        merged,
-        course_id=course_id,
-        class_id=class_id,
-        learner_id=request.user.actor_id,
+    overlay = (
+        stored
+        if stored.get("sections")
+        else ({} if published is None else default_overlay(published))
+    )
+    merged = published
+    preview = (
+        None
+        if merged is None
+        else _preview_paper(
+            merged,
+            course_id=course_id,
+            class_id=class_id,
+            learner_id=request.user.actor_id,
+        )
     )
     return render(
         request,
@@ -1886,11 +2047,43 @@ def _as_float(value: object, *, field: str) -> float:
 
 
 def _knowledge_bundle(course):
+    if course.course_context is None:
+        raise DomainError(
+            code="COURSE_KNOWLEDGE_NOT_PUBLISHED",
+            module="m0",
+            message="课程尚未发布可用题目。",
+            recoverable=True,
+        )
     bundle = bundle_with_overlays(
         course.course_context.knowledge_bundle,
         course.state_policy_path,
     )
     return bundle_with_blueprint(bundle, course.state_policy_path)
+
+
+def _scoped_knowledge_bundle(
+    course,
+    *,
+    course_id: str,
+    class_id: str,
+):
+    workspace = CourseClassWorkspace.objects.select_related("active_release").filter(
+        course_id=course_id,
+        class_id=class_id,
+        active_release__status=CourseKnowledgeRelease.Status.ACTIVE,
+    ).first()
+    if workspace is not None and workspace.active_release is not None:
+        try:
+            return knowledge_bundle_from_release(workspace.active_release)
+        except DomainError:
+            # Pre-governance static courses may contain partial release rows
+            # used only by M5 snapshots. Their fixed manifest remains the
+            # readable source until a complete release is published.
+            if course.course_context is None:
+                raise
+    if course.course_context is None:
+        return None
+    return _knowledge_bundle(course)
 
 
 def _assessment_bundle(

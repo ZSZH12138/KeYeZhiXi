@@ -40,8 +40,13 @@
     <strong class="brand">课业智析</strong>
     {% if request.user.is_authenticated %}
       <nav>
+        {% if request.user.account_type == 'student' %}
         <a href="{% url 'student-home' %}">学生端</a>
+        {% elif request.user.account_type == 'teacher' %}
         <a href="{% url 'teacher-home' %}">教师端</a>
+        {% elif request.user.account_type == 'administrator' %}
+        <a href="{% url 'account-admin-home' %}">账户管理</a>
+        {% endif %}
         <form method="post" action="{% url 'logout' %}">
           {% csrf_token %}
           <button type="submit">退出</button>

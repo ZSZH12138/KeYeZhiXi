@@ -2,7 +2,28 @@
 {% block title %}班级入口 · 课业智析{% endblock %}
 {% block content %}
   <h1>班级入口</h1>
-  <p>课程：{{ course_id }}；班级：{{ class_id }}</p>
+  <p>课程：{% if workspace.course_display_name %}{{ workspace.course_display_name }}{% else %}{{ course_id }}{% endif %}；班级：{% if workspace.class_display_name %}{{ workspace.class_display_name }}{% else %}{{ class_id }}{% endif %}</p>
+  {% if can_manage_roster %}
+  <section class="card" id="class-roster">
+    <h2>学生名单</h2>
+    <p>当前学生：{{ active_student_count }} 人</p>
+    <form method="post" action="{% url 'teacher-class-add-student' course_id=course_id class_id=class_id %}" class="actions">
+      {% csrf_token %}
+      {{ member_form.as_p }}
+      <button type="submit">邀请加入班级</button>
+    </form>
+    <ul>
+      {% for membership in active_memberships %}
+        <li>
+          {{ membership.student.actor_id }}
+          <form method="post" action="{% url 'teacher-class-remove-student' course_id=course_id class_id=class_id actor_id=membership.student.actor_id %}" style="display:inline">
+            {% csrf_token %}<button type="submit">移出班级</button>
+          </form>
+        </li>
+      {% empty %}<li>班级中还没有学生。</li>{% endfor %}
+    </ul>
+  </section>
+  {% endif %}
   <nav class="card">
     <p>五个查看入口：
       <a href="#class-map">班级知识地图</a> ·

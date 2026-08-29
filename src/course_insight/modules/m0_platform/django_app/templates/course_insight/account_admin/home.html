@@ -1,0 +1,20 @@
+{% extends "course_insight/base.html" %}
+{% block title %}账户管理 · 课业智析{% endblock %}
+{% block content %}
+  <p class="breadcrumb">首页 / 账户管理</p>
+  <h1 class="page-title">账户管理</h1>
+  <p>管理员只负责新增和注销教师、学生账户，不参与课程或班级操作。</p>
+  <div class="card">
+    <h2>新增账户</h2>
+    <p><a href="{% url 'account-admin-create-teacher' %}">新增教师账户</a></p>
+    <p><a href="{% url 'account-admin-create-student' %}">新增学生账户</a></p>
+  </div>
+  <section class="card">
+    <h2>教师账户（{{ teachers|length }}）</h2>
+    <ul>{% for account in teachers %}<li>{{ account.actor_id }}</li>{% empty %}<li>暂无教师账户</li>{% endfor %}</ul>
+  </section>
+  <section class="card">
+    <h2>学生账户（{{ students|length }}）</h2>
+    <ul>{% for account in students %}<li>{{ account.actor_id }}</li>{% empty %}<li>暂无学生账户</li>{% endfor %}</ul>
+  </section>
+{% endblock %}

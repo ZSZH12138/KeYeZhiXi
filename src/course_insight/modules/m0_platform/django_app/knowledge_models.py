@@ -51,6 +51,12 @@ class CourseClassWorkspace(models.Model):
         default=Status.ACTIVE,
     )
     roster_version = models.PositiveBigIntegerField(default=0)
+    creation_token_digest = models.CharField(
+        max_length=64,
+        null=True,
+        blank=True,
+        unique=True,
+    )
     active_release = models.OneToOneField(
         "CourseKnowledgeRelease",
         on_delete=models.SET_NULL,

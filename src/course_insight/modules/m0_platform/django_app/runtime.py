@@ -70,7 +70,7 @@ class WebCourseRuntime:
     """Contracts and policy references required by one Web course flow."""
 
     course_id: str
-    course_context: CourseRuntimeContext
+    course_context: CourseRuntimeContext | None
     state_policy_path: Path
     teacher_threshold_policy_path: Path
 
@@ -85,14 +85,14 @@ class WebRuntime:
     def require_course(self, course_id: str) -> WebCourseRuntime:
         context = self.courses.get(course_id)
         if context is None:
-            raise DomainError(
-                code="COURSE_RUNTIME_NOT_FOUND",
-                module="m0",
-                message="course runtime context was not published",
-            )
+            context = _dynamic_course_runtime(course_id)
         return WebCourseRuntime(
             course_id=context.course_id,
-            course_context=context.course_context.isolated_copy(),
+            course_context=(
+                None
+                if context.course_context is None
+                else context.course_context.isolated_copy()
+            ),
             state_policy_path=context.state_policy_path,
             teacher_threshold_policy_path=(
                 context.teacher_threshold_policy_path
@@ -365,6 +365,37 @@ def _validate_policy_files(course: _ManifestCourse) -> None:
         )
     except Exception as error:
         _invalid_manifest("policy_invalid", cause=error)
+
+
+def _dynamic_course_runtime(course_id: str) -> WebCourseRuntime:
+    if not isinstance(course_id, str) or not _COURSE_ID.fullmatch(course_id):
+        raise DomainError(
+            code="COURSE_RUNTIME_NOT_FOUND",
+            module="m0",
+            message="course runtime context was not published",
+        )
+    from django.conf import settings as django_settings
+
+    from course_insight.modules.m0_platform.django_app.models import (
+        CourseClassWorkspace,
+    )
+
+    if not CourseClassWorkspace.objects.filter(
+        course_id=course_id,
+        status=CourseClassWorkspace.Status.ACTIVE,
+    ).exists():
+        raise DomainError(
+            code="COURSE_RUNTIME_NOT_FOUND",
+            module="m0",
+            message="course runtime context was not published",
+        )
+    config_dir = Path(django_settings.PLATFORM_SETTINGS.config_dir).resolve()
+    return WebCourseRuntime(
+        course_id=course_id,
+        course_context=None,
+        state_policy_path=config_dir / "state.json",
+        teacher_threshold_policy_path=config_dir / "teacher.json",
+    )
 
 
 def _invalid_manifest(

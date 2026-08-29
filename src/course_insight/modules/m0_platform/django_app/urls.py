@@ -3,6 +3,7 @@
 from django.urls import path
 
 from course_insight.modules.m0_platform.django_app.views import (
+    account_admin,
     auth,
     health,
     knowledge,
@@ -18,6 +19,17 @@ urlpatterns = [
     path("health/ready/", health.ready, name="health-ready"),
     path("accounts/login/", auth.login, name="login"),
     path("accounts/logout/", auth.logout, name="logout"),
+    path("account-admin/accounts/", account_admin.home, name="account-admin-home"),
+    path(
+        "account-admin/accounts/teachers/create/",
+        account_admin.create_teacher,
+        name="account-admin-create-teacher",
+    ),
+    path(
+        "account-admin/accounts/students/create/",
+        account_admin.create_student,
+        name="account-admin-create-student",
+    ),
     path("student/", student.home, name="student-home"),
     path(
         "student/courses/<str:course_id>/classes/<str:class_id>/qa/",
@@ -99,6 +111,20 @@ urlpatterns = [
         name="student-feedback",
     ),
     path("teacher/", teacher.home, name="teacher-home"),
+    path("teacher/classes/open/", teacher.open_class, name="teacher-open-class"),
+    path(
+        "teacher/courses/<str:course_id>/classes/<str:class_id>/students/add/",
+        teacher.add_class_student,
+        name="teacher-class-add-student",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "students/<str:actor_id>/remove/"
+        ),
+        teacher.remove_class_student,
+        name="teacher-class-remove-student",
+    ),
     path(
         "teacher/courses/<str:course_id>/classes/<str:class_id>/knowledge/",
         knowledge.page,

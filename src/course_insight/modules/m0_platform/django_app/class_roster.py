@@ -12,6 +12,9 @@ from course_insight.application.class_roster import ClassRosterSnapshot
 from course_insight.contracts.errors import DomainError
 from course_insight.modules.m0_platform.django_app.models import (
     ActorGrant,
+    AccountType,
+    ClassMembership,
+    CourseClassWorkspace,
     RoleName,
 )
 
@@ -26,21 +29,43 @@ def capture_active_class_roster(
 
     moment = timezone.now() if captured_at is None else captured_at
     try:
-        learner_ids = tuple(
-            ActorGrant.objects.filter(
-                user__is_active=True,
-                role=RoleName.STUDENT,
-                course_id=course_id,
-                class_id=class_id,
-                is_active=True,
-                revoked_at__isnull=True,
-                valid_from__lte=moment,
+        workspace = CourseClassWorkspace.objects.filter(
+            course_id=course_id,
+            class_id=class_id,
+            status=CourseClassWorkspace.Status.ACTIVE,
+        ).first()
+        membership_ids = ()
+        if workspace is not None:
+            membership_ids = tuple(
+                ClassMembership.objects.filter(
+                    workspace=workspace,
+                    status=ClassMembership.Status.ACTIVE,
+                    removed_at__isnull=True,
+                    student__is_active=True,
+                    student__account_type=AccountType.STUDENT,
+                )
+                .order_by("student__actor_id")
+                .values_list("student__actor_id", flat=True)
+                .distinct()
             )
-            .filter(Q(valid_until__isnull=True) | Q(valid_until__gt=moment))
-            .order_by("user__actor_id")
-            .values_list("user__actor_id", flat=True)
-            .distinct()
-        )
+        if membership_ids or (workspace is not None and workspace.owner_teacher_id):
+            learner_ids = membership_ids
+        else:
+            learner_ids = tuple(
+                ActorGrant.objects.filter(
+                    user__is_active=True,
+                    role=RoleName.STUDENT,
+                    course_id=course_id,
+                    class_id=class_id,
+                    is_active=True,
+                    revoked_at__isnull=True,
+                    valid_from__lte=moment,
+                )
+                .filter(Q(valid_until__isnull=True) | Q(valid_until__gt=moment))
+                .order_by("user__actor_id")
+                .values_list("user__actor_id", flat=True)
+                .distinct()
+            )
     except DatabaseError as error:
         raise DomainError(
             code="CLASS_ROSTER_UNAVAILABLE",

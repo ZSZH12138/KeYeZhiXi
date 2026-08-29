@@ -1,0 +1,11 @@
+{% extends "course_insight/base.html" %}
+{% block title %}新增{{ account_label }}账户 · 课业智析{% endblock %}
+{% block content %}
+  <p class="breadcrumb"><a href="{% url 'account-admin-home' %}">账户管理</a> / 新增{{ account_label }}账户</p>
+  <h1 class="page-title">新增{{ account_label }}账户</h1>
+  <form method="post" class="card">
+    {% csrf_token %}
+    {{ form.as_p }}
+    <button type="submit">创建账户</button>
+  </form>
+{% endblock %}

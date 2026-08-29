@@ -4,6 +4,18 @@
   <p class="breadcrumb">首页 / 教师端</p>
   <h1 class="page-title">教师端</h1>
   <div class="card">
+    <h2>开课</h2>
+    <p class="muted">填写课程名和班级名，创建一个独立的新班级容器。</p>
+    <form method="post" action="{% url 'teacher-open-class' %}">
+      {% csrf_token %}
+      {{ open_class_form.as_p }}
+      <button type="submit">创建班级</button>
+    </form>
+    {% for workspace in owned_workspaces %}
+      <p><a href="{% url 'teacher-class' course_id=workspace.course_id class_id=workspace.class_id %}">{{ workspace.course_display_name }} / {{ workspace.class_display_name }}</a></p>
+    {% endfor %}
+  </div>
+  <div class="card">
     <h2>班级分析</h2>
     <p class="muted">输入已获授权的课程和班级，查看知识地图、误区、个体、订正率和教学建议。不必先填试卷号。</p>
     <form method="get" action="{% url 'teacher-class-lookup' %}">
