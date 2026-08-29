@@ -33,13 +33,8 @@ from course_insight.modules.m7_local_model.repository import (
     M7Repository,
 )
 from course_insight.modules.m7_local_model.review_selection import (
-    AllReviewSelector,
-    IsotonicReviewSelector,
+    ConfidenceThresholdReviewSelector,
     ReviewSelectionDecision,
-    ReviewSelector,
-    ReviewSelectorBinding,
-    build_review_selector,
-    load_isotonic_review_selector,
 )
 from course_insight.modules.m7_local_model.runtime import (
     build_deepseek_m7_adapter,
@@ -50,13 +45,12 @@ from course_insight.modules.m7_local_model.stubs import M7LocalModelServiceStub
 
 __all__ = [
     "DeepSeekM7Adapter",
-    "AllReviewSelector",
+    "ConfidenceThresholdReviewSelector",
     "DenyAllPrivacyReviewer",
     "DEFAULT_M7_EXECUTION_POLICY",
     "DEFAULT_M7_OUTBOUND_PRIVACY_POLICY",
     "GovernedM7Adapter",
     "GovernedRubricScoringAdapter",
-    "IsotonicReviewSelector",
     "FailClosedPrivacyReviewer",
     "M7ExecutionPolicy",
     "M7ModelAuditRecord",
@@ -71,15 +65,11 @@ __all__ = [
     "PrivacyReviewer",
     "RubricScoringAdapter",
     "ReviewSelectionDecision",
-    "ReviewSelector",
-    "ReviewSelectorBinding",
     "SklearnSemanticPrivacyReviewer",
     "build_required_m7_privacy_reviewer",
     "build_deepseek_m7_adapter",
-    "build_review_selector",
     "build_presidio_spacy_reviewer",
     "govern_student_answer",
     "load_sklearn_privacy_reviewer",
-    "load_isotonic_review_selector",
     "required_deepseek_api_key_env",
 ]

@@ -1,0 +1,17 @@
+{% extends "course_insight/base.html" %}
+{% block title %}建议教师复核 · 课业智析{% endblock %}
+{% block content %}
+  <h1>建议教师复核</h1>
+  <p class="muted">这里只显示会影响学生画像和班级画像、且 AI 置信度低于 0.5 或评分生成失败的记录。同一次作答中的多道待复核题合并为一条。</p>
+  {% for row in rows %}
+    <article class="card">
+      <p>做题人账户名：{{ row.case.learner.actor_id }}</p>
+      <p>试卷 ID：{{ row.case.paper_id }}</p>
+      <p>题目 ID：{{ row.question_ids|join:"、" }}</p>
+      <p>做题时间：{{ row.case.attempted_at }}</p>
+      <p><a href="{{ row.detail_url }}">查看并复核</a></p>
+    </article>
+  {% empty %}
+    <p>当前没有建议教师复核的记录。</p>
+  {% endfor %}
+{% endblock %}

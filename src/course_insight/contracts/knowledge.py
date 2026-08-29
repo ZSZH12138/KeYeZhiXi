@@ -185,18 +185,15 @@ class RubricCriterion(ContractModel):
 
 
 class ReviewPolicy(ContractModel):
-    """Thresholds that route uncertain or divergent scores to review."""
+    """Confidence threshold that routes uncertain semantic scores to review."""
 
     low_confidence_threshold: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
-    double_score_disagreement_threshold: float = Field(ge=0.0, allow_inf_nan=False)
     require_evidence_for_positive_score: bool
 
-    def needs_review(self, confidence: float, disagreement: float) -> bool:
-        """Apply the documented low-confidence or high-disagreement rule."""
-        return (
-            confidence < self.low_confidence_threshold
-            or disagreement > self.double_score_disagreement_threshold
-        )
+    def needs_review(self, confidence: float) -> bool:
+        """Return whether a semantic score is below the review threshold."""
+
+        return confidence < self.low_confidence_threshold
 
 
 class Rubric(ContractModel):

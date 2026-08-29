@@ -6,7 +6,6 @@ from pypdf import PdfWriter
 import pytest
 
 from course_insight.modules.m1_course_governance.parsers import (
-    OCRTextProvider,
     OCRRequiredError,
     ParsedSource,
     default_parser_registry,

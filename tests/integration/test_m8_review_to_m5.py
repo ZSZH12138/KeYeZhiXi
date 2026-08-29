@@ -37,7 +37,12 @@ from course_insight.modules.m8_assessment_scoring.service import (
 from course_insight.modules.m9_teacher_analytics.service import (
     M9TeacherAnalyticsService,
 )
-from tests.factories.m5_m8 import UTC_TIME, make_paper, make_scoring_bundle
+from tests.factories.m5_m8 import (
+    UTC_TIME,
+    make_paper,
+    make_rubric,
+    make_scoring_bundle,
+)
 
 
 def _runtime(database_path: Path):
@@ -165,6 +170,58 @@ def test_teacher_can_override_objective_rule_score_from_wrong_to_right(
     assert latest.total_score == audit.max_score
     assert latest.scoring_method == "teacher_override"
     assert latest.review_status == "approved"
+
+
+def test_teacher_can_award_positive_score_when_failed_ai_audit_has_no_evidence(
+    tmp_path: Path,
+) -> None:
+    """The frozen student answer must repair legacy zero-score fallback evidence."""
+
+    repository = SQLiteM8Repository(tmp_path / "failed-ai-override.sqlite3")
+    repository.initialize()
+    paper = make_paper(subjective=True)
+    repository.insert_or_get_paper_record(
+        FrozenAssessmentRecord(
+            paper=paper,
+            course_id="course_1",
+            class_id="class_1",
+            frozen_rubrics=[make_rubric()],
+        )
+    )
+    original = repository.insert_or_get_scoring_result(
+        make_scoring_bundle(paper, score=0.0)
+    )
+    service = M8AssessmentService(repository, object(), object())
+    audit = original.score_audit_records[0]
+    decision = TeacherReviewDecision(
+        decision_id="review_failed_ai_as_correct",
+        audit_id=audit.audit_id,
+        expected_audit_version=audit.audit_version,
+        expected_audit_checksum=audit.content_checksum(),
+        decision="override",
+        final_total_score=audit.max_score,
+        criterion_overrides=[
+            CriterionOverride(
+                criterion_id=audit.criterion_scores[0].criterion_id,
+                previous_score=0.0,
+                new_score=audit.max_score,
+                reason="Teacher verified the displayed answer.",
+            )
+        ],
+        teacher_comment="Teacher verified the displayed answer.",
+        reviewer_id="teacher_1",
+        reviewed_at=UTC_TIME + timedelta(minutes=10),
+    )
+
+    reviewed = service.apply_teacher_review(
+        original,
+        decision,
+        student_evidence="学生冻结原作答",
+    )
+
+    latest = reviewed.get_audit_record(audit.audit_id)
+    assert latest.total_score == audit.max_score
+    assert latest.criterion_scores[0].student_evidence == "学生冻结原作答"
 
 
 def test_teacher_review_rejects_stale_audit_checksum(tmp_path: Path) -> None:

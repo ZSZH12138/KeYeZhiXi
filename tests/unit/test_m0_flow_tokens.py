@@ -148,3 +148,23 @@ def test_retry_builds_identical_teacher_review_checksum() -> None:
 
     assert reviews[0].submitted_at == reviews[1].submitted_at
     assert reviews[0].content_checksum() == reviews[1].content_checksum()
+
+
+def test_teacher_teaching_advice_flow_is_bound_to_the_exact_class() -> None:
+    token = issue_flow_token(
+        purpose="teacher_teaching_advice",
+        actor_id="pseudonym_teacher_001",
+        course_id="course_1",
+        class_id="class_1",
+    )
+
+    verified = verify_flow_token(
+        token,
+        purpose="teacher_teaching_advice",
+        actor_id="pseudonym_teacher_001",
+        course_id="course_1",
+        class_id="class_1",
+        max_age_seconds=3600,
+    )
+
+    assert verified["purpose"] == "teacher_teaching_advice"

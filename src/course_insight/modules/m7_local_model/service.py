@@ -277,6 +277,37 @@ class M7LocalModelService:
             feedback_saver(package.model_copy(deep=True))
         return package
 
+    def save_transient_feedback(
+        self,
+        package: StudentFeedbackPackage,
+    ) -> StudentFeedbackPackage:
+        """Persist learner-safe feedback that must not enter M5/M9.
+
+        Practice and correction results still need a reloadable result page, but
+        they are deliberately excluded from the learner/class profile pipeline.
+        """
+
+        package.validate_business_rules()
+        self._require_student_safe_feedback(package)
+        insert_or_get = getattr(
+            self._prompt_repository,
+            "insert_or_get_feedback",
+            None,
+        )
+        if callable(insert_or_get):
+            authoritative = insert_or_get(package.model_copy(deep=True))
+            if authoritative != package:
+                raise RuntimeError("M7 persisted feedback conflicts with result")
+            return authoritative.model_copy(deep=True)
+        feedback_saver = getattr(
+            self._prompt_repository,
+            "save_feedback",
+            None,
+        )
+        if callable(feedback_saver):
+            feedback_saver(package.model_copy(deep=True))
+        return package.model_copy(deep=True)
+
     def get_feedback(
         self,
         feedback_id: str,

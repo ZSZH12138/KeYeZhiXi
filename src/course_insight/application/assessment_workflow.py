@@ -16,6 +16,9 @@ from course_insight.application.assessment_dependencies import (
     verify_policy_execution,
     verify_policy_dependencies,
 )
+from course_insight.application.assessment_evidence_binding import (
+    bind_release_rubric_evidence,
+)
 from course_insight.application.assessment_recovery import (
     AssessmentRecovery,
     dependencies_from_run,
@@ -29,16 +32,23 @@ from course_insight.application.assessment_results import (
     validate_decision,
 )
 from course_insight.application.retrieval import retrieve_for_application
-from course_insight.contracts.assessment import ScoringResultBundle
+from course_insight.contracts.assessment import (
+    RubricScoringTask,
+    ScoringPreparationResult,
+    ScoringResultBundle,
+)
+from course_insight.application.class_roster import ClassRosterSnapshot
 from course_insight.contracts.base import ContractModel
 from course_insight.contracts.errors import DomainError
-from course_insight.contracts.evidence import EvidenceIndexRef
+from course_insight.contracts.evidence import EvidenceBundle, EvidenceIndexRef
 from course_insight.contracts.knowledge import KnowledgeBundle
 from course_insight.contracts.learning_models import LearningObservationBatch
 from course_insight.contracts.platform import (
     AssessmentSubmission,
     TeacherReviewSubmission,
 )
+from course_insight.contracts.tasking import PROFILE_AFFECTING_TASK_TYPES
+from course_insight.contracts.tutoring import StudentFeedbackPackage
 from course_insight.contracts.intelligence import RetrievalPolicy
 from course_insight.modules.m0_platform.workflow import (
     WAITING_WORKFLOW_STATUSES,
@@ -197,6 +207,7 @@ class AssessmentWorkflow:
         knowledge_bundle: KnowledgeBundle,
         state_policy_path: Path,
         teacher_threshold_policy_path: Path,
+        class_roster_snapshot: ClassRosterSnapshot | None = None,
     ) -> dict[str, ContractModel]:
         start = self._results.require_start(
             assessment_submission.paper_id,
@@ -207,6 +218,7 @@ class AssessmentWorkflow:
             evidence_index_ref=index_ref,
             state_policy_path=state_policy_path,
             teacher_policy_path=teacher_threshold_policy_path,
+            class_roster_snapshot=class_roster_snapshot,
         )
         if start.knowledge_bundle_id is None:
             frozen_task = self._results.require_task(start.task_id)
@@ -264,6 +276,7 @@ class AssessmentWorkflow:
                     ),
                 )
                 rubric_results = []
+                bound_rubric_tasks = []
                 for scoring_task in preparation.rubric_scoring_tasks:
                     query = preparation.query_for_task(
                         scoring_task.scoring_task_id
@@ -278,12 +291,30 @@ class AssessmentWorkflow:
                             policy=self._retrieval_policy,
                         ),
                     )
+                    bound_task = (
+                        bind_release_rubric_evidence(scoring_task, evidence)
+                        if isinstance(scoring_task, RubricScoringTask)
+                        and isinstance(evidence, EvidenceBundle)
+                        else scoring_task
+                    )
+                    bound_rubric_tasks.append(bound_task)
                     rubric_results.append(
-                        self._score_subjective_independently(
+                        self._score_constructed_response(
                             run,
-                            scoring_task,
+                            bound_task,
                             evidence,
                         )
+                    )
+                if (
+                    isinstance(preparation, ScoringPreparationResult)
+                    and bound_rubric_tasks
+                    != preparation.rubric_scoring_tasks
+                ):
+                    preparation = preparation.model_copy(
+                        update={
+                            "rubric_scoring_tasks": bound_rubric_tasks,
+                        },
+                        deep=True,
                     )
                 scoring = self._execute(
                     run,
@@ -298,6 +329,26 @@ class AssessmentWorkflow:
                     "scoring_saved",
                     scoring_result_checksum=scoring.content_checksum(),
                 )
+            if task.task_type not in PROFILE_AFFECTING_TASK_TYPES:
+                feedback = self._m7.get_feedback_for_task(
+                    run.task_id,
+                    run.learner_id,
+                )
+                if feedback is None:
+                    feedback = self._m7.save_transient_feedback(
+                        self._transient_feedback(task, scoring)
+                    )
+                if run.checkpoint == "scoring_saved":
+                    self._recovery.finish(
+                        run,
+                        feedback_id=feedback.feedback_id,
+                    )
+                return {
+                    "task_plan": task,
+                    "assessment_paper": paper,
+                    "scoring_result": scoring,
+                    "feedback": feedback,
+                }
             if run.checkpoint == "scoring_saved":
                 if (
                     scoring.requires_teacher_review()
@@ -389,6 +440,9 @@ class AssessmentWorkflow:
                         state_policy_path=state_policy_path,
                         expected_policy_checksum=(
                             expected_state_policy_checksum
+                        ),
+                        class_roster_size=(
+                            frozen_dependencies.class_roster_size
                         ),
                         learning_observation_batch=(
                             self._build_observation_batch(scoring)
@@ -527,9 +581,12 @@ class AssessmentWorkflow:
         paper = self._results.require_paper(paper_id)
         task = self._results.require_task(run.task_id)
         if run.status in WAITING_WORKFLOW_STATUSES:
+            scoring = self._results.exact_scoring(run)
+            require_results(scoring)
             return {
                 "task_plan": task,
                 "assessment_paper": paper,
+                "scoring_result": scoring,
                 "waiting_status": run.status,
             }
         scoring = self._results.exact_scoring(run)
@@ -585,6 +642,8 @@ class AssessmentWorkflow:
         course_id: str,
         class_id: str,
         index_ref: EvidenceIndexRef | None = None,
+        class_roster_snapshot: ClassRosterSnapshot | None = None,
+        student_evidence: str | None = None,
     ) -> dict[str, ContractModel]:
         start = self._results.require_scope(paper_id, course_id, class_id)
         submit = self._results.scored_submit(paper_id)
@@ -593,6 +652,7 @@ class AssessmentWorkflow:
             evidence_index_ref=None,
             state_policy_path=state_policy_path,
             teacher_policy_path=teacher_threshold_policy_path,
+            class_roster_snapshot=class_roster_snapshot,
         )
         if start.knowledge_bundle_id is None:
             frozen_task = self._results.require_task(start.task_id)
@@ -683,6 +743,7 @@ class AssessmentWorkflow:
                     lambda: self._m8.apply_teacher_review(
                         current_scoring_result_bundle=current,
                         teacher_review_decision=decision,
+                        student_evidence=student_evidence,
                     ),
                 )
             if run.checkpoint == "decision_saved":
@@ -766,6 +827,10 @@ class AssessmentWorkflow:
                 previous_learner, previous_class = (
                     self._recovery.load_state_inputs(run)
                 )
+                if submit.status in WAITING_WORKFLOW_STATUSES:
+                    previous_learner, previous_class = (
+                        self._latest_state_inputs(run)
+                    )
                 verify_policy_dependencies(
                     frozen_dependencies,
                     state_policy_path=state_policy_path,
@@ -781,6 +846,9 @@ class AssessmentWorkflow:
                         state_policy_path=state_policy_path,
                         expected_policy_checksum=(
                             expected_state_policy_checksum
+                        ),
+                        class_roster_size=(
+                            frozen_dependencies.class_roster_size
                         ),
                         learning_observation_batch=(
                             self._build_observation_batch(reviewed)
@@ -883,6 +951,21 @@ class AssessmentWorkflow:
             self._fail(run, "WORKFLOW_EXECUTION_FAILED")
             raise self._execution_error("teacher review") from error
 
+    def _latest_state_inputs(self, run: AssessmentRun):
+        """Read the current profile baselines for a delayed review commit."""
+
+        return (
+            self._m5.get_latest_learner_state(
+                run.course_id,
+                run.class_id,
+                run.learner_id,
+            ),
+            self._m5.get_latest_class_state(
+                run.course_id,
+                run.class_id,
+            ),
+        )
+
     def rescore(
         self,
         *,
@@ -895,6 +978,7 @@ class AssessmentWorkflow:
         knowledge_bundle: KnowledgeBundle,
         state_policy_path: Path,
         teacher_threshold_policy_path: Path,
+        class_roster_snapshot: ClassRosterSnapshot | None = None,
     ) -> dict[str, ContractModel]:
         start = self._results.require_start(
             assessment_submission.paper_id,
@@ -916,6 +1000,7 @@ class AssessmentWorkflow:
             evidence_index_ref=index_ref,
             state_policy_path=state_policy_path,
             teacher_policy_path=teacher_threshold_policy_path,
+            class_roster_snapshot=class_roster_snapshot,
         )
         ensure_start_dependencies(start, dependencies)
         operation_id = (
@@ -1038,7 +1123,7 @@ class AssessmentWorkflow:
                         policy=self._retrieval_policy,
                     ),
                 )
-                rubric_result = self._score_subjective_independently(
+                rubric_result = self._score_constructed_response(
                     run,
                     task,
                     evidence,
@@ -1167,6 +1252,21 @@ class AssessmentWorkflow:
             Path(runtime_dir) / "frozen_submissions" / f"{attempt_id}.json",
         )
 
+    def purge_transient_assessment(self, *, paper_id: str, attempt_id: str) -> None:
+        """Remove raw answers and M8 evidence for one non-profile result."""
+
+        self._m8.purge_assessment_attempt(
+            paper_id=paper_id,
+            attempt_id=attempt_id,
+        )
+        runtime_dir = getattr(self._m0, "_runtime_dir", None)
+        if runtime_dir is None:
+            return
+        submission_path = (
+            Path(runtime_dir) / "frozen_submissions" / f"{attempt_id}.json"
+        )
+        submission_path.unlink(missing_ok=True)
+
     def _persist_frozen_submission(
         self,
         assessment_submission: AssessmentSubmission,
@@ -1261,6 +1361,26 @@ class AssessmentWorkflow:
     ) -> AssessmentRun:
         return self._recovery.advance(run, checkpoint, **refs)
 
+    @staticmethod
+    def _transient_feedback(task: Any, scoring: ScoringResultBundle):
+        message = (
+            "本次订正已完成；结果只更新待订正状态，不计入学习画像。"
+            if task.task_type == "correction"
+            else "本次练习已完成；结果仅供即时反馈，不计入学习画像。"
+        )
+        return StudentFeedbackPackage(
+            feedback_id=f"feedback_transient_{task.task_id}",
+            task_id=task.task_id,
+            learner_id=task.learner_id,
+            message=message,
+            rubric_feedback=[],
+            missing_concept_ids=[],
+            evidence_citations=[],
+            next_practice_item_ids=[],
+            confidence=1.0,
+            generated_at=scoring.finalized_at,
+        )
+
     def _complete(self, run: AssessmentRun) -> AssessmentRun:
         return self._recovery.complete(run)
 
@@ -1282,39 +1402,41 @@ class AssessmentWorkflow:
     def _fail(self, run: AssessmentRun, code: str) -> None:
         self._recovery.fail(run, code)
 
-    def _score_subjective_independently(
+    def _score_constructed_response(
         self,
         run: AssessmentRun,
         scoring_task: Any,
         evidence: Any,
     ) -> Any:
-        first = self._execute(
-            run,
-            lambda scoring_task=scoring_task, evidence=evidence: (
-                self._m7.score_subjective_answer(
-                    rubric_scoring_task=scoring_task,
-                    evidence_bundle=evidence,
-                )
-            ),
-        )
-        second = self._execute(
-            run,
-            lambda scoring_task=scoring_task, evidence=evidence: (
-                self._m7.score_subjective_answer(
-                    rubric_scoring_task=scoring_task,
-                    evidence_bundle=evidence,
-                )
-            ),
-        )
-        merger = getattr(self._m8, "merge_independent_rubric_results", None)
-        if not callable(merger):
-            return first
-        return self._execute(
-            run,
-            lambda scoring_task=scoring_task, first=first, second=second: (
-                merger(scoring_task, first, second)
-            ),
-        )
+        try:
+            return self._execute(
+                run,
+                lambda scoring_task=scoring_task, evidence=evidence: (
+                    self._m7.score_subjective_answer(
+                        rubric_scoring_task=scoring_task,
+                        evidence_bundle=evidence,
+                    )
+                ),
+            )
+        except DomainError as error:
+            if error.code not in {
+                "INVALID_MODEL_JSON",
+                "MODEL_ADAPTER_UNCONFIGURED",
+                "MODEL_API_UNAVAILABLE",
+                "MODEL_INPUT_PRIVACY_BLOCKED",
+                "MODEL_OUTPUT_BLOCKED",
+            }:
+                raise
+            deferrer = getattr(self._m8, "defer_rubric_scoring", None)
+            if not callable(deferrer):
+                raise
+            return self._execute(
+                run,
+                lambda: deferrer(
+                    scoring_task,
+                    reason_code=error.code,
+                ),
+            )
 
     def _execute(
         self,

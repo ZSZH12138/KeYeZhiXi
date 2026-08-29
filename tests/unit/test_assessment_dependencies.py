@@ -11,6 +11,7 @@ from course_insight.application.assessment_dependencies import (
     capture_assessment_dependencies,
     verify_policy_dependencies,
 )
+from course_insight.application.class_roster import ClassRosterSnapshot
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef
 from course_insight.contracts.knowledge import KnowledgeBundle
@@ -84,6 +85,33 @@ def _policies(tmp_path: Path) -> tuple[Path, Path]:
         encoding="utf-8",
     )
     return state, teacher
+
+
+def _roster() -> ClassRosterSnapshot:
+    return ClassRosterSnapshot.capture(
+        course_id="course_1",
+        class_id="class_1",
+        learner_ids=("student_2", "student_1"),
+        captured_at=NOW,
+    )
+
+
+def test_capture_freezes_dynamic_class_roster_identity(tmp_path: Path) -> None:
+    state, teacher = _policies(tmp_path)
+    roster = _roster()
+
+    captured = capture_assessment_dependencies(
+        knowledge_bundle=_bundle(),
+        evidence_index_ref=_index(),
+        state_policy_path=state,
+        teacher_policy_path=teacher,
+        class_roster_snapshot=roster,
+    )
+
+    assert captured.class_roster_size == 2
+    assert captured.class_roster_checksum == roster.roster_checksum
+    assert captured.class_roster_captured_at == NOW
+    assert captured.as_run_fields()["class_roster_size"] == 2
 
 
 def test_capture_freezes_every_executable_dependency(tmp_path: Path) -> None:

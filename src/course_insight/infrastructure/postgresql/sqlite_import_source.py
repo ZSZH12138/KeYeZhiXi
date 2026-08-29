@@ -459,7 +459,12 @@ def _prepare_outbox(row: sqlite3.Row) -> PreparedImportRow:
 
 def _prepare_assessment_run(row: sqlite3.Row) -> PreparedImportRow:
     values = {key: row[key] for key in row.keys()}
-    for field in ("lease_until", "created_at", "updated_at"):
+    for field in (
+        "lease_until",
+        "class_roster_captured_at",
+        "created_at",
+        "updated_at",
+    ):
         values[field] = (
             None
             if row[field] is None
@@ -523,6 +528,15 @@ def _prepare_assessment_run(row: sqlite3.Row) -> PreparedImportRow:
             row,
             "teacher_policy_checksum",
         ),
+        class_roster_size=_optional_positive_int(
+            row,
+            "class_roster_size",
+        ),
+        class_roster_checksum=_optional_text(
+            row,
+            "class_roster_checksum",
+        ),
+        class_roster_captured_at=values["class_roster_captured_at"],
         previous_state_frozen=_optional_bool(
             row,
             "previous_state_frozen",

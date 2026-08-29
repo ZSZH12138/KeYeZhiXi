@@ -2,9 +2,9 @@
 
 > 适用版本：2026-08-27 新知识入库、测评画像与可溯源 RAG 架构
 >
-> 项目根目录：`C:\Users\DELL\Desktop\课业智析`
+> 项目根目录：下文命令均从克隆后的仓库根目录执行
 >
-> 唯一 Python 环境：`D:\software\MyAnaconda\envs\course-insight\python.exe`
+> Python 环境：先激活项目专用的 `course-insight` Conda 环境
 
 ## 1. 本说明书测试什么
 
@@ -81,7 +81,7 @@ examples/five_day_acceptance/courseware/
 旧版 PPT 使用本机演示课件：
 
 ```text
-C:\Users\DELL\Desktop\计算机网络\*.ppt
+<本地课件目录>\*.ppt
 ```
 
 处理旧 PPT 的 ingestion Worker 所在 Windows 主机必须安装 Microsoft PowerPoint；Web
@@ -143,8 +143,8 @@ http://127.0.0.1:8000/accounts/login/
 打开 PowerShell，进入项目目录：
 
 ```powershell
-Set-Location -LiteralPath 'C:\Users\DELL\Desktop\课业智析'
-$python = 'D:\software\MyAnaconda\envs\course-insight\python.exe'
+Set-Location -LiteralPath '<仓库根目录>'
+$python = (Get-Command python).Source
 & $python --version
 & $python manage.py check
 & $python manage.py makemigrations --check --dry-run
@@ -185,15 +185,15 @@ questions_valid_v2.txt 4 []
 ### 6.1 终端 A：Web
 
 ```powershell
-Set-Location -LiteralPath 'C:\Users\DELL\Desktop\课业智析'
-& 'D:\software\MyAnaconda\envs\course-insight\python.exe' manage.py runserver 127.0.0.1:8000
+Set-Location -LiteralPath '<仓库根目录>'
+python manage.py runserver 127.0.0.1:8000
 ```
 
 ### 6.2 终端 B：知识入库 Worker
 
 ```powershell
-Set-Location -LiteralPath 'C:\Users\DELL\Desktop\课业智析'
-& 'D:\software\MyAnaconda\envs\course-insight\python.exe' manage.py run_ingestion_worker
+Set-Location -LiteralPath '<仓库根目录>'
+python manage.py run_ingestion_worker
 ```
 
 它负责文件解析、长文本切割、DeepSeek 知识抽取、题目标注和活动版本发布。
@@ -201,8 +201,8 @@ Set-Location -LiteralPath 'C:\Users\DELL\Desktop\课业智析'
 ### 6.3 终端 C：outbox Worker
 
 ```powershell
-Set-Location -LiteralPath 'C:\Users\DELL\Desktop\课业智析'
-& 'D:\software\MyAnaconda\envs\course-insight\python.exe' manage.py run_outbox_worker
+Set-Location -LiteralPath '<仓库根目录>'
+python manage.py run_outbox_worker
 ```
 
 它负责既有学习事件投递。只测试知识上传时可以暂时不启动，但测试 M4–M9 完整学习流程时必须启动。
@@ -346,7 +346,7 @@ publishing
 published
 ```
 
-进度采用真实工作量计算：读取阶段按文件数，知识提取阶段按已完成文本批次和可见字符数，题目标注阶段按题目数。知识提取主要按 6,000 个非空白字符组批，并设置每批最多 64 个 chunk 的安全上限；等待单次 DeepSeek 返回时，进度条显示活动动画、当前批次和本步骤等待秒数，但不会按时间伪造百分比。输出校验失败时页面显示当前第几次重试，重试不虚增字符；若当前批被自动拆小，每个成功子批才立即增加已完成字符数。
+进度采用真实工作量计算：读取阶段按文件数，知识提取阶段按已完成文本批次和可见字符数，题目标注阶段按题目数。知识提取主要按 6,000 个非空白字符组批；默认不以 chunk 数提前截断，仍保留可显式启用的 4,096 块安全上限。等待单次 DeepSeek 返回时，进度条显示活动动画、当前批次和本步骤等待秒数，但不会按时间伪造百分比。输出校验失败时页面显示当前第几次重试，重试不虚增字符；若当前批被自动拆小，每个成功子批才立即增加已完成字符数。
 
 通过标准：
 
@@ -404,7 +404,7 @@ published
 
 ## 11. 场景 C：混合格式上传
 
-文件用途选择“知识文件”，一次选择 `courseware/` 下五个文件：MD、TXT、DOCX、PDF、PPTX；再从 `C:\Users\DELL\Desktop\计算机网络` 选择一个真实 `.ppt`。
+文件用途选择“知识文件”，一次选择 `courseware/` 下五个文件：MD、TXT、DOCX、PDF、PPTX；如需验证旧格式解析，再从本地课件目录选择一个真实 `.ppt`。
 
 通过标准：
 
@@ -765,7 +765,7 @@ Worker 会在每个任务开始时重新读取教师保存的模型和 Thinking 
 当前实现还有以下恢复规则：
 
 - DeepSeek 不再计算容易出错的字符起止位置，只能逐字返回 `quote` 原文证据。系统在对应 `chunk_id` 的原文中查找该引用并生成 `span_start/span_end`；引用不存在、为空或指向未知 chunk 时仍然拒绝。
-- 知识文本主要按 6,000 个非空白字符组批，每批另设 64 个 chunk 的安全上限。模型输出无效时，同一批额外重试 5 次，并在提示中携带安全校验代码；仍无效或明确返回 `DEEPSEEK_INCOMPLETE_RESPONSE` 时，系统才把当前批递归缩小，最多 8 层。最小文本也要完成 5 次重试才结束任务。
+- 知识文本主要按 6,000 个非空白字符组批，默认不以 chunk 数提前截断，显式安全上限为 4,096 块。模型输出无效时，同一批额外重试 5 次，并在提示中携带安全校验代码；仍无效或明确返回 `DEEPSEEK_INCOMPLETE_RESPONSE` 时，系统才把当前批递归缩小，最多 8 层。最小文本也要完成 5 次重试才结束任务。
 - 教师开启 Thinking 后，每一次 DeepSeek 请求使用 16384 输出 token 和 120 秒请求超时。若遇到网络超时、服务暂不可用、响应不完整或响应 JSON 损坏，系统会对同一批内容自动切换到普通模式再处理；鉴权失败、密钥缺失和内容过滤不会自动降级绕过。教师关闭 Thinking 时，每一次 DeepSeek 请求使用 4096 token 和 30 秒请求超时。这里的 30/120 秒都不是批次、全部重试或整项任务的累计处理上限。
 - 若主调用和自动降级都失败，网络错误会直接显示安全细分错误码；响应不完整则先执行上述缩小重试，只有最小文本仍失败才显示 `DEEPSEEK_INCOMPLETE_RESPONSE`。系统不保存或展示密钥、提示词和模型完整回复。旧失败任务仍保留当时的原始外层错误码。
 - 常驻 Worker 中某个任务失败时，只输出安全错误码并继续处理后续任务；使用 `--once` 调试时仍会以非零状态退出，便于脚本发现问题。

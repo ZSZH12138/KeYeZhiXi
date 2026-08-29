@@ -237,7 +237,7 @@ SQLite/离线启动时默认由共享 `SQLiteM1M2M3Repository` 读取完整制�
 
 生产 PostgreSQL 启动时还必须：
 
-- 通过 v17（0016/0017）schema 和 `PostgresM1M2M3Repository` 校验 M1—M3 制品、审计与旧 review 兼容记录；
+- 通过 v22 schema 和 `PostgresM1M2M3Repository` 校验 M1—M3 制品、审计与旧 review 兼容记录；
 - 为 vector/hybrid 检索显式提供并校验 `EvidenceIndexRef`，调用
   `restore_vector_index`；自动发现 ready 向量索引已通过 durable metadata 恢复路径实现，
   但本机未提供可执行的 PostgreSQL+pgvector 测试环境；CI `live-m1-m3` job 会执行
@@ -321,9 +321,10 @@ GitHub Actions CI 使用一次性的 PostgreSQL 16 服务并注入这两个变�
 常规生产部署应保持示例的 rules-safe 默认值。任何 shadow/active 变更都必须在
 部署变更单中逐项记录：
 
-- [ ] 当前 PostgreSQL core ledger 为 v17；确认 M4 intent 使用 v10/v11，M6 policy 使用 v12，
+- [ ] 当前 PostgreSQL core ledger 为 v22；确认 M4 intent 使用 v10/v11，M6 policy 使用 v12，
   M0 freeze 使用 v13，M5/M8 model runtime 使用 v14，观测审计身份使用 v15，
-  M1—M3 S1-S6 与向量 metadata 分别使用 v16/v17，
+  M1—M3 S1-S6 与向量 metadata 分别使用 v16/v17，M7/M9 模型审计、等待队列、
+  重评操作和动态班级名单使用 v18—v22，
   且未改写已应用 migration；
 - [ ] 使用全新 immutable `policy_id`；manifest 的 state graph/baseline/feature/
   action/reward/gate version 已治理，artifact 与 manifest 重叠的
@@ -439,10 +440,10 @@ python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/c
 python scripts/migrate_sqlite_to_postgres.py --project-root . --source runtime/course_insight.db --report runtime/migration-report.json --apply
 ```
 
-预期：PostgreSQL core schema version 为 17；v10/v11 属于 M4 intent，v12 新增 M6 私有
+预期：PostgreSQL core schema version 为 22；v10/v11 属于 M4 intent，v12 新增 M6 私有
 policy 表，v13 为 `m0_assessment_runs` 追加策略冻结字段，v14 新增 M5/M8 模型
 运行历史，v15 为学习观测追加权威评分审计身份，v16/v17 分别追加 M1—M3 S1-S6
-能力与向量 metadata。
+能力与向量 metadata，v18—v22 追加模型调用审计、等待队列、重评操作和动态班级名单冻结。
 报告为 `validated`/`completed`，或在已投递旧事件
 存在时明确为 `*_with_source_limitations`。失败时检查 `error_code`、migration
 checksum、源 schema version、`partial_envelope_rows` 和每表 digest。不要用
@@ -508,7 +509,7 @@ SQLite/离线验收时，将课程初始化产生并由 M0 保存的 `CoursePack
 `EvidenceIndexRef`、`KnowledgeBundle` 快照放入 `runtime/snapshots/`；同时保留
 M1/M2/M3 File repository 写入的完整 `runtime/artifacts/`。快照不能替代 artifact：
 M2 要有完整 lexical snapshot，M3 要有 bundle、seed snapshot 和 validation report。
-生产 PostgreSQL 验收则校验 v17（0016/0017）migration、共享仓储中的 M1—M3 制品、审计、review
+生产 PostgreSQL 验收则校验 v22 migration、共享仓储中的 M1—M3 制品、审计、review
 和 ready pgvector 引用，不把 SQLite 文件当成生产数据源。把真实可解析的
 `StatePolicy` 与 `TeacherThresholdPolicy` 放入 `runtime/policies/`，再写上述
 manifest。不要手工伪造 checksum。验证命令：

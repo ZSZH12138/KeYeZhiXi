@@ -6,7 +6,6 @@ import hashlib
 import os
 import uuid
 from dataclasses import dataclass, field
-from pathlib import Path
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, TypeVar, cast
 
@@ -546,6 +545,8 @@ def _assemble_application(
             resolve_deepseek_api_key,
         )
         from course_insight.modules.m7_local_model.privacy_reviewer import (
+            DenyAllPrivacyReviewer,
+            build_presidio_spacy_reviewer,
             build_required_m7_privacy_reviewer,
         )
         from course_insight.modules.m7_local_model.runtime import (
@@ -557,8 +558,9 @@ def _assemble_application(
             and resolve_deepseek_api_key(settings.runtime_dir)
         ):
             ready, _reason = inspect_m7_privacy_artifacts(settings.runtime_dir)
-            if ready:
-                try:
+            try:
+                reviewer = None
+                if ready:
                     reviewer = build_required_m7_privacy_reviewer(
                         runtime_dir=settings.runtime_dir.resolve(),
                         model_dir=privacy_model_dir(settings.runtime_dir),
@@ -589,6 +591,27 @@ def _assemble_application(
                             "COURSE_INSIGHT_M7_PRIVACY_MANIFEST_SHA256"
                         ],
                     )
+                elif settings.environment == "development":
+                    development_reviewer = build_presidio_spacy_reviewer(
+                        expected_model_version=os.environ.get(
+                            "COURSE_INSIGHT_M7_SPACY_MODEL_VERSION",
+                            "3.8.0",
+                        ),
+                        expected_presidio_version=os.environ.get(
+                            "COURSE_INSIGHT_M7_PRESIDIO_VERSION",
+                            "2.2.364",
+                        ),
+                        expected_spacy_version=os.environ.get(
+                            "COURSE_INSIGHT_M7_SPACY_VERSION",
+                            "3.8.13",
+                        ),
+                    )
+                    if not isinstance(
+                        development_reviewer,
+                        DenyAllPrivacyReviewer,
+                    ):
+                        reviewer = development_reviewer
+                if reviewer is not None:
                     m7 = M7LocalModelService(
                         build_deepseek_m7_adapter(
                             privacy_reviewer=reviewer,
@@ -597,8 +620,8 @@ def _assemble_application(
                         durable["m7"],
                         _accept_model_output,
                     )
-                except (KeyError, OSError, TypeError, ValueError, RuntimeError):
-                    pass
+            except (KeyError, OSError, TypeError, ValueError, RuntimeError):
+                pass
     m8 = (
         M8AssessmentService(
             durable["m8"],

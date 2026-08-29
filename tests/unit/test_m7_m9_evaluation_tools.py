@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import hashlib
 import json
 
 import pytest
@@ -14,13 +13,6 @@ from scripts.evaluation.live_matrix import (
 )
 from scripts.evaluation.metrics import ScorePrediction, evaluate_scoring
 from scripts.evaluation.prepare import prepare_local_dataset_package
-from scripts.evaluation.selector import (
-    FEATURE_NAMES,
-    SelectorObservation,
-    artifact_bytes,
-    fit_pav_selector,
-    predict_pav,
-)
 
 
 def _records() -> bytes:
@@ -94,55 +86,6 @@ def test_scoring_metrics_cover_accuracy_calibration_and_selective_risk(tmp_path)
     assert report["metrics"]["exact_accuracy"] == 1.0
     assert report["metrics"]["selective_risk"] == 0.0
     assert report["metrics"]["brier_score"] == 0.0
-
-
-def test_pav_fit_is_monotone_and_exports_data_only_artifact() -> None:
-    observations = []
-    for index, risk in enumerate((0.05, 0.1, 0.2, 0.4, 0.7, 0.9), start=1):
-        features = {name: 1.0 for name in FEATURE_NAMES}
-        features["raw_risk"] = risk
-        observations.append(
-            SelectorObservation(
-                case_id=f"case_{index}",
-                split="calibration",
-                rubric_ref="rubric_1:1",
-                raw_risk=risk,
-                material_error=False,
-                features=features,
-            )
-        )
-    binding = {
-        "calibration_data_id": "course_gold_1",
-        "calibration_data_sha256": "c" * 64,
-        "calibration_data_version": "1",
-        "execution_policy_version": "m7-governed-v2",
-        "feature_schema_version": "m7-review-features-v1",
-        "model_name": "deepseek-v4-flash",
-        "model_version": "runtime-api",
-        "privacy_policy_version": "m7-outbound-privacy-v2",
-        "prompt_id": "m7-rubric-scoring-json",
-        "prompt_version": "5.0.0",
-        "split_id": "question_split_1",
-        "split_sha256": "d" * 64,
-        "thinking_mode": "non_thinking",
-    }
-    artifact = fit_pav_selector(
-        observations,
-        selector_id="selector_1",
-        selector_version="1",
-        bindings=binding,
-        acceptance_raw_risk_upper=1.0,
-        maximum_calibrated_risk=0.1,
-        maximum_acceptance_error_rate=0.8,
-        minimum_calibration_samples=6,
-        minimum_acceptance_samples=6,
-        minimum_segment_samples=1,
-    )
-    assert predict_pav(artifact, 0.5) == 0.0
-    assert artifact["gates"]["approved_rubric_refs"] == ["rubric_1:1"]
-    assert artifact_bytes(artifact) == json.dumps(
-        artifact, sort_keys=True, separators=(",", ":")
-    ).encode()
 
 
 def test_live_matrix_requires_consent_key_and_pre_call_budget(monkeypatch) -> None:

@@ -911,6 +911,9 @@ evidence_index_version,
 evidence_index_checksum,
 state_policy_checksum,
 teacher_policy_checksum,
+class_roster_size,
+class_roster_checksum,
+class_roster_captured_at,
 previous_state_frozen,
 previous_learner_snapshot_id,
 previous_learner_state_version,
@@ -975,6 +978,9 @@ def _isolated_run(run: AssessmentRun) -> AssessmentRun:
         evidence_index_checksum=run.evidence_index_checksum,
         state_policy_checksum=run.state_policy_checksum,
         teacher_policy_checksum=run.teacher_policy_checksum,
+        class_roster_size=run.class_roster_size,
+        class_roster_checksum=run.class_roster_checksum,
+        class_roster_captured_at=run.class_roster_captured_at,
         previous_state_frozen=run.previous_state_frozen,
         previous_learner_snapshot_id=run.previous_learner_snapshot_id,
         previous_learner_state_version=run.previous_learner_state_version,
@@ -1027,6 +1033,9 @@ def _insert_workflow_row(connection, run: AssessmentRun) -> None:
             evidence_index_checksum,
             state_policy_checksum,
             teacher_policy_checksum,
+            class_roster_size,
+            class_roster_checksum,
+            class_roster_captured_at,
             previous_state_frozen,
             previous_learner_snapshot_id,
             previous_learner_state_version,
@@ -1050,7 +1059,7 @@ def _insert_workflow_row(connection, run: AssessmentRun) -> None:
         ) VALUES (
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
             ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+            ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
         )
         """,
         (
@@ -1079,6 +1088,13 @@ def _insert_workflow_row(connection, run: AssessmentRun) -> None:
             run.evidence_index_checksum,
             run.state_policy_checksum,
             run.teacher_policy_checksum,
+            run.class_roster_size,
+            run.class_roster_checksum,
+            (
+                None
+                if run.class_roster_captured_at is None
+                else run.class_roster_captured_at.isoformat()
+            ),
             (
                 None
                 if run.previous_state_frozen is None
@@ -1200,6 +1216,9 @@ def _adopt_workflow_dependencies(
             evidence_index_checksum = ?,
             state_policy_checksum = ?,
             teacher_policy_checksum = ?,
+            class_roster_size = ?,
+            class_roster_checksum = ?,
+            class_roster_captured_at = ?,
             previous_state_frozen = ?,
             policy_id = ?,
             adapter_id = ?,
@@ -1221,6 +1240,9 @@ def _adopt_workflow_dependencies(
           AND evidence_index_checksum IS NULL
           AND state_policy_checksum IS NULL
           AND teacher_policy_checksum IS NULL
+          AND class_roster_size IS NULL
+          AND class_roster_checksum IS NULL
+          AND class_roster_captured_at IS NULL
           AND previous_state_frozen IS NULL
           AND previous_learner_snapshot_id IS NULL
           AND previous_learner_state_version IS NULL
@@ -1244,6 +1266,13 @@ def _adopt_workflow_dependencies(
             updated.evidence_index_checksum,
             updated.state_policy_checksum,
             updated.teacher_policy_checksum,
+            updated.class_roster_size,
+            updated.class_roster_checksum,
+            (
+                None
+                if updated.class_roster_captured_at is None
+                else updated.class_roster_captured_at.isoformat()
+            ),
             (
                 None
                 if updated.previous_state_frozen is None
@@ -1400,6 +1429,21 @@ def _run_from_row(row) -> AssessmentRun:
             None
             if row["teacher_policy_checksum"] is None
             else str(row["teacher_policy_checksum"])
+        ),
+        class_roster_size=(
+            None
+            if row["class_roster_size"] is None
+            else int(row["class_roster_size"])
+        ),
+        class_roster_checksum=(
+            None
+            if row["class_roster_checksum"] is None
+            else str(row["class_roster_checksum"])
+        ),
+        class_roster_captured_at=(
+            None
+            if row["class_roster_captured_at"] is None
+            else datetime.fromisoformat(str(row["class_roster_captured_at"]))
         ),
         previous_state_frozen=(
             _optional_bool(row["previous_state_frozen"])

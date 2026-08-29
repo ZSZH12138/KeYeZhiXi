@@ -650,7 +650,7 @@ def test_sqlite_web_golden_path_delivers_student_and_teacher_events(
         started = student_client.post(
             start_url,
             {
-                "task_type_hint": "practice",
+                "task_type_hint": "diagnostic",
                 "flow_token": start_flow,
                 "csrfmiddlewaretoken": _csrf(student_client),
             },

@@ -1,0 +1,26 @@
+{% extends "course_insight/base.html" %}
+{% block title %}建议复核详情 · 课业智析{% endblock %}
+{% block content %}
+  <h1>建议复核详情</h1>
+  <p>做题人账户名：{{ case.learner.actor_id }}；试卷 ID：{{ case.paper_id }}；做题时间：{{ case.attempted_at }}</p>
+  {% if review_complete %}
+    <p class="status">本试卷的建议复核已经完成。</p>
+  {% endif %}
+  {% for question in question_reviews %}
+    <article class="card">
+      <h2>题目</h2><p>{{ question.detail.stem }}</p>
+      <h3>题目答案</h3><p>{{ question.detail.correct_answer }}</p>
+      <h3>学生答案</h3><p>{{ question.detail.student_answer }}</p>
+      <h3>学生得分</h3><p>{{ question.detail.student_score }} / {{ question.detail.max_score }}</p>
+      <h3>AI评判</h3><p>{{ question.detail.ai_assessment }}</p>
+      <p>AI 置信度：{% if question.detail.ai_confidence != None %}{{ question.detail.ai_confidence }}{% else %}—{% endif %}</p>
+      <h3>教师备注</h3><p>{{ question.detail.teacher_note|default:"—" }}</p>
+      {% if question.form and question.action_url %}
+        <form method="post" action="{{ question.action_url }}">
+          {% csrf_token %}{{ question.form.as_p }}
+          <button type="submit">改判本题</button>
+        </form>
+      {% endif %}
+    </article>
+  {% empty %}{% if not review_complete %}<p>这条记录当前没有可展示的待复核题目。</p>{% endif %}{% endfor %}
+{% endblock %}

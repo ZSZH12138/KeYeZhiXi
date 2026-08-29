@@ -3,9 +3,9 @@ from __future__ import annotations
 import hashlib
 import json
 from collections import UserDict
-from types import MappingProxyType
 from datetime import datetime, timezone
 from pathlib import Path
+from types import MappingProxyType
 
 import pytest
 
@@ -23,9 +23,6 @@ from course_insight.contracts.evidence import (
     EvidenceQuery,
     chunk_id_for_evidence_id,
     evidence_id_for_chunk,
-)
-from course_insight.modules.m2_evidence_retrieval.service import (
-    M2EvidenceRetrievalService,
 )
 from course_insight.modules.m2_evidence_retrieval.stubs import (
     M2EvidenceRetrievalServiceStub,

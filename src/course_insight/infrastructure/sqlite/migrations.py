@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import json
 import sqlite3
 
+from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.sqlite.m5_m8_model_runtime_schema import (
     LEARNING_OBSERVATION_AUDIT_BACKFILL_SQL as _LEARNING_OBSERVATION_AUDIT_BACKFILL_SQL,
     LEARNING_OBSERVATION_AUDIT_TABLE as _LEARNING_OBSERVATION_AUDIT_TABLE,
@@ -39,6 +41,7 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     ASSESSMENT_RUNS_V11_SQL as _M0_ASSESSMENT_RUNS_SQL,
     ASSESSMENT_RUNS_V18_SQL as _M0_ASSESSMENT_RUNS_V18_SQL,
     ASSESSMENT_RUNS_V19_SQL as _M0_ASSESSMENT_RUNS_V19_SQL,
+    ASSESSMENT_RUNS_V21_SQL as _M0_ASSESSMENT_RUNS_V21_SQL,
     ASSESSMENT_RUNS_V9_SQL as _M0_ASSESSMENT_RUNS_V9_SQL,
     ASSESSMENT_RUNS_SUBMIT_INDEX_SQL as _M0_ASSESSMENT_RUNS_SUBMIT_INDEX_SQL,
     migrate_workflow_v5_to_v6,
@@ -47,17 +50,20 @@ from course_insight.infrastructure.sqlite.workflow_migration import (
     migrate_workflow_v10_to_v11,
     migrate_workflow_v17_to_v18,
     migrate_workflow_v18_to_v19,
+    migrate_workflow_v20_to_v21,
 )
 from course_insight.infrastructure.sqlite.migrations_s1_s6 import (
     ensure_schema as _ensure_s1_s6_schema,
 )
 
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 21
 
 
 def _applied_assessment_runs_schema_version(applied_versions: set[int]) -> int:
     """Select the CREATE SQL that matches the latest applied workflow rebuild."""
 
+    if 21 in applied_versions:
+        return 21
     if 19 in applied_versions:
         return 19
     if 18 in applied_versions:
@@ -95,6 +101,8 @@ _M9_MODEL_AUDIT_MIGRATION_NAME = "m9_model_invocation_audits"
 _M7_MODEL_AUDIT_MIGRATION_NAME = "m7_model_invocation_audits"
 _M0_WAITING_ROOMS_MIGRATION_NAME = "m0_waiting_rooms"
 _M0_RESCORE_OPERATION_MIGRATION_NAME = "m0_rescore_operation"
+_M8_REVIEW_POLICY_CLEANUP_MIGRATION_NAME = "m8_review_policy_cleanup"
+_M0_DYNAMIC_CLASS_ROSTER_MIGRATION_NAME = "m0_dynamic_class_roster"
 _SCHEMA_MIGRATIONS_SQL = """
 CREATE TABLE IF NOT EXISTS schema_migrations (
     version INTEGER PRIMARY KEY CHECK (version > 0),
@@ -725,18 +733,22 @@ def _validate_assessment_workflow_schema(
     schema_version: int,
 ) -> None:
     expected_sql = (
-        _M0_ASSESSMENT_RUNS_V19_SQL
-        if schema_version >= 19
+        _M0_ASSESSMENT_RUNS_V21_SQL
+        if schema_version >= 21
         else (
-            _M0_ASSESSMENT_RUNS_V18_SQL
-            if schema_version >= 18
+            _M0_ASSESSMENT_RUNS_V19_SQL
+            if schema_version >= 19
             else (
-                _M0_ASSESSMENT_RUNS_SQL
-                if schema_version >= 13
+                _M0_ASSESSMENT_RUNS_V18_SQL
+                if schema_version >= 18
                 else (
-                    _M0_ASSESSMENT_RUNS_V9_SQL
-                    if schema_version >= 9
-                    else _M0_ASSESSMENT_RUNS_V6_SQL
+                    _M0_ASSESSMENT_RUNS_SQL
+                    if schema_version >= 13
+                    else (
+                        _M0_ASSESSMENT_RUNS_V9_SQL
+                        if schema_version >= 9
+                        else _M0_ASSESSMENT_RUNS_V6_SQL
+                    )
                 )
             )
         )
@@ -1092,6 +1104,85 @@ def _validate_m7_model_audit_schema(
         )
 
 
+def _migrate_m8_review_policy_cleanup(connection: sqlite3.Connection) -> None:
+    """Remove the retired double-score field from checksum-protected records."""
+
+    from course_insight.modules.m8_assessment_scoring.paper_record import (
+        FrozenAssessmentRecord,
+    )
+
+    rows = connection.execute(
+        """
+        SELECT paper_id, payload, payload_checksum, schema_version
+        FROM m8_frozen_assessment_records
+        WHERE instr(payload, 'double_score_disagreement_threshold') > 0
+        ORDER BY paper_id
+        """
+    ).fetchall()
+    for row in rows:
+        paper_id = str(row["paper_id"])
+        payload_text = str(row["payload"])
+        try:
+            payload = json.loads(payload_text)
+        except (TypeError, ValueError) as error:
+            raise RuntimeError("M8 legacy paper record is not valid JSON") from error
+        if type(payload) is not dict:
+            raise RuntimeError("M8 legacy paper record must be a JSON object")
+        legacy_checksum = hashlib.sha256(
+            json.dumps(
+                payload,
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        if not hmac.compare_digest(
+            legacy_checksum,
+            str(row["payload_checksum"]),
+        ):
+            raise RuntimeError("M8 legacy paper-record checksum mismatch")
+
+        changed = False
+        frozen_rubrics = payload.get("frozen_rubrics")
+        if type(frozen_rubrics) is list:
+            for rubric in frozen_rubrics:
+                if type(rubric) is not dict:
+                    continue
+                review_policy = rubric.get("review_policy")
+                if type(review_policy) is not dict:
+                    continue
+                if "double_score_disagreement_threshold" in review_policy:
+                    review_policy.pop("double_score_disagreement_threshold")
+                    changed = True
+        if not changed:
+            continue
+
+        try:
+            record = FrozenAssessmentRecord.model_validate(payload)
+        except Exception as error:
+            raise RuntimeError("M8 legacy paper record cannot be upgraded") from error
+        if (
+            record.paper.paper_id != paper_id
+            or record.schema_version != str(row["schema_version"])
+        ):
+            raise RuntimeError("M8 legacy paper-record identity mismatch")
+        updated = connection.execute(
+            """
+            UPDATE m8_frozen_assessment_records
+            SET payload = ?, payload_checksum = ?
+            WHERE paper_id = ? AND payload = ? AND payload_checksum = ?
+            """,
+            (
+                dumps_json(record.to_dict()),
+                record.content_checksum(),
+                paper_id,
+                payload_text,
+                str(row["payload_checksum"]),
+            ),
+        )
+        if updated.rowcount != 1:
+            raise RuntimeError("M8 legacy paper record changed during migration")
+
+
 def migrate(connection: sqlite3.Connection) -> None:
     """Apply every pending migration in one explicit immediate transaction."""
 
@@ -1351,7 +1442,32 @@ def migrate(connection: sqlite3.Connection) -> None:
         else:
             _validate_assessment_workflow_schema(
                 connection,
-                schema_version=19,
+                schema_version=_applied_assessment_runs_schema_version(
+                    applied_versions
+                ),
+            )
+        if 20 not in applied_versions:
+            _migrate_m8_review_policy_cleanup(connection)
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (20, _M8_REVIEW_POLICY_CLEANUP_MIGRATION_NAME),
+            )
+            applied_versions.add(20)
+        if 21 not in applied_versions:
+            migrate_workflow_v20_to_v21(connection)
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=21,
+            )
+            connection.execute(
+                "INSERT INTO schema_migrations(version, name) VALUES (?, ?)",
+                (21, _M0_DYNAMIC_CLASS_ROSTER_MIGRATION_NAME),
+            )
+            applied_versions.add(21)
+        else:
+            _validate_assessment_workflow_schema(
+                connection,
+                schema_version=21,
             )
         # M1-M3 S1-S6 owns an independent version ledger. Apply its artifact
         # tables in the same transaction without consuming platform versions.

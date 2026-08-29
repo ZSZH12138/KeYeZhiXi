@@ -8,7 +8,6 @@ from pathlib import Path
 
 from course_insight.application.retrieval import retrieve_for_application
 from course_insight.contracts.evidence import EvidenceQuery, evidence_id_for_chunk
-from course_insight.contracts.errors import DomainError
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.infrastructure.m1_file_repository import FileM1Repository
 from course_insight.infrastructure.m2_file_repository import FileM2Repository

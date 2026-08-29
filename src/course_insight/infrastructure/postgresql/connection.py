@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import math
-from typing import Any, TypeAlias, cast
+from typing import TypeAlias, cast
 
 import psycopg
 from psycopg import Connection

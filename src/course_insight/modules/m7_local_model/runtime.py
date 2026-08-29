@@ -22,7 +22,6 @@ from course_insight.modules.m7_local_model.privacy import (
     M7OutboundPrivacyPolicy,
 )
 from course_insight.modules.m7_local_model.privacy_reviewer import PrivacyReviewer
-from course_insight.modules.m7_local_model.review_selection import ReviewSelector
 
 
 def required_deepseek_api_key_env() -> str:
@@ -36,10 +35,9 @@ def build_deepseek_m7_adapter(
     privacy_reviewer: PrivacyReviewer,
     policy: M7ExecutionPolicy = DEFAULT_M7_EXECUTION_POLICY,
     privacy_policy: M7OutboundPrivacyPolicy = DEFAULT_M7_OUTBOUND_PRIVACY_POLICY,
-    review_selector: ReviewSelector | None = None,
     transport: DeepSeekTransport | None = None,
     timeout_seconds: float = 30.0,
-    max_attempts: int = 3,
+    max_attempts: int = 1,
     retry_base_seconds: float = 0.25,
     max_response_bytes: int = 1024 * 1024,
     sleep: Callable[[float], None] = time.sleep,
@@ -77,7 +75,6 @@ def build_deepseek_m7_adapter(
         policy=policy,
         privacy_policy=privacy_policy,
         privacy_reviewer=privacy_reviewer,
-        review_selector=review_selector,
     )
 
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import json
 
 from scripts.verify_m6_controlled_rollout import verify_evidence
 

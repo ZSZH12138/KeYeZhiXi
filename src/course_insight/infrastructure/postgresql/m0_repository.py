@@ -92,6 +92,9 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
                     evidence_index_checksum,
                     state_policy_checksum,
                     teacher_policy_checksum,
+                    class_roster_size,
+                    class_roster_checksum,
+                    class_roster_captured_at,
                     previous_state_frozen,
                     previous_learner_snapshot_id,
                     previous_learner_state_version,
@@ -118,7 +121,7 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
                     %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s,
                     %s, %s, %s, %s, %s, %s, %s, %s,
-                    %s, %s, %s, %s, %s
+                    %s, %s, %s, %s, %s, %s, %s, %s
                 )
                 ON CONFLICT DO NOTHING
                 RETURNING {_WORKFLOW_COLUMNS}
@@ -803,6 +806,9 @@ evidence_index_version,
 evidence_index_checksum,
 state_policy_checksum,
 teacher_policy_checksum,
+class_roster_size,
+class_roster_checksum,
+class_roster_captured_at,
 previous_state_frozen,
 previous_learner_snapshot_id,
 previous_learner_state_version,
@@ -886,6 +892,9 @@ def _run_parameters(run: AssessmentRun) -> tuple[object, ...]:
         run.evidence_index_checksum,
         run.state_policy_checksum,
         run.teacher_policy_checksum,
+        run.class_roster_size,
+        run.class_roster_checksum,
+        run.class_roster_captured_at,
         run.previous_state_frozen,
         run.previous_learner_snapshot_id,
         run.previous_learner_state_version,
@@ -998,6 +1007,9 @@ def _adopt_workflow_dependencies(
             evidence_index_checksum = %s,
             state_policy_checksum = %s,
             teacher_policy_checksum = %s,
+            class_roster_size = %s,
+            class_roster_checksum = %s,
+            class_roster_captured_at = %s,
             previous_state_frozen = %s,
             policy_id = %s,
             adapter_id = %s,
@@ -1019,6 +1031,9 @@ def _adopt_workflow_dependencies(
           AND evidence_index_checksum IS NULL
           AND state_policy_checksum IS NULL
           AND teacher_policy_checksum IS NULL
+          AND class_roster_size IS NULL
+          AND class_roster_checksum IS NULL
+          AND class_roster_captured_at IS NULL
           AND previous_state_frozen IS NULL
           AND previous_learner_snapshot_id IS NULL
           AND previous_learner_state_version IS NULL
@@ -1043,6 +1058,9 @@ def _adopt_workflow_dependencies(
             updated.evidence_index_checksum,
             updated.state_policy_checksum,
             updated.teacher_policy_checksum,
+            updated.class_roster_size,
+            updated.class_roster_checksum,
+            updated.class_roster_captured_at,
             updated.previous_state_frozen,
             updated.policy_id,
             updated.adapter_id,
@@ -1205,6 +1223,18 @@ def _run_from_row(row: Mapping[str, object]) -> AssessmentRun:
                 row["teacher_policy_checksum"],
                 field="teacher_policy_checksum",
             ),
+            class_roster_size=_optional_positive_int(
+                row["class_roster_size"],
+                field="class_roster_size",
+            ),
+            class_roster_checksum=_optional_text(
+                row["class_roster_checksum"],
+                field="class_roster_checksum",
+            ),
+            class_roster_captured_at=_optional_datetime(
+                row["class_roster_captured_at"],
+                field="class_roster_captured_at",
+            ),
             previous_state_frozen=_optional_bool(
                 row["previous_state_frozen"],
                 field="previous_state_frozen",
@@ -1309,6 +1339,9 @@ def _run_mapping(run: AssessmentRun) -> dict[str, object]:
         "evidence_index_checksum": run.evidence_index_checksum,
         "state_policy_checksum": run.state_policy_checksum,
         "teacher_policy_checksum": run.teacher_policy_checksum,
+        "class_roster_size": run.class_roster_size,
+        "class_roster_checksum": run.class_roster_checksum,
+        "class_roster_captured_at": run.class_roster_captured_at,
         "previous_state_frozen": run.previous_state_frozen,
         "previous_learner_snapshot_id": run.previous_learner_snapshot_id,
         "previous_learner_state_version": run.previous_learner_state_version,

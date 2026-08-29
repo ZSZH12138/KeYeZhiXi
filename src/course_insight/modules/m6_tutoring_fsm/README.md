@@ -143,8 +143,9 @@ core migrations。
   policy freeze 字段。
 
 M4 intent 已占用 schema v10/v11，且这些已发布 migration 保持不变。M6 policy
-与 M0 freeze 因此安全顺延到 v12/v13；后续 M5/M8 追加 v14/v15，当前 bundled
-schema 总版本是 v15。
+与 M0 freeze 因此安全顺延到 v12/v13；后续 v14—v22 继续追加模型运行、知识制品、
+模型审计、等待队列、重评操作和动态班级名单，当前 bundled PostgreSQL schema
+总版本是 v22（SQLite platform ledger 为 v21）。这些后续迁移不修改 M6 表。
 数据库高于应用支持版本时拒绝启动；项目不自动破坏性降级，回退旧应用前必须停写
 并恢复匹配备份。
 

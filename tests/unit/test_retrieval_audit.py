@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -93,6 +93,24 @@ def test_same_semantics_have_same_audit_identity_and_store_is_idempotent() -> No
     assert persist_retrieval_audit(store, second) == first
 
 
+def test_retry_reuses_audit_when_only_timing_metadata_changes() -> None:
+    first = create_retrieval_audit(
+        query=_query(), index=_index(), policy=_policy(), status="succeeded",
+        evidence_ids=["evidence-1"], scores=[0.7], latency_ms=1,
+        request_id="request-1", created_at=NOW,
+    )
+    store = InMemoryRetrievalAuditStore()
+    persist_retrieval_audit(store, first)
+
+    retry = create_retrieval_audit(
+        query=_query(), index=_index(), policy=_policy(), status="succeeded",
+        evidence_ids=["evidence-1"], scores=[0.7], latency_ms=2,
+        request_id="request-1", created_at=NOW + timedelta(seconds=1),
+    )
+
+    assert persist_retrieval_audit(store, retry) == first
+
+
 def test_conflicting_same_identity_fails_closed_and_score_bindings_are_checked() -> None:
     first = create_retrieval_audit(
         query=_query(), index=_index(), policy=_policy(), status="succeeded",
@@ -101,7 +119,11 @@ def test_conflicting_same_identity_fails_closed_and_score_bindings_are_checked()
     )
     store = InMemoryRetrievalAuditStore()
     persist_retrieval_audit(store, first)
-    conflict = first.with_latency(2)
+    conflict = create_retrieval_audit(
+        query=_query(), index=_index(), policy=_policy(), status="succeeded",
+        evidence_ids=["evidence-1"], scores=[0.8], latency_ms=2,
+        request_id="request-1", created_at=NOW + timedelta(seconds=1),
+    )
     with pytest.raises(DomainError, match="audit identity conflict"):
         persist_retrieval_audit(store, conflict)
     with pytest.raises(DomainError, match="audit metadata is invalid"):

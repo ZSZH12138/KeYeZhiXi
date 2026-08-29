@@ -14,9 +14,7 @@ from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import QMatrixEntry
 from course_insight.contracts.learning_models import (
     CognitiveDiagnosisResult,
-    DinaItemParameters,
     DinaModelArtifact,
-    LearningObservation,
     LearningObservationBatch,
 )
 from course_insight.modules.m5_learner_class_state.dina_components import (

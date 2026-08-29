@@ -289,6 +289,8 @@ class LoginFailureBucket(models.Model):
 # stable ``django_app.models`` public surface.
 from course_insight.modules.m0_platform.django_app.knowledge_models import (  # noqa: E402
     AssessmentProjectionReceipt,
+    ClassConceptLearningSnapshot,
+    ClassLearningSnapshot,
     CourseClassWorkspace,
     CourseKnowledgeRelease,
     CourseSource,
@@ -297,10 +299,14 @@ from course_insight.modules.m0_platform.django_app.knowledge_models import (  # 
     KnowledgeExtractionBatchCheckpoint,
     KnowledgeIngestionJob,
     LearnerConceptMastery,
+    LearningProfileProjectionEvent,
     ReleaseConcept,
     ReleaseConceptSource,
     ReleaseQuestion,
     ReleaseQuestionConceptLink,
     ScopedDeepSeekConfiguration,
+    SuggestedTeacherReviewCase,
+    SuggestedTeacherReviewItem,
+    TeacherItemReviewNote,
     WrongQuestionRecord,
 )

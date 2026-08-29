@@ -2,15 +2,13 @@
   "cases": [
     {
       "case_id": "low_confidence",
-      "confidence": 0.62,
-      "disagreement": 0.2,
+      "confidence": 0.42,
       "expected": "teacher_review"
     },
     {
-      "case_id": "double_score_disagreement",
-      "confidence": 0.9,
-      "disagreement": 1.5,
-      "expected": "teacher_review"
+      "case_id": "confidence_boundary",
+      "confidence": 0.5,
+      "expected": "no_review"
     },
     {
       "case_id": "approve",

@@ -1,0 +1,20 @@
+{% extends "course_insight/base.html" %}
+{% block title %}成绩复核中 · 课业智析{% endblock %}
+{% block content %}
+  {% include "course_insight/student/_nav.html" with current_label="测评结果" %}
+  <h1>成绩正在复核中</h1>
+  <p class="status">AI 给出的分数是暂定分，教师确认前不会写入学生掌握画像或班级画像。</p>
+  {% for item in question_details %}
+    <section class="card">
+      <h2>题目</h2><p>{{ item.stem }}</p>
+      <h3>题目答案</h3><p>{{ item.correct_answer }}</p>
+      <h3>学生答案</h3><p>{{ item.student_answer }}</p>
+      <h3>AI 暂定得分</h3><p>{{ item.student_score }} / {{ item.max_score }}</p>
+      {% if item.requires_ai_assessment %}
+        <h3>AI评判</h3><p>{{ item.ai_assessment }}</p>
+        <p>AI 置信度：{% if item.ai_confidence != None %}{{ item.ai_confidence }}{% else %}—{% endif %}</p>
+      {% endif %}
+      <h3>教师备注</h3><p>{{ item.teacher_note|default:"—" }}</p>
+    </section>
+  {% empty %}<p>当前评分记录正在生成。</p>{% endfor %}
+{% endblock %}

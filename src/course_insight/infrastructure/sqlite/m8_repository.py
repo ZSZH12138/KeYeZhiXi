@@ -156,6 +156,42 @@ class SQLiteM8Repository:
         finally:
             connection.close()
 
+    def purge_assessment_attempt(self, *, paper_id: str, attempt_id: str) -> None:
+        """Delete one transient attempt atomically after result delivery."""
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            connection.execute(
+                "DELETE FROM m8_score_audits "
+                "WHERE json_extract(payload, '$.attempt_id') = ?",
+                (attempt_id,),
+            )
+            connection.execute(
+                "DELETE FROM m8_scoring_results WHERE attempt_id = ?",
+                (attempt_id,),
+            )
+            remaining = connection.execute(
+                "SELECT 1 FROM m8_scoring_results WHERE paper_id = ? LIMIT 1",
+                (paper_id,),
+            ).fetchone()
+            if remaining is None:
+                connection.execute(
+                    "DELETE FROM m8_frozen_assessment_records WHERE paper_id = ?",
+                    (paper_id,),
+                )
+                connection.execute(
+                    "DELETE FROM m8_assessment_papers WHERE paper_id = ?",
+                    (paper_id,),
+                )
+            connection.execute("COMMIT")
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
     def save_paper(self, paper: AssessmentPaper) -> None:
         context = self.get_paper_execution_context(paper.paper_id)
         if context is None:

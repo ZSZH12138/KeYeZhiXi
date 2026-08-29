@@ -2,13 +2,8 @@
   "$defs": {
     "ReviewPolicy": {
       "additionalProperties": false,
-      "description": "Thresholds that route uncertain or divergent scores to review.",
+      "description": "Confidence threshold that routes uncertain semantic scores to review.",
       "properties": {
-        "double_score_disagreement_threshold": {
-          "minimum": 0.0,
-          "title": "Double Score Disagreement Threshold",
-          "type": "number"
-        },
         "low_confidence_threshold": {
           "maximum": 1.0,
           "minimum": 0.0,
@@ -27,7 +22,6 @@
       },
       "required": [
         "low_confidence_threshold",
-        "double_score_disagreement_threshold",
         "require_evidence_for_positive_score"
       ],
       "title": "ReviewPolicy",

@@ -91,6 +91,15 @@ def test_rule_scorer_accepts_any_teacher_listed_string_answer() -> None:
             }
         }
     )
+    instance = instance.model_copy(
+        update={
+            "parameters": {
+                **instance.parameters,
+                "_frozen_answers": ["IPv6", "ipv6"],
+            }
+        },
+        deep=True,
+    )
 
     scorer = RuleScorer(FixedClock())
     first = scorer.score(
@@ -116,6 +125,44 @@ def test_rule_scorer_accepts_any_teacher_listed_string_answer() -> None:
     assert second.total_score == 1.0
     assert missed.total_score == 0.0
     assert missed.review_status == "not_required"
+
+
+def test_rule_scorer_exactly_matches_teacher_answer_for_subjective_item() -> None:
+    bundle = make_knowledge_bundle(subjective=True)
+    item = bundle.items[0].model_copy(
+        update={
+            "answer_key": {
+                "answers": ["TCP 提供端到端的可靠字节流服务。"],
+                "max_score": 1.0,
+            }
+        },
+        deep=True,
+    )
+    instance = PaperGenerator(FixedClock()).generate(
+        make_task_plan(),
+        bundle.model_copy(update={"items": [item]}, deep=True),
+        None,
+        None,
+    ).all_items()[0]
+    scorer = RuleScorer(FixedClock())
+
+    exact = scorer.score(
+        attempt_id="attempt_1",
+        item_instance=instance,
+        item=item,
+        raw_answer="TCP 提供端到端的可靠字节流服务。",
+    )
+    different = scorer.score(
+        attempt_id="attempt_2",
+        item_instance=instance,
+        item=item,
+        raw_answer="TCP提供端到端的可靠字节流服务。",
+    )
+
+    assert exact.total_score == instance.max_score
+    assert exact.scoring_method == "rule"
+    assert exact.review_status == "not_required"
+    assert different.total_score == 0.0
 
 
 def test_rule_scorer_rejects_empty_or_non_list_answers() -> None:

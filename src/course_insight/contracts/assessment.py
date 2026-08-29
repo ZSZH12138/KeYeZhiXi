@@ -222,13 +222,22 @@ class CriterionScore(ContractModel):
 
 
 class RubricScoringTask(ContractModel):
-    """M8 subjective-answer task passed unchanged to M7."""
+    """M8 constructed-response task passed unchanged to governed DeepSeek scoring."""
 
     scoring_task_id: str = Field(min_length=1)
     attempt_id: str = Field(min_length=1)
     paper_id: str = Field(min_length=1)
     item_instance: ItemInstance
     student_answer: str
+    question_type: Literal["fill_blank", "subjective"] = "subjective"
+    reference_answers: list[str] = Field(default_factory=list)
+    concept_names: list[str] = Field(default_factory=list)
+    review_confidence_threshold: float = Field(
+        default=0.5,
+        ge=0.0,
+        le=1.0,
+        allow_inf_nan=False,
+    )
     rubric: Rubric
     evidence_query_id: str = Field(min_length=1)
     created_at: datetime
@@ -236,6 +245,12 @@ class RubricScoringTask(ContractModel):
     def validate_business_rules(self) -> None:
         """Bind the exact frozen item score to the exact rubric version."""
 
+        _require_unique(
+            self.reference_answers,
+            code="DUPLICATE_REFERENCE_ANSWER",
+            message="reference answers must be unique within a scoring task",
+            details={"scoring_task_id": self.scoring_task_id},
+        )
         maximum_matches = math.isclose(
             self.item_instance.max_score,
             self.rubric.total_score,
@@ -354,12 +369,13 @@ class ScoreAuditRecord(ContractModel):
 
 
 class ScoringPreparationResult(ContractModel):
-    """M8 split of completed objective audits and pending rubric tasks."""
+    """M8 split of completed rule audits and pending rubric tasks."""
 
     attempt_id: str = Field(min_length=1)
     paper_id: str = Field(min_length=1)
     learner_id: str = Field(min_length=1)
     objective_audit_records: list[ScoreAuditRecord]
+    objective_item_instances: list[ItemInstance] = Field(default_factory=list)
     rubric_scoring_tasks: list[RubricScoringTask]
     evidence_queries: list[EvidenceQuery]
     raw_answer_checksum: str = Field(min_length=1)
@@ -381,8 +397,27 @@ class ScoringPreparationResult(ContractModel):
         _require_unique(
             [record.item_instance_id for record in self.objective_audit_records],
             code="DUPLICATE_OBJECTIVE_AUDIT",
-            message="objective items must have one prepared audit record",
+            message="rule-scored items must have one prepared audit record",
         )
+        _require_unique(
+            [item.item_instance_id for item in self.objective_item_instances],
+            code="DUPLICATE_OBJECTIVE_AUDIT",
+            message="rule-scored item contexts must be unique",
+        )
+        if self.objective_item_instances and (
+            {
+                item.item_instance_id for item in self.objective_item_instances
+            }
+            != {
+                record.item_instance_id
+                for record in self.objective_audit_records
+            }
+        ):
+            raise DomainError(
+                code="SCORING_REFERENCE_MISMATCH",
+                module="m8",
+                message="rule-scored item contexts must match prepared audits",
+            )
         if any(
             record.attempt_id != self.attempt_id
             for record in self.objective_audit_records

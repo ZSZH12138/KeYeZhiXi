@@ -135,15 +135,6 @@ def test_start_page_lists_only_own_profile_affecting_finalized_papers(
     )
     AssessmentProjectionReceipt.objects.create(
         workspace=workspace,
-        learner=student,
-        attempt_id="attempt-practice",
-        paper_id="paper-practice-hidden",
-        task_type="practice",
-        scoring_checksum="b" * 64,
-        projection_payload={"instance_1": {"correct": False}},
-    )
-    AssessmentProjectionReceipt.objects.create(
-        workspace=workspace,
         learner=other,
         attempt_id="attempt-other",
         paper_id="paper-other-hidden",
@@ -242,6 +233,9 @@ def test_result_page_shows_choice_options_answer_sources_and_post_qa_entry(
     assert "A. 面向连接并保证可靠传输" in content
     assert "B. 无连接并保留应用报文边界" in content
     assert "题目正确答案" in content
+    assert "学生答案" in content
+    assert "学生得分" in content
+    assert "教师备注" in content
     assert ">B<" in content
     assert "拥塞控制" in content
     assert "chapter.txt" in content

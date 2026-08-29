@@ -69,6 +69,29 @@ def test_canonical_hashed_chunk_evidence_id_is_student_safe() -> None:
 
 
 @pytest.mark.parametrize(
+    "locator",
+    [
+        "slide:40",
+        "slide:40;shape:19;paragraph:1",
+        "slide:40;table:19;row:2;cell:3",
+        "page:7;block:2",
+        "paragraph:3;lines:8-12",
+        "table:2;row:3;cell:4",
+    ],
+)
+def test_release_scoped_parser_citation_is_student_safe(locator: str) -> None:
+    citation = EvidenceCitation(
+        evidence_id="evidence_chunk_" + ("b" * 64),
+        source_id="source-version-42b1c81a21994ecb93af7a68cb077184",
+        locator=locator,
+        quote=STUDENT_CITATION_QUOTE_PLACEHOLDER,
+    )
+
+    assert citation.safe_for_student() is True
+    assert _feedback_with(citation).safe_for_student() is True
+
+
+@pytest.mark.parametrize(
     ("field", "unsafe_value"),
     [
         ("evidence_id", "证据一"),

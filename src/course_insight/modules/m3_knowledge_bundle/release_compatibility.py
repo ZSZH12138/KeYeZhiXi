@@ -2,9 +2,15 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import TypedDict
 
+from course_insight.contracts.course import (
+    ContentChunk,
+    CoursePackage,
+    SourceDocument,
+)
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import (
     AssessmentBlueprint,
@@ -186,6 +192,137 @@ def knowledge_bundle_from_release(
     )
 
 
+def course_package_from_release(
+    release: CourseKnowledgeRelease,
+) -> CoursePackage:
+    """Project frozen release evidence into the M1 contract consumed by M2."""
+
+    _require_published_release(release)
+    references = list(
+        release.concepts.prefetch_related(
+            "source_references__source_version__source"
+        )
+        .order_by("concept_id")
+    )
+    evidence_rows = [
+        (concept, reference)
+        for concept in references
+        for reference in concept.source_references.all()
+    ]
+    if not evidence_rows:
+        raise DomainError(
+            code="KNOWLEDGE_RELEASE_EVIDENCE_EMPTY",
+            module="m3",
+            message="published release has no course evidence",
+            recoverable=True,
+        )
+
+    versions = {
+        str(reference.source_version_id): reference.source_version
+        for _, reference in evidence_rows
+    }
+    documents = [
+        SourceDocument(
+            source_id=_release_source_id(version_id),
+            file_name=version.source.display_name,
+            media_type=version.media_type,
+            sha256=version.sha256,
+            page_count=None,
+            title=version.source.display_name,
+            version=str(version.version_number),
+        )
+        for version_id, version in sorted(versions.items())
+    ]
+
+    grouped: dict[tuple[str, str], dict[str, object]] = {}
+    for concept, reference in evidence_rows:
+        key = (str(reference.source_version_id), reference.chunk_id)
+        existing = grouped.get(key)
+        if existing is None:
+            grouped[key] = {
+                "locator": reference.locator,
+                "text": reference.chunk_text,
+                "concept_ids": {concept.concept_id},
+            }
+            continue
+        if (
+            existing["locator"] != reference.locator
+            or existing["text"] != reference.chunk_text
+        ):
+            raise DomainError(
+                code="KNOWLEDGE_RELEASE_EVIDENCE_INVALID",
+                module="m3",
+                message="release evidence chunk is inconsistent",
+            )
+        concept_ids = existing["concept_ids"]
+        if not isinstance(concept_ids, set):
+            raise AssertionError("release evidence concepts are invalid")
+        concept_ids.add(concept.concept_id)
+
+    chunks = []
+    for (version_id, source_chunk_id), values in sorted(grouped.items()):
+        text = str(values["text"])
+        concept_ids = values["concept_ids"]
+        if not isinstance(concept_ids, set):
+            raise AssertionError("release evidence concepts are invalid")
+        chunks.append(
+            ContentChunk(
+                chunk_id=_release_chunk_id(
+                    release_id=str(release.pk),
+                    version_id=version_id,
+                    source_chunk_id=source_chunk_id,
+                ),
+                source_id=_release_source_id(version_id),
+                text=text,
+                locator=str(values["locator"]),
+                concept_hints=sorted(str(value) for value in concept_ids),
+                sha256=hashlib.sha256(text.encode("utf-8")).hexdigest(),
+            )
+        )
+
+    candidate = CoursePackage(
+        course_package_id=f"course-release-{release.pk}",
+        course_id=release.course_id,
+        package_version=str(release.version_number),
+        source_documents=documents,
+        content_chunks=chunks,
+        source_authorizations=[],
+        imported_at=release.activated_at or release.created_at,
+        status="ready",
+        checksum="pending",
+    )
+    return candidate.model_copy(
+        update={"checksum": candidate.recalculate_checksum()},
+        deep=True,
+    )
+
+
+def _release_source_id(version_id: str) -> str:
+    return f"source-version-{version_id}"
+
+
+def _release_chunk_id(
+    *,
+    release_id: str,
+    version_id: str,
+    source_chunk_id: str,
+) -> str:
+    identity = f"{release_id}\0{version_id}\0{source_chunk_id}"
+    return f"chunk_{hashlib.sha256(identity.encode('utf-8')).hexdigest()}"
+
+
+def _require_published_release(release: CourseKnowledgeRelease) -> None:
+    if release.status not in {
+        CourseKnowledgeRelease.Status.ACTIVE,
+        CourseKnowledgeRelease.Status.RETIRED,
+    }:
+        raise DomainError(
+            code="KNOWLEDGE_RELEASE_NOT_PUBLISHED",
+            module="m3",
+            message="only active or retired releases can be consumed downstream",
+        )
+
+
 def summarize_release_quality(
     release: CourseKnowledgeRelease,
 ) -> ReleaseQualitySummary:
@@ -244,7 +381,6 @@ def _subjective_rubric(
         ],
         review_policy=ReviewPolicy(
             low_confidence_threshold=0.7,
-            double_score_disagreement_threshold=1.0,
             require_evidence_for_positive_score=True,
         ),
         status="teacher_approved",

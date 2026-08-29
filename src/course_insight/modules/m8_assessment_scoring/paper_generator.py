@@ -614,9 +614,7 @@ class PaperGenerator:
             if name.startswith("_"):
                 continue
             stem = stem.replace("{" + name + "}", str(value))
-        frozen_answers = (
-            _freeze_answers(item, parameters) if item.parameter_rules else []
-        )
+        frozen_answers = _freeze_answers(item, parameters)
         if frozen_answers:
             parameters = {**parameters, "_frozen_answers": frozen_answers}
         return ItemInstance(
@@ -691,7 +689,7 @@ class PaperGenerator:
 
 def _freeze_answers(item: ItemCard, parameters: dict[str, Any]) -> list[str]:
     try:
-        accepted = RuleScorer._accepted_answers(item)
+        accepted = RuleScorer.accepted_answers(item)
     except DomainError:
         return []
     frozen: list[str] = []

@@ -68,7 +68,7 @@ def test_scope_selection_form_rejects_duplicate_scope_fields(
 
 @pytest.mark.parametrize(
     "duplicate_field",
-    ["course_id", "class_id", "paper_id"],
+    ["course_id", "class_id", "learner_account"],
 )
 def test_review_lookup_form_rejects_duplicate_known_fields(
     duplicate_field: str,
@@ -76,7 +76,7 @@ def test_review_lookup_form_rejects_duplicate_known_fields(
     duplicate = QueryDict("", mutable=True)
     duplicate["course_id"] = "course_a"
     duplicate["class_id"] = "class_1"
-    duplicate["paper_id"] = "paper_1"
+    duplicate["learner_account"] = "pseudonym_student_1"
     duplicate.setlist(duplicate_field, ["scope_1", "scope_2"])
 
     form = ReviewLookupForm(data=duplicate)
@@ -97,7 +97,7 @@ def test_review_lookup_form_rejects_duplicate_known_fields(
             {
                 "course_id": "course_a",
                 "class_id": "class_1",
-                "paper_id": "paper_1",
+                "learner_account": "pseudonym_student_1",
             },
         ),
     ],
@@ -108,6 +108,18 @@ def test_scope_forms_reject_unknown_query_fields(
 ) -> None:
     query = QueryDict("", mutable=True)
     query.update(values)
-    query["learner_id"] = "pseudonym_other"
+    query["paper_id"] = "paper_1"
 
     assert not form_type(data=query).is_valid()
+
+
+def test_review_lookup_form_requires_the_student_account_instead_of_a_paper_id() -> None:
+    form = ReviewLookupForm(
+        data={
+            "course_id": "course_a",
+            "class_id": "class_1",
+            "learner_account": "pseudonym_student_1",
+        }
+    )
+
+    assert form.is_valid(), form.errors

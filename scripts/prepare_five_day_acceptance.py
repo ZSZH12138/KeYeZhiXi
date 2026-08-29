@@ -14,7 +14,6 @@ import csv
 import hashlib
 import json
 import math
-import random
 import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -521,7 +520,7 @@ def _rubric(rubric_id: str, total: float, criteria: list[tuple[str, str, float]]
             {"criterion_id": f"{rubric_id}_{cid}", "description": description, "max_score": score, "expected_student_evidence": description, "course_evidence_ids": [evidence_id]}
             for cid, description, score in criteria
         ],
-        "review_policy": {"low_confidence_threshold": 0.75, "double_score_disagreement_threshold": 1.0, "require_evidence_for_positive_score": True},
+        "review_policy": {"low_confidence_threshold": 0.5, "require_evidence_for_positive_score": True},
         "status": "published",
     }
 
@@ -647,8 +646,8 @@ def _privacy_cases() -> list[dict[str, Any]]:
 
 def _review_cases() -> list[dict[str, Any]]:
     return [
-        {"case_id": "low_confidence", "confidence": 0.62, "disagreement": 0.2, "expected": "teacher_review"},
-        {"case_id": "double_score_disagreement", "confidence": 0.9, "disagreement": 1.5, "expected": "teacher_review"},
+        {"case_id": "low_confidence", "confidence": 0.42, "expected": "teacher_review"},
+        {"case_id": "confidence_boundary", "confidence": 0.5, "expected": "no_review"},
         {"case_id": "approve", "decision": "approve", "expected": "append_review_version"},
         {"case_id": "override", "decision": "override", "override_score": 3.0, "expected": "teacher_override"},
         {"case_id": "reject", "decision": "reject", "expected": "SCORE_REJECTED_PENDING_RESCORE"},

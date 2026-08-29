@@ -220,6 +220,9 @@ def test_sqlite_round_trips_every_recovery_field_and_compares_dependencies(
         lease_until=LEASE,
         state_version=3,
         previous_state_frozen=True,
+        class_roster_size=3,
+        class_roster_checksum="e" * 64,
+        class_roster_captured_at=NOW,
         **_policy_fields(learned=True),
     )
 
@@ -234,7 +237,7 @@ def test_sqlite_round_trips_every_recovery_field_and_compares_dependencies(
 
     changed_dependency = replace(
         candidate,
-        evidence_index_checksum="d" * 64,
+        class_roster_checksum="f" * 64,
     )
     with pytest.raises(DomainError) as captured:
         repository.insert_or_get_assessment_run(changed_dependency)
@@ -561,7 +564,7 @@ def test_sqlite_v13_migration_preserves_v12_rows_with_null_policy_identity(
             WHERE operation_id = 'legacy-v12'
             """
         ).fetchone()
-        assert SCHEMA_VERSION == 19
+        assert SCHEMA_VERSION == 21
         assert current_schema_version(connection) == SCHEMA_VERSION
         assert {
             "policy_id",

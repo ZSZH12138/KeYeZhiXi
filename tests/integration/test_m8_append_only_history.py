@@ -1,12 +1,14 @@
 """M8 paper and audit identities are append-only."""
 
+import hashlib
+import json
 import sqlite3
-from datetime import timedelta
 
 import pytest
 
 from course_insight.contracts.assessment import AssessmentPaper, ScoreAuditRecord
 from course_insight.infrastructure.sqlite.m8_repository import SQLiteM8Repository
+from course_insight.infrastructure.sqlite.migrations import current_schema_version
 from course_insight.infrastructure.json_io import dumps_json
 from course_insight.modules.m8_assessment_scoring.paper_record import (
     FrozenAssessmentRecord,
@@ -121,6 +123,26 @@ def test_repository_validates_scope_and_empty_recovery_paths(tmp_path) -> None:
         "missing",
         "0" * 64,
     ) is None
+
+
+def test_transient_assessment_can_be_purged_after_result_delivery(tmp_path) -> None:
+    repository = SQLiteM8Repository(tmp_path / "transient-purge.sqlite3")
+    repository.initialize()
+    paper = make_paper()
+    scoring = make_scoring_bundle(paper)
+    repository.insert_or_get_paper_record(_record(paper))
+    repository.insert_or_get_scoring_result(scoring)
+
+    repository.purge_assessment_attempt(
+        paper_id=paper.paper_id,
+        attempt_id=scoring.attempt_id,
+    )
+
+    assert repository.get_paper(paper.paper_id) is None
+    assert repository.get_paper_record(paper.paper_id) is None
+    assert repository.get_scoring_result(scoring.attempt_id) is None
+    audit = scoring.score_audit_records[0]
+    assert repository.get_score_audit(audit.audit_id, audit.audit_version) is None
 
 
 def test_same_audit_version_cannot_overwrite_content(tmp_path) -> None:
@@ -251,3 +273,109 @@ def test_same_paper_can_never_replace_its_frozen_rubric(tmp_path) -> None:
 
     with pytest.raises(RuntimeError, match="paper record conflict"):
         repository.insert_or_get_paper_record(changed)
+
+
+def test_initialize_migrates_legacy_double_score_review_policy(tmp_path) -> None:
+    database_path = tmp_path / "legacy-review-policy.sqlite3"
+    repository = SQLiteM8Repository(database_path)
+    repository.initialize()
+    record = FrozenAssessmentRecord(
+        paper=make_paper(subjective=True),
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[make_rubric()],
+    )
+    repository.insert_or_get_paper_record(record)
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            """
+            SELECT payload
+            FROM m8_frozen_assessment_records
+            WHERE paper_id = ?
+            """,
+            (record.paper.paper_id,),
+        ).fetchone()
+        legacy = json.loads(str(row[0]))
+        legacy["frozen_rubrics"][0]["review_policy"][
+            "double_score_disagreement_threshold"
+        ] = 1.0
+        legacy_payload = dumps_json(legacy)
+        legacy_checksum = hashlib.sha256(
+            json.dumps(
+                legacy,
+                sort_keys=True,
+                ensure_ascii=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        connection.execute(
+            """
+            UPDATE m8_frozen_assessment_records
+            SET payload = ?, payload_checksum = ?
+            WHERE paper_id = ?
+            """,
+            (legacy_payload, legacy_checksum, record.paper.paper_id),
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version = 20")
+
+    repository.initialize()
+
+    assert repository.get_paper_record(record.paper.paper_id) == record
+    with sqlite3.connect(database_path) as connection:
+        payload, checksum = connection.execute(
+            """
+            SELECT payload, payload_checksum
+            FROM m8_frozen_assessment_records
+            WHERE paper_id = ?
+            """,
+            (record.paper.paper_id,),
+        ).fetchone()
+        assert current_schema_version(connection) == 21
+    assert "double_score_disagreement_threshold" not in str(payload)
+    assert str(checksum) == record.content_checksum()
+
+
+def test_legacy_review_policy_migration_rejects_bad_checksum(tmp_path) -> None:
+    database_path = tmp_path / "tampered-legacy-review-policy.sqlite3"
+    repository = SQLiteM8Repository(database_path)
+    repository.initialize()
+    record = FrozenAssessmentRecord(
+        paper=make_paper(subjective=True),
+        course_id="course_1",
+        class_id="class_1",
+        frozen_rubrics=[make_rubric()],
+    )
+    repository.insert_or_get_paper_record(record)
+
+    with sqlite3.connect(database_path) as connection:
+        row = connection.execute(
+            "SELECT payload FROM m8_frozen_assessment_records WHERE paper_id = ?",
+            (record.paper.paper_id,),
+        ).fetchone()
+        legacy = json.loads(str(row[0]))
+        legacy["frozen_rubrics"][0]["review_policy"][
+            "double_score_disagreement_threshold"
+        ] = 1.0
+        connection.execute(
+            """
+            UPDATE m8_frozen_assessment_records
+            SET payload = ?, payload_checksum = ?
+            WHERE paper_id = ?
+            """,
+            (dumps_json(legacy), "0" * 64, record.paper.paper_id),
+        )
+        connection.execute("DELETE FROM schema_migrations WHERE version = 20")
+
+    with pytest.raises(RuntimeError, match="legacy paper-record checksum mismatch"):
+        repository.initialize()
+
+    with sqlite3.connect(database_path) as connection:
+        assert current_schema_version(connection) == 21
+        assert connection.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = 20"
+        ).fetchone() is None
+        payload = connection.execute(
+            "SELECT payload FROM m8_frozen_assessment_records WHERE paper_id = ?",
+            (record.paper.paper_id,),
+        ).fetchone()[0]
+    assert "double_score_disagreement_threshold" in str(payload)

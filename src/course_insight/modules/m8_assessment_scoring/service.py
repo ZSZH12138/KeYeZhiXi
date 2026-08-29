@@ -14,6 +14,7 @@ from course_insight.contracts.analytics import TeacherReviewDecision
 from course_insight.contracts.assessment import (
     AssessmentPaper,
     CriterionScore,
+    ItemInstance,
     RemediationPlan,
     RemediationTarget,
     RubricScoringResult,
@@ -25,7 +26,12 @@ from course_insight.contracts.assessment import (
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceQuery
 from course_insight.contracts.events import LearningEvent
-from course_insight.contracts.knowledge import KnowledgeBundle
+from course_insight.contracts.knowledge import (
+    KnowledgeBundle,
+    ReviewPolicy,
+    Rubric,
+    RubricCriterion,
+)
 from course_insight.contracts.learning_models import (
     CalibrationRunResult,
     IRTParameterSet,
@@ -218,6 +224,19 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
         bundle = getter(attempt_id)
         return None if bundle is None else bundle.model_copy(deep=True)
 
+    def purge_assessment_attempt(self, *, paper_id: str, attempt_id: str) -> None:
+        """Remove raw data for one completed non-profile attempt."""
+
+        self._repository.purge_assessment_attempt(
+            paper_id=paper_id,
+            attempt_id=attempt_id,
+        )
+        self._paper_event_context = {
+            key: value
+            for key, value in self._paper_event_context.items()
+            if key != paper_id
+        }
+
     def build_observation_batch(
         self,
         paper_id: str,
@@ -306,6 +325,7 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
             )
 
         objective_audits: list[ScoreAuditRecord] = []
+        rule_scored_instances = []
         rubric_tasks: list[RubricScoringTask] = []
         evidence_queries: list[EvidenceQuery] = []
         scorer = getattr(self._rule_scorer, "score", None)
@@ -317,26 +337,41 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
                 instance.item_version,
             )
             answer = answer_by_item[instance.item_instance_id]
-            if not instance.is_subjective():
-                objective_audits.append(
-                    scorer(
-                        attempt_id=attempt_id,
-                        item_instance=instance,
-                        item=item,
-                        raw_answer=answer,
-                    )
+            question_type = self._scoring_question_type(item.item_type)
+            rule_audit = None
+            if question_type == "choice":
+                rule_audit = scorer(
+                    attempt_id=attempt_id,
+                    item_instance=instance,
+                    item=item,
+                    raw_answer=answer,
                 )
+            elif self._rule_scorer.has_teacher_answers(item):
+                candidate = scorer(
+                    attempt_id=attempt_id,
+                    item_instance=instance,
+                    item=item,
+                    raw_answer=answer,
+                )
+                if math.isclose(
+                    candidate.total_score,
+                    candidate.max_score,
+                    rel_tol=0.0,
+                    abs_tol=1e-9,
+                ):
+                    rule_audit = candidate
+            if rule_audit is not None:
+                objective_audits.append(rule_audit)
+                rule_scored_instances.append(instance.model_copy(deep=True))
                 continue
-            if not isinstance(answer, str) or not answer.strip():
+            if not isinstance(answer, str):
                 self._raise_answer_error(
-                    "subjective answers must contain visible text"
+                    "constructed-response answers must be strings"
                 )
-            if instance.rubric_id is None:
-                self._raise_answer_error("subjective paper item has no rubric")
-            rubric = (
-                frozen_record.get_rubric(instance.rubric_id)
-                if frozen_record is not None
-                else knowledge_bundle.get_rubric(instance.rubric_id)
+            task_instance, rubric = self._semantic_scoring_context(
+                instance=instance,
+                frozen_record=frozen_record,
+                knowledge_bundle=knowledge_bundle,
             )
             scoring_task_id = (
                 f"scoring_{attempt_id}_{instance.item_instance_id}"
@@ -349,8 +384,20 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
                     scoring_task_id=scoring_task_id,
                     attempt_id=attempt_id,
                     paper_id=paper_id,
-                    item_instance=instance,
+                    item_instance=task_instance,
                     student_answer=answer,
+                    question_type=question_type,
+                    reference_answers=[
+                        str(value)
+                        for value in self._rule_scorer.accepted_answers(item)
+                    ]
+                    if self._rule_scorer.has_teacher_answers(item)
+                    else [],
+                    concept_names=[
+                        knowledge_bundle.get_concept(concept_id).name
+                        for concept_id in instance.concept_ids
+                    ],
+                    review_confidence_threshold=0.5,
                     rubric=rubric,
                     evidence_query_id=evidence_query_id,
                     created_at=prepared_at,
@@ -373,6 +420,7 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
             paper_id=paper_id,
             learner_id=learner_id,
             objective_audit_records=objective_audits,
+            objective_item_instances=rule_scored_instances,
             rubric_scoring_tasks=rubric_tasks,
             evidence_queries=evidence_queries,
             raw_answer_checksum=hashlib.sha256(raw_bytes).hexdigest(),
@@ -380,72 +428,119 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
         )
 
     @staticmethod
-    def merge_independent_rubric_results(
-        task: RubricScoringTask,
-        first: RubricScoringResult,
-        second: RubricScoringResult,
-    ) -> RubricScoringResult:
-        """Keep the first independent score and escalate criterion disagreement.
+    def _scoring_question_type(item_type: str) -> str:
+        normalized = " ".join(item_type.split()).casefold()
+        if normalized in {
+            "multiple_choice",
+            "single_choice",
+            "choice",
+            "true_false",
+            "objective",
+        }:
+            return "choice"
+        if normalized in {"fill_blank", "fill-in-the-blank", "blank"}:
+            return "fill_blank"
+        return "subjective"
 
-        原始输入：同一量规任务的两次互不可见评分结果。
-        契约来源：score_subjective_answer 与 Rubric.review_policy。
-        返回消费者：finalize_scoring。
-        业务校验：任务身份和分项集合必须一致；正式分取第一次，不平均。
-        错误码：SCORING_TASK_RESULT_MISMATCH。
-        """
-
-        if (
-            first.scoring_task_id != task.scoring_task_id
-            or second.scoring_task_id != task.scoring_task_id
-        ):
-            raise DomainError(
-                code="SCORING_TASK_RESULT_MISMATCH",
-                module="m8",
-                message="independent scores must belong to the same rubric task",
-                details={"scoring_task_id": task.scoring_task_id},
+    @staticmethod
+    def _semantic_scoring_context(
+        *,
+        instance: ItemInstance,
+        frozen_record,
+        knowledge_bundle: KnowledgeBundle,
+    ) -> tuple[ItemInstance, Rubric]:
+        if instance.rubric_id is not None:
+            rubric = (
+                frozen_record.get_rubric(instance.rubric_id)
+                if frozen_record is not None
+                else knowledge_bundle.get_rubric(instance.rubric_id)
             )
-        second_by_id = {
-            score.criterion_id: score.score for score in second.criterion_scores
-        }
-        first_ids = [score.criterion_id for score in first.criterion_scores]
-        if set(first_ids) != set(second_by_id) or len(first_ids) != len(second_by_id):
-            raise DomainError(
-                code="SCORING_TASK_RESULT_MISMATCH",
-                module="m8",
-                message="independent scores must cover the same rubric criteria",
-                details={"scoring_task_id": task.scoring_task_id},
-            )
-        threshold = task.rubric.review_policy.double_score_disagreement_threshold
-        disagreement = 0.0
-        updated_scores: list[CriterionScore] = []
-        for score in first.criterion_scores:
-            other = second_by_id[score.criterion_id]
-            gap = abs(score.score - other)
-            disagreement = max(disagreement, gap)
-            reason = score.reason
-            if gap > threshold:
-                reason = f"{score.reason} Independent second score: {other}."
-            updated_scores.append(score.model_copy(update={"reason": reason}))
-        flags = list(first.review_flags)
-        confidence = min(first.confidence, second.confidence)
-        if (
-            disagreement > threshold
-            and "double_score_disagreement" not in flags
-        ):
-            flags.append("double_score_disagreement")
-        if task.rubric.review_policy.needs_review(confidence, disagreement):
-            if (
-                confidence < task.rubric.review_policy.low_confidence_threshold
-                and "low_confidence" not in flags
-            ):
-                flags.insert(0, "low_confidence")
-        return first.model_copy(
-            update={
-                "criterion_scores": updated_scores,
-                "review_flags": flags,
-                "confidence": confidence,
-            }
+            return instance, rubric
+        rubric_id = f"semantic_{instance.item_instance_id}"
+        rubric = Rubric(
+            rubric_id=rubric_id,
+            version="1.0.0",
+            total_score=instance.max_score,
+            criteria=[
+                RubricCriterion(
+                    criterion_id=f"semantic_{instance.item_id}",
+                    description="结合题目、参考答案和课程原文判断学生答案的正确程度。",
+                    max_score=instance.max_score,
+                    expected_student_evidence="学生答案中与参考答案及课程原文一致的内容。",
+                    course_evidence_ids=list(instance.source_evidence_ids),
+                )
+            ],
+            review_policy=ReviewPolicy(
+                low_confidence_threshold=0.5,
+                require_evidence_for_positive_score=True,
+            ),
+            status="system_generated",
         )
+        task_instance = instance.model_copy(
+            update={"rubric_id": rubric_id},
+            deep=True,
+        )
+        return task_instance, rubric
+
+    def defer_rubric_scoring(
+        self,
+        task: RubricScoringTask,
+        *,
+        reason_code: str,
+    ) -> RubricScoringResult:
+        """Create a zero-credit pending result when governed scoring is unavailable."""
+
+        if reason_code not in {
+            "INVALID_MODEL_JSON",
+            "MODEL_ADAPTER_UNCONFIGURED",
+            "MODEL_API_UNAVAILABLE",
+            "MODEL_INPUT_PRIVACY_BLOCKED",
+            "MODEL_OUTPUT_BLOCKED",
+        }:
+            raise DomainError(
+                code="SCORING_DEFER_REASON_INVALID",
+                module="m8",
+                message="subjective scoring cannot be deferred for this failure",
+            )
+        warning = "ai评分置信度不足 建议通知相应教师进行重新评分"
+        if reason_code == "INVALID_MODEL_JSON":
+            reason = (
+                "AI评分生成错误：系统在首次调用失败后连续重试8次，"
+                f"仍未获得符合格式要求的评分结果，本题暂按0分记录。{warning}"
+            )
+            failure_flag = "ai_output_invalid"
+        else:
+            reason = (
+                "AI评分生成错误：评分服务当前不可用，本题暂按0分记录。"
+                f"{warning}"
+            )
+            failure_flag = "model_scoring_unavailable"
+        result = RubricScoringResult(
+            scoring_task_id=task.scoring_task_id,
+            criterion_scores=[
+                CriterionScore(
+                    criterion_id=criterion.criterion_id,
+                    score=0.0,
+                    student_evidence=task.student_answer,
+                    course_evidence_id=None,
+                    reason=reason,
+                )
+                for criterion in task.rubric.criteria
+            ],
+            total_score=0.0,
+            confidence=0.0,
+            missing_concept_ids=list(task.item_instance.concept_ids),
+            review_flags=[
+                "teacher_review_required",
+                "low_confidence",
+                failure_flag,
+            ],
+            model_name="teacher-review-fallback",
+            model_version="1",
+            scored_at=self._clock.now(),
+        )
+        result.validate_business_rules()
+        return result
 
     def finalize_scoring(
         self,
@@ -483,19 +578,59 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
             result.scoring_task_id: result for result in rubric_scoring_results
         }
         subjective_audits: list[ScoreAuditRecord] = []
-        remediation_targets: list[RemediationTarget] = []
-        targeted_concepts: set[str] = set()
+        remediation_order: list[str] = []
+        remediation_items: dict[str, list[str]] = {}
+        remediation_reasons: dict[str, str] = {}
+
+        def add_remediation(
+            concept_id: str,
+            item_id: str,
+            reason: str,
+        ) -> None:
+            if concept_id not in remediation_items:
+                remediation_order.append(concept_id)
+                remediation_items[concept_id] = []
+                remediation_reasons[concept_id] = reason
+            if item_id not in remediation_items[concept_id]:
+                remediation_items[concept_id].append(item_id)
+
+        rule_scored_instances = {
+            item.item_instance_id: item
+            for item in scoring_preparation_result.objective_item_instances
+        }
+        for audit in scoring_preparation_result.objective_audit_records:
+            if audit.total_score + 1e-9 >= audit.max_score:
+                continue
+            instance = rule_scored_instances.get(audit.item_instance_id)
+            if instance is None:
+                continue
+            for concept_id in instance.concept_ids:
+                add_remediation(
+                    concept_id,
+                    instance.item_id,
+                    "Review the concept linked to the incorrect exact-match answer.",
+                )
         for task in scoring_preparation_result.rubric_scoring_tasks:
             result = result_by_id[task.scoring_task_id]
             self._validate_rubric_result(task, result)
             review_reasons = list(result.review_flags)
             if (
                 result.confidence
-                < task.rubric.review_policy.low_confidence_threshold
+                < task.review_confidence_threshold
                 and "low_confidence" not in review_reasons
             ):
                 review_reasons.insert(0, "low_confidence")
             requires_review = bool(review_reasons)
+            criterion_scores = [
+                score.model_copy(deep=True) for score in result.criterion_scores
+            ]
+            warning = "ai评分置信度不足 建议通知相应教师进行重新评分"
+            if result.confidence < task.review_confidence_threshold and criterion_scores:
+                final = criterion_scores[-1]
+                if warning not in final.reason:
+                    criterion_scores[-1] = final.model_copy(
+                        update={"reason": f"{final.reason.rstrip('。；')}。{warning}"}
+                    )
             subjective_audits.append(
                 ScoreAuditRecord(
                     audit_id=(
@@ -505,10 +640,7 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
                     audit_version=1,
                     attempt_id=task.attempt_id,
                     item_instance_id=task.item_instance.item_instance_id,
-                    criterion_scores=[
-                        score.model_copy(deep=True)
-                        for score in result.criterion_scores
-                    ],
+                    criterion_scores=criterion_scores,
                     total_score=result.total_score,
                     max_score=task.max_score(),
                     confidence=result.confidence,
@@ -519,18 +651,22 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
                 )
             )
             for concept_id in result.missing_concept_ids:
-                if concept_id in targeted_concepts:
-                    continue
-                targeted_concepts.add(concept_id)
-                remediation_targets.append(
-                    RemediationTarget(
-                        concept_id=concept_id,
-                        misconception_id=None,
-                        priority=len(remediation_targets) + 1,
-                        recommended_item_ids=[task.item_instance.item_id],
-                        reason="Review the concept omitted from the scored answer.",
-                    )
+                add_remediation(
+                    concept_id,
+                    task.item_instance.item_id,
+                    "Review the concept omitted from the scored answer.",
                 )
+
+        remediation_targets = [
+            RemediationTarget(
+                concept_id=concept_id,
+                misconception_id=None,
+                priority=priority,
+                recommended_item_ids=remediation_items[concept_id],
+                reason=remediation_reasons[concept_id],
+            )
+            for priority, concept_id in enumerate(remediation_order, start=1)
+        ]
 
         audits = [
             *[
@@ -594,6 +730,8 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
         self,
         current_scoring_result_bundle: ScoringResultBundle,
         teacher_review_decision: TeacherReviewDecision,
+        *,
+        student_evidence: str | None = None,
     ) -> ScoringResultBundle:
         """Append one teacher override while retaining score history.
 
@@ -617,7 +755,14 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
                 CriterionScore(
                     criterion_id=score.criterion_id,
                     score=override_by_id[score.criterion_id].new_score,
-                    student_evidence=score.student_evidence,
+                    student_evidence=(
+                        score.student_evidence
+                        or (
+                            student_evidence or ""
+                            if override_by_id[score.criterion_id].new_score > 0.0
+                            else ""
+                        )
+                    ),
                     course_evidence_id=score.course_evidence_id,
                     reason=override_by_id[score.criterion_id].reason,
                 )

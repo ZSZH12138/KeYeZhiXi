@@ -6,7 +6,6 @@ from typing import Protocol
 
 from course_insight.contracts.learning_models import (
     BktModelArtifact,
-    ConceptResponseSequence,
     DinaModelArtifact,
     KnowledgeTraceSnapshot,
     LearningObservation,

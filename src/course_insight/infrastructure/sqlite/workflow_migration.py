@@ -339,6 +339,45 @@ ASSESSMENT_RUNS_V19_SQL = ASSESSMENT_RUNS_V18_SQL.replace(
     "operation IN ('start', 'submit', 'review')",
     "operation IN ('start', 'submit', 'review', 'rescore')",
 )
+ASSESSMENT_RUNS_V21_SQL = ASSESSMENT_RUNS_V19_SQL.replace(
+    "    previous_state_frozen INTEGER CHECK (",
+    """    class_roster_size INTEGER CHECK (
+        class_roster_size IS NULL OR class_roster_size > 0
+    ),
+    class_roster_checksum TEXT CHECK (
+        class_roster_checksum IS NULL
+        OR (
+            length(class_roster_checksum) = 64
+            AND class_roster_checksum NOT GLOB '*[^0-9a-f]*'
+        )
+    ),
+    class_roster_captured_at TEXT CHECK (
+        class_roster_captured_at IS NULL
+        OR length(class_roster_captured_at) > 0
+    ),
+    previous_state_frozen INTEGER CHECK (""",
+).replace(
+    """    CHECK (
+        (previous_learner_snapshot_id IS NULL)
+        = (previous_learner_state_version IS NULL)
+    ),""",
+    """    CHECK (
+        (
+            class_roster_size IS NULL
+            AND class_roster_checksum IS NULL
+            AND class_roster_captured_at IS NULL
+        )
+        OR (
+            class_roster_size IS NOT NULL
+            AND class_roster_checksum IS NOT NULL
+            AND class_roster_captured_at IS NOT NULL
+        )
+    ),
+    CHECK (
+        (previous_learner_snapshot_id IS NULL)
+        = (previous_learner_state_version IS NULL)
+    ),""",
+)
 ASSESSMENT_RUNS_SUBMIT_INDEX_SQL = """
 CREATE UNIQUE INDEX m0_one_submit_per_paper
 ON m0_assessment_runs(paper_id)
@@ -641,6 +680,45 @@ def migrate_workflow_v18_to_v19(connection: sqlite3.Connection) -> None:
         """
     )
     connection.execute("DROP TABLE m0_assessment_runs_v18")
+    connection.execute(ASSESSMENT_RUNS_SUBMIT_INDEX_SQL)
+    connection.execute(ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL)
+    connection.execute(ASSESSMENT_RUNS_NONTERMINAL_RESCORE_INDEX_SQL)
+
+
+def migrate_workflow_v20_to_v21(connection: sqlite3.Connection) -> None:
+    """Freeze dynamic class-roster identity while retaining legacy rows."""
+
+    columns = {
+        str(row[1])
+        for row in connection.execute(
+            "PRAGMA table_info('m0_assessment_runs')"
+        ).fetchall()
+    }
+    if not columns or columns & {
+        "class_roster_size",
+        "class_roster_checksum",
+        "class_roster_captured_at",
+    }:
+        raise RuntimeError("M0 workflow v20 schema is incompatible")
+    connection.execute(
+        "DROP INDEX IF EXISTS m0_one_nonterminal_review_per_paper"
+    )
+    connection.execute(
+        "DROP INDEX IF EXISTS m0_one_nonterminal_rescore_per_paper"
+    )
+    connection.execute("DROP INDEX IF EXISTS m0_one_submit_per_paper")
+    connection.execute(
+        "ALTER TABLE m0_assessment_runs RENAME TO m0_assessment_runs_v20"
+    )
+    connection.execute(ASSESSMENT_RUNS_V21_SQL)
+    connection.execute(
+        f"""
+        INSERT INTO m0_assessment_runs({_WORKFLOW_COPY_NAMES})
+        SELECT {_WORKFLOW_COPY_NAMES}
+        FROM m0_assessment_runs_v20
+        """
+    )
+    connection.execute("DROP TABLE m0_assessment_runs_v20")
     connection.execute(ASSESSMENT_RUNS_SUBMIT_INDEX_SQL)
     connection.execute(ASSESSMENT_RUNS_NONTERMINAL_REVIEW_INDEX_SQL)
     connection.execute(ASSESSMENT_RUNS_NONTERMINAL_RESCORE_INDEX_SQL)

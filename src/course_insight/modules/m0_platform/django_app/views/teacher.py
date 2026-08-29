@@ -4,10 +4,13 @@ from __future__ import annotations
 
 import os
 from collections.abc import Mapping
+from dataclasses import dataclass, replace
+from decimal import Decimal
 
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.http import HttpRequest, HttpResponse, QueryDict
+from django.db.models import Q
+from django.http import Http404, HttpRequest, HttpResponse, QueryDict
 from django.shortcuts import redirect, render
 from django.utils import timezone
 from django.urls import reverse
@@ -20,7 +23,9 @@ from course_insight.contracts.assessment import (
     ScoringResultBundle,
 )
 from course_insight.contracts.errors import DomainError
+from course_insight.contracts.intelligence import LLMModelRef
 from course_insight.contracts.tasking import TaskPlan
+from course_insight.infrastructure.deepseek import DeepSeekClient
 from course_insight.infrastructure.deepseek_secrets import (
     public_deepseek_status,
     save_teacher_deepseek_settings,
@@ -42,20 +47,50 @@ from course_insight.modules.m0_platform.django_app.forms.deepseek import (
     DeepSeekSettingsForm,
 )
 from course_insight.modules.m0_platform.django_app.learning_projection import (
+    PROFILE_TASK_TYPES,
+    correction_records_view,
     project_finalized_assessment,
 )
+from course_insight.modules.m0_platform.django_app.suggested_review import (
+    sync_suggested_review_case,
+)
+from course_insight.modules.m0_platform.django_app.assessment_history import (
+    load_profile_assessment_history,
+)
+from course_insight.modules.m0_platform.django_app.assessment_evidence import (
+    evidence_index_for_assessment,
+)
+from course_insight.modules.m0_platform.django_app.class_roster import (
+    capture_profile_class_roster,
+)
+from course_insight.modules.m0_platform.django_app.assessment_feedback import (
+    QuestionFeedbackDetail,
+    question_feedback_details,
+    teacher_notes_for_attempt,
+)
 from course_insight.modules.m0_platform.django_app.models import (
+    ActorGrant,
     CourseClassWorkspace,
     CourseKnowledgeRelease,
     LearnerConceptMastery,
+    RoleName,
+    SuggestedTeacherReviewCase,
+    SuggestedTeacherReviewItem,
+    TeacherItemReviewNote,
     User,
 )
 from course_insight.modules.m0_platform.django_app.scoped_deepseek import (
+    ScopedDeepSeekSettings,
+    resolve_scoped_deepseek_settings,
     save_scoped_deepseek_settings,
     scoped_deepseek_status,
 )
+from course_insight.modules.m0_platform.django_app.teaching_advice import (
+    build_class_teaching_advice_prompt,
+)
 from course_insight.modules.m0_platform.django_app.forms.review import (
     SuggestionDecisionForm,
+    TeacherItemRescoreForm,
     TeacherReviewForm,
 )
 from course_insight.modules.m0_platform.django_app.forms.start import (
@@ -64,7 +99,6 @@ from course_insight.modules.m0_platform.django_app.forms.start import (
 )
 from course_insight.modules.m0_platform.django_app.views.viewmodels import (
     analytics_view,
-    audit_view,
     blueprint_section_purposes,
     criterion_caps,
     learner_review_view,
@@ -78,10 +112,6 @@ from course_insight.modules.m0_platform.blueprint_overlay import (
     overlay_path as blueprint_overlay_path,
     save_overlay,
 )
-from course_insight.modules.m0_platform.correction_records import (
-    load_records,
-    records_path,
-)
 from course_insight.modules.m0_platform.objective_answers import (
     bundle_with_overlays,
     overlay_path,
@@ -90,12 +120,28 @@ from course_insight.modules.m0_platform.objective_answers import (
 from course_insight.modules.m5_learner_class_state.update_policy import (
     StatePolicy,
 )
+from course_insight.modules.m5_learner_class_state.class_snapshot import (
+    ensure_current_class_learning_snapshot,
+)
 from course_insight.modules.m8_assessment_scoring.paper_generator import (
     PaperGenerator,
+)
+from course_insight.modules.m9_teacher_analytics.teaching_advice import (
+    TeachingAdviceResult,
+    generate_teaching_advice,
 )
 from course_insight.modules.m3_knowledge_bundle.release_compatibility import (
     knowledge_bundle_from_release,
 )
+
+
+@dataclass(frozen=True, slots=True)
+class TeacherQuestionReviewView:
+    """One question, current score, and exactly one bounded rescore action."""
+
+    detail: QuestionFeedbackDetail
+    form: TeacherItemRescoreForm | None
+    action_url: str | None
 
 
 @login_required
@@ -236,7 +282,7 @@ def lookup(request: HttpRequest) -> HttpResponse:
         )
     course_id = str(form.cleaned_data["course_id"])
     class_id = str(form.cleaned_data["class_id"])
-    paper_id = str(form.cleaned_data["paper_id"])
+    learner_id = str(form.cleaned_data["learner_account"])
     _authorize_teacher(
         request,
         "view_student_report",
@@ -244,10 +290,70 @@ def lookup(request: HttpRequest) -> HttpResponse:
         class_id=class_id,
     )
     return redirect(
-        "teacher-review-context",
+        "teacher-learner-review-list",
         course_id=course_id,
         class_id=class_id,
-        paper_id=paper_id,
+        learner_id=learner_id,
+    )
+
+
+@login_required
+@require_GET
+def review_list(
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+    learner_id: str,
+) -> HttpResponse:
+    """List every finalized assessment that currently affects this profile."""
+
+    _authorize_teacher(
+        request,
+        "view_student_report",
+        course_id=course_id,
+        class_id=class_id,
+    )
+    _authorize_teacher(
+        request,
+        "review_score",
+        course_id=course_id,
+        class_id=class_id,
+    )
+    learner = _require_active_student(
+        course_id=course_id,
+        class_id=class_id,
+        learner_id=learner_id,
+    )
+    coordinator = runtime.get_web_runtime().container.coordinator
+    history = load_profile_assessment_history(
+        course_id=course_id,
+        class_id=class_id,
+        learner=learner,
+        coordinator=coordinator,
+    )
+    review_entries = tuple(
+        replace(
+            item,
+            result_url=reverse(
+                "teacher-review-context",
+                kwargs={
+                    "course_id": course_id,
+                    "class_id": class_id,
+                    "paper_id": item.paper_id,
+                },
+            ),
+        )
+        for item in history
+    )
+    return render(
+        request,
+        "course_insight/teacher/review_list.html",
+        {
+            "course_id": course_id,
+            "class_id": class_id,
+            "learner": learner,
+            "assessment_history": review_entries,
+        },
     )
 
 
@@ -293,9 +399,124 @@ def class_context(
         course_id=course_id,
         class_id=class_id,
     )
+    return _render_class_context(
+        request,
+        course_id=course_id,
+        class_id=class_id,
+    )
+
+
+@login_required
+@require_POST
+def generate_class_teaching_advice(
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+) -> HttpResponse:
+    """Generate one teacher-requested advice text from the current M5 view."""
+
+    _authorize_teacher(
+        request,
+        "view_class_analytics",
+        course_id=course_id,
+        class_id=class_id,
+    )
+    web_runtime = runtime.get_web_runtime()
+    course = web_runtime.require_course(course_id)
+    flow = _single_flow_value(request.POST)
+    verify_flow_token(
+        flow,
+        purpose="teacher_teaching_advice",
+        actor_id=request.user.actor_id,
+        course_id=course_id,
+        class_id=class_id,
+        max_age_seconds=(
+            web_runtime.container.settings.web.session_timeout_seconds
+        ),
+    )
+    settings = resolve_scoped_deepseek_settings(course_id, class_id)
+    if settings is None:
+        return _render_class_context(
+            request,
+            course_id=course_id,
+            class_id=class_id,
+            teaching_advice_error=(
+                "教师尚未为当前课程班级配置 DeepSeek API，暂不能生成教学建议。"
+            ),
+        )
+    class_snapshot = ensure_current_class_learning_snapshot(
+        course_id=course_id,
+        class_id=class_id,
+    )
+    if class_snapshot is None:
+        return _render_class_context(
+            request,
+            course_id=course_id,
+            class_id=class_id,
+            teaching_advice_error=(
+                "当前没有可同步的课程知识版本，暂不能生成教学建议。"
+            ),
+        )
+    try:
+        prompt = build_class_teaching_advice_prompt(
+            snapshot=class_snapshot,
+            weak_mastery_threshold=_class_weak_mastery_threshold(course),
+        )
+        teaching_advice = generate_teaching_advice(
+            client=_teaching_advice_client(settings),
+            prompt=prompt,
+            model_ref=LLMModelRef(
+                model_name=settings.model_name,
+                model_version="runtime-api",
+                status="configured",
+            ),
+            created_at=timezone.now(),
+        )
+    except ValueError:
+        return _render_class_context(
+            request,
+            course_id=course_id,
+            class_id=class_id,
+            teaching_advice_error=(
+                "当前没有已做且掌握度低于巩固线的知识点，暂不生成建议。"
+            ),
+        )
+    except DomainError:
+        return _render_class_context(
+            request,
+            course_id=course_id,
+            class_id=class_id,
+            teaching_advice_error=(
+                "教学建议服务暂时不可用，请稍后重试；课程材料和学习画像不会受到影响。"
+            ),
+        )
+    return _render_class_context(
+        request,
+        course_id=course_id,
+        class_id=class_id,
+        teaching_advice=teaching_advice,
+    )
+
+
+def _render_class_context(
+    request: HttpRequest,
+    *,
+    course_id: str,
+    class_id: str,
+    teaching_advice: TeachingAdviceResult | None = None,
+    teaching_advice_error: str | None = None,
+) -> HttpResponse:
+    """Render the class dashboard from the latest M5 snapshot and M9 view."""
+
     web_runtime = runtime.get_web_runtime()
     course = web_runtime.require_course(course_id)
     bundle = _knowledge_bundle(course)
+    # M5 rebuilds only when profile counters, the active roster, or the active
+    # release changed.  M9's teacher presentation consumes this named view.
+    class_snapshot = ensure_current_class_learning_snapshot(
+        course_id=course_id,
+        class_id=class_id,
+    )
     analytics = None
     m9 = getattr(web_runtime.container, "m9_service", None)
     getter = getattr(m9, "get_latest_analytics", None) if m9 is not None else None
@@ -311,23 +532,21 @@ def class_context(
                 raw,
                 knowledge_bundle=bundle,
                 learner_states=learner_states,
-                records=load_records(records_path(course.state_policy_path)),
+                records=correction_records_view(
+                    course_id=course_id,
+                    class_id=class_id,
+                ),
                 course_id=course_id,
             )
-    suggestion_flow = None
-    if analytics is not None:
-        suggestion_flow = issue_flow_token(
-            purpose="teacher_suggestion",
+    advice_status = scoped_deepseek_status(course_id, class_id)
+    teaching_advice_flow = None
+    if class_snapshot is not None and advice_status.configured:
+        teaching_advice_flow = issue_flow_token(
+            purpose="teacher_teaching_advice",
             actor_id=request.user.actor_id,
             course_id=course_id,
             class_id=class_id,
         )
-    preview = _preview_paper(
-        bundle,
-        course_id=course_id,
-        class_id=class_id,
-        learner_id=request.user.actor_id,
-    )
     return render(
         request,
         "course_insight/teacher/class.html",
@@ -335,20 +554,17 @@ def class_context(
             "course_id": course_id,
             "class_id": class_id,
             "analytics": analytics,
-            "preview": (
-                None
-                if preview is None
-                else paper_view(
-                    preview,
-                    section_purposes=blueprint_section_purposes(
-                        bundle,
-                        preview.blueprint_id,
-                    ),
-                )
+            "class_snapshot": class_snapshot,
+            "teaching_advice": teaching_advice,
+            "teaching_advice_error": teaching_advice_error,
+            "teaching_advice_available": advice_status.configured,
+            "teaching_advice_flow": teaching_advice_flow,
+            "teaching_advice_url": reverse(
+                "teacher-class-teaching-advice",
+                kwargs={"course_id": course_id, "class_id": class_id},
             ),
-            "suggestion_flow": suggestion_flow,
-            "suggestion_url": reverse(
-                "teacher-class-suggestion",
+            "deepseek_settings_url": reverse(
+                "teacher-deepseek-settings",
                 kwargs={"course_id": course_id, "class_id": class_id},
             ),
             "objective_answers_url": reverse(
@@ -357,6 +573,15 @@ def class_context(
             ),
             "blueprint_url": reverse(
                 "teacher-blueprint",
+                kwargs={"course_id": course_id, "class_id": class_id},
+            ),
+            "suggested_review_count": SuggestedTeacherReviewCase.objects.filter(
+                workspace__course_id=course_id,
+                workspace__class_id=class_id,
+                status=SuggestedTeacherReviewCase.Status.OPEN,
+            ).count(),
+            "suggested_review_url": reverse(
+                "teacher-suggested-review-list",
                 kwargs={"course_id": course_id, "class_id": class_id},
             ),
             "lookup_form": ReviewLookupForm(
@@ -389,18 +614,49 @@ def review_context(
         course_id=course_id,
         class_id=class_id,
     )
+    _authorize_teacher(
+        request,
+        "review_score",
+        course_id=course_id,
+        class_id=class_id,
+    )
     response = _teacher_context(
         course_id=course_id,
         class_id=class_id,
         paper_id=paper_id,
     )
+    web_runtime = runtime.get_web_runtime()
+    course = web_runtime.require_course(course_id)
     paper = _contract(response, "assessment_paper", AssessmentPaper)
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
+    task_value = response.get("task_plan")
     waiting_status = response.get("waiting_status")
     analytics = None
     if "analytics" in response:
         analytics = _contract(response, "analytics", TeacherAnalyticsBundle)
+    class_snapshot = ensure_current_class_learning_snapshot(
+        course_id=course_id,
+        class_id=class_id,
+    )
     current_audits = _current_audits(scoring)
+    # Keep the non-rendered legacy link collection for older internal
+    # integrations.  The template deliberately exposes only one item-level
+    # rejudge action, as required by the current teacher workflow.
+    review_links = tuple(
+        (
+            audit,
+            reverse(
+                "teacher-review",
+                kwargs={
+                    "course_id": course_id,
+                    "class_id": class_id,
+                    "paper_id": paper_id,
+                    "audit_id": audit.audit_id,
+                },
+            ),
+        )
+        for audit in current_audits
+    )
     rejected = next(
         (audit for audit in current_audits if audit.is_rejected()),
         None,
@@ -416,46 +672,30 @@ def review_context(
             audit_id=rejected.audit_id,
             audit_version=rejected.audit_version,
         )
-    review_links = tuple(
-        (
-            audit_view(audit),
-            reverse(
-                "teacher-review",
-                kwargs={
-                    "course_id": course_id,
-                    "class_id": class_id,
-                    "paper_id": paper_id,
-                    "audit_id": audit.audit_id,
-                },
-            ),
-        )
-        for audit in current_audits
+    question_reviews = _question_review_views(
+        course=course,
+        task=task_value,
+        paper=paper,
+        scoring=scoring,
+        coordinator=web_runtime.container.coordinator,
+        reviewer_id=request.user.actor_id,
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
     )
-    suggestion_flow = None
-    if analytics is not None:
-        suggestion_flow = issue_flow_token(
-            purpose="teacher_suggestion",
-            actor_id=request.user.actor_id,
-            course_id=course_id,
-            class_id=class_id,
-        )
     return render(
         request,
         "course_insight/teacher/context.html",
         {
+            "course_id": course_id,
+            "class_id": class_id,
             "paper": paper_view(paper),
             "analytics": None if analytics is None else analytics_view(analytics),
+            "class_snapshot": class_snapshot,
+            "question_reviews": question_reviews,
             "review_links": review_links,
             "waiting_status": waiting_status,
             "rescore_flow": rescore_flow,
-            "suggestion_flow": suggestion_flow,
-            "suggestion_url": reverse(
-                "teacher-class-suggestion",
-                kwargs={
-                    "course_id": course_id,
-                    "class_id": class_id,
-                },
-            ),
             "rescore_url": reverse(
                 "teacher-rescore",
                 kwargs={
@@ -466,6 +706,346 @@ def review_context(
             ),
         },
     )
+
+
+@login_required
+@require_GET
+def suggested_review_list(
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+) -> HttpResponse:
+    """Show one grouped queue row per profile-affecting attempt and paper."""
+
+    for permission in (
+        "view_class_analytics",
+        "view_student_report",
+        "review_score",
+    ):
+        _authorize_teacher(
+            request,
+            permission,
+            course_id=course_id,
+            class_id=class_id,
+        )
+    cases = tuple(
+        SuggestedTeacherReviewCase.objects.filter(
+            workspace__course_id=course_id,
+            workspace__class_id=class_id,
+            status=SuggestedTeacherReviewCase.Status.OPEN,
+        )
+        .select_related("learner")
+        .prefetch_related("items")
+        .order_by("attempted_at", "pk")
+    )
+    rows = tuple(
+        {
+            "case": case,
+            "question_ids": tuple(
+                item.item_instance_id
+                for item in case.items.all()
+                if item.status == SuggestedTeacherReviewItem.Status.OPEN
+            ),
+            "detail_url": reverse(
+                "teacher-suggested-review-detail",
+                kwargs={
+                    "course_id": course_id,
+                    "class_id": class_id,
+                    "case_id": case.pk,
+                },
+            ),
+        }
+        for case in cases
+    )
+    return render(
+        request,
+        "course_insight/teacher/suggested_review_list.html",
+        {"course_id": course_id, "class_id": class_id, "rows": rows},
+    )
+
+
+@login_required
+@require_GET
+def suggested_review_detail(
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+    case_id: int,
+) -> HttpResponse:
+    """Show only the low-confidence questions grouped in one queue case."""
+
+    for permission in (
+        "view_class_analytics",
+        "view_student_report",
+        "review_score",
+    ):
+        _authorize_teacher(
+            request,
+            permission,
+            course_id=course_id,
+            class_id=class_id,
+        )
+    case = (
+        SuggestedTeacherReviewCase.objects.filter(
+            pk=case_id,
+            workspace__course_id=course_id,
+            workspace__class_id=class_id,
+            status__in=(
+                SuggestedTeacherReviewCase.Status.OPEN,
+                SuggestedTeacherReviewCase.Status.RESOLVED,
+            ),
+        )
+        .select_related("learner")
+        .first()
+    )
+    if case is None:
+        raise Http404("suggested review case is unavailable")
+    web_runtime = runtime.get_web_runtime()
+    response = _teacher_context(
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=case.paper_id,
+    )
+    task = response.get("task_plan")
+    paper = _contract(response, "assessment_paper", AssessmentPaper)
+    scoring = _contract(response, "scoring_result", ScoringResultBundle)
+    if scoring.attempt_id != case.attempt_id or paper.learner_id != case.learner.actor_id:
+        raise Http404("suggested review case no longer matches the assessment")
+    all_rows = _question_review_views(
+        course=web_runtime.require_course(course_id),
+        task=task,
+        paper=paper,
+        scoring=scoring,
+        coordinator=web_runtime.container.coordinator,
+        reviewer_id=request.user.actor_id,
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=case.paper_id,
+    )
+    open_ids = set(
+        case.items.filter(
+            status=SuggestedTeacherReviewItem.Status.OPEN
+        ).values_list("item_instance_id", flat=True)
+    )
+    question_reviews = tuple(
+        replace(
+            row,
+            action_url=(
+                f"{row.action_url}?suggested_case_id={case.pk}"
+                if row.action_url is not None
+                else None
+            ),
+        )
+        for row in all_rows
+        if row.detail.item_instance_id in open_ids
+    )
+    return render(
+        request,
+        "course_insight/teacher/suggested_review_detail.html",
+        {
+            "course_id": course_id,
+            "class_id": class_id,
+            "case": case,
+            "question_reviews": question_reviews,
+            "review_complete": not open_ids,
+        },
+    )
+
+
+@login_required
+@require_POST
+def item_rescore(
+    request: HttpRequest,
+    course_id: str,
+    class_id: str,
+    paper_id: str,
+    item_instance_id: str,
+) -> HttpResponse:
+    """Apply a teacher's single bounded score for one item and resync state."""
+
+    for permission in (
+        "view_class_analytics",
+        "view_student_report",
+        "review_score",
+    ):
+        _authorize_teacher(
+            request,
+            permission,
+            course_id=course_id,
+            class_id=class_id,
+        )
+    suggested_case = _suggested_case_for_rescore(
+        request,
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
+        item_instance_id=item_instance_id,
+    )
+    web_runtime = runtime.get_web_runtime()
+    course = web_runtime.require_course(course_id)
+    response = _teacher_context(
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
+    )
+    paper = _contract(response, "assessment_paper", AssessmentPaper)
+    scoring = _contract(response, "scoring_result", ScoringResultBundle)
+    audit = _audit_for_item(scoring, item_instance_id)
+    if audit is None:
+        raise Http404("assessment item is not available for review")
+    flow = _single_flow_value(request.POST)
+    verified = verify_flow_token(
+        flow,
+        purpose="teacher_item_rescore",
+        actor_id=request.user.actor_id,
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
+        audit_id=audit.audit_id,
+        audit_version=audit.audit_version,
+        max_age_seconds=(
+            web_runtime.container.settings.web.session_timeout_seconds
+        ),
+    )
+    task_value = response.get("task_plan")
+    assessment_bundle = _assessment_bundle(
+        course,
+        task_value,
+        course_id=course_id,
+        class_id=class_id,
+    )
+    index_ref = evidence_index_for_assessment(
+        web_runtime,
+        course,
+        task=task_value,
+        knowledge_bundle=assessment_bundle,
+        course_id=course_id,
+        class_id=class_id,
+    )
+    form = TeacherItemRescoreForm(
+        audit=audit,
+        reviewer_id=request.user.actor_id,
+        criterion_caps=criterion_caps(
+            paper=paper,
+            audit=audit,
+            knowledge_bundle=assessment_bundle,
+        ),
+        data=request.POST,
+    )
+    if not form.is_valid():
+        return render(
+            request,
+            "course_insight/teacher/review.html",
+            {
+                "review": teacher_review_view(
+                    paper,
+                    audit,
+                    (
+                        None
+                        if "analytics" not in response
+                        else _contract(
+                            response,
+                            "analytics",
+                            TeacherAnalyticsBundle,
+                        )
+                    ),
+                ),
+                "form": form,
+                "flow": flow,
+            },
+            status=400,
+        )
+    submission = form.to_submission(
+        submission_id=stable_flow_identifier("item-review", flow),
+        submitted_at=flow_issued_at(verified),
+    )
+    student_evidence = _frozen_student_evidence(
+        web_runtime.container.coordinator,
+        scoring.attempt_id,
+        item_instance_id,
+    )
+    class_roster_snapshot = capture_profile_class_roster(
+        course_id=course_id,
+        class_id=class_id,
+        learner_id=paper.learner_id,
+    )
+    with bind_log_context(
+        course_id=course_id,
+        class_id=class_id,
+        attempt_id=scoring.attempt_id,
+    ):
+        web_runtime.container.coordinator.review_assessment(
+            paper_id=paper_id,
+            review_submission=submission,
+            request_id=stable_flow_identifier("item-review-request", flow),
+            knowledge_bundle=assessment_bundle,
+            state_policy_path=course.state_policy_path,
+            teacher_threshold_policy_path=course.teacher_threshold_policy_path,
+            course_id=course_id,
+            class_id=class_id,
+            index_ref=index_ref,
+            class_roster_snapshot=class_roster_snapshot,
+            student_evidence=student_evidence,
+        )
+    _record_item_rescore_and_projection(
+        web_runtime=web_runtime,
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
+        item_instance_id=item_instance_id,
+        teacher=request.user,
+        teacher_note=str(form.cleaned_data.get("teacher_note") or ""),
+    )
+    if suggested_case is not None:
+        return redirect(
+            "teacher-suggested-review-detail",
+            course_id=course_id,
+            class_id=class_id,
+            case_id=suggested_case.pk,
+        )
+    return redirect(
+        "teacher-review-context",
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
+    )
+
+
+def _suggested_case_for_rescore(
+    request: HttpRequest,
+    *,
+    course_id: str,
+    class_id: str,
+    paper_id: str,
+    item_instance_id: str,
+) -> SuggestedTeacherReviewCase | None:
+    """Resolve a bounded queue origin without accepting an arbitrary redirect."""
+
+    values = request.GET.getlist("suggested_case_id")
+    if not values:
+        return None
+    if len(values) != 1:
+        raise Http404("suggested review origin is invalid")
+    try:
+        case_id = int(values[0])
+    except (TypeError, ValueError):
+        raise Http404("suggested review origin is invalid") from None
+    if case_id < 1:
+        raise Http404("suggested review origin is invalid")
+    case = (
+        SuggestedTeacherReviewCase.objects.filter(
+            pk=case_id,
+            workspace__course_id=course_id,
+            workspace__class_id=class_id,
+            paper_id=paper_id,
+            items__item_instance_id=item_instance_id,
+        )
+        .distinct()
+        .first()
+    )
+    if case is None:
+        raise Http404("suggested review origin is unavailable")
+    return case
 
 
 @login_required
@@ -508,6 +1088,14 @@ def review(
     assessment_bundle = _assessment_bundle(
         course,
         task_value,
+        course_id=course_id,
+        class_id=class_id,
+    )
+    index_ref = evidence_index_for_assessment(
+        web_runtime,
+        course,
+        task=task_value,
+        knowledge_bundle=assessment_bundle,
         course_id=course_id,
         class_id=class_id,
     )
@@ -579,6 +1167,11 @@ def review(
         submission_id=stable_flow_identifier("review", flow),
         submitted_at=flow_issued_at(verified),
     )
+    class_roster_snapshot = capture_profile_class_roster(
+        course_id=course_id,
+        class_id=class_id,
+        learner_id=paper.learner_id,
+    )
     with bind_log_context(course_id=course_id, class_id=class_id):
         web_runtime.container.coordinator.review_assessment(
             paper_id=paper_id,
@@ -591,7 +1184,8 @@ def review(
             ),
             course_id=course_id,
             class_id=class_id,
-            index_ref=course.course_context.evidence_index_ref,
+            index_ref=index_ref,
+            class_roster_snapshot=class_roster_snapshot,
         )
     refreshed = _teacher_context(
         course_id=course_id,
@@ -608,6 +1202,14 @@ def review(
         and type(refreshed_paper) is AssessmentPaper
         and type(refreshed_scoring) is ScoringResultBundle
     ):
+        sync_suggested_review_case(
+            course_id=course_id,
+            class_id=class_id,
+            learner=learner,
+            task=refreshed_task,
+            paper=refreshed_paper,
+            scoring=refreshed_scoring,
+        )
         project_finalized_assessment(
             course_id=course_id,
             class_id=class_id,
@@ -862,7 +1464,11 @@ def learner(
         learner_id=learner_id,
         knowledge_bundle=bundle,
         snapshot=snapshot,
-        records=load_records(records_path(course.state_policy_path)),
+        records=correction_records_view(
+            course_id=course_id,
+            class_id=class_id,
+            learner_id=learner_id,
+        ),
         mastered_threshold=mastered,
         consolidating_threshold=consolidating,
         misconception_activation_threshold=misconception,
@@ -1024,6 +1630,14 @@ def rescore(
         course_id=course_id,
         class_id=class_id,
     )
+    index_ref = evidence_index_for_assessment(
+        web_runtime,
+        course,
+        task=task_value,
+        knowledge_bundle=assessment_bundle,
+        course_id=course_id,
+        class_id=class_id,
+    )
     rejected = next(
         (audit for audit in _current_audits(scoring) if audit.is_rejected()),
         None,
@@ -1052,6 +1666,11 @@ def rescore(
     submission = web_runtime.container.coordinator.frozen_assessment_submission(
         scoring.attempt_id
     )
+    class_roster_snapshot = capture_profile_class_roster(
+        course_id=course_id,
+        class_id=class_id,
+        learner_id=submission.learner_id,
+    )
     with bind_log_context(
         course_id=course_id,
         class_id=class_id,
@@ -1063,10 +1682,11 @@ def rescore(
             expected_rejected_version=rejected.audit_version,
             rescore_request_id=stable_flow_identifier("rescore", flow),
             request_id=stable_flow_identifier("rescore-request", flow),
-            index_ref=course.course_context.evidence_index_ref,
+            index_ref=index_ref,
             knowledge_bundle=assessment_bundle,
             state_policy_path=course.state_policy_path,
             teacher_threshold_policy_path=course.teacher_threshold_policy_path,
+            class_roster_snapshot=class_roster_snapshot,
         )
     return redirect(
         "teacher-review-context",
@@ -1082,7 +1702,7 @@ def _teacher_context(
     class_id: str,
     paper_id: str,
 ) -> Mapping[str, object]:
-    return (
+    response = (
         runtime.get_web_runtime()
         .container.coordinator.get_teacher_review_context(
             paper_id=paper_id,
@@ -1090,6 +1710,22 @@ def _teacher_context(
             class_id=class_id,
         )
     )
+    task = response.get("task_plan")
+    environment = getattr(
+        runtime.get_web_runtime().container.settings,
+        "environment",
+        None,
+    )
+    if (
+        type(task) is TaskPlan
+        and task.task_type not in PROFILE_TASK_TYPES
+    ) or (
+        type(task) is not TaskPlan
+        and environment is not None
+        and environment != "test"
+    ):
+        raise Http404("only profile-affecting assessments can be reviewed")
+    return response
 
 
 def _authorize_teacher(
@@ -1105,6 +1741,34 @@ def _authorize_teacher(
         course_id=course_id,
         class_id=class_id,
     )
+
+
+def _require_active_student(
+    *,
+    course_id: str,
+    class_id: str,
+    learner_id: str,
+) -> User:
+    """Resolve an account only through the current exact student roster."""
+
+    now = timezone.now()
+    grant = (
+        ActorGrant.objects.select_related("user")
+        .filter(
+            user__actor_id=learner_id,
+            role=RoleName.STUDENT,
+            course_id=course_id,
+            class_id=class_id,
+            is_active=True,
+            revoked_at__isnull=True,
+            valid_from__lte=now,
+        )
+        .filter(Q(valid_until__isnull=True) | Q(valid_until__gt=now))
+        .first()
+    )
+    if grant is None:
+        raise Http404("student account is not active in this class")
+    return grant.user
 
 
 def _verify_review(
@@ -1288,12 +1952,15 @@ def _list_learner_states(web_runtime, *, course_id: str, class_id: str):
 
 
 def _preview_paper(bundle, *, course_id: str, class_id: str, learner_id: str):
+    """Preview only inside the blueprint editor, never on the class dashboard."""
+
     approved = [
         blueprint
         for blueprint in bundle.blueprints
         if (
             blueprint.course_id == course_id
-            and " ".join(blueprint.status.split()).casefold() == "teacher_approved"
+            and " ".join(blueprint.status.split()).casefold()
+            == "teacher_approved"
         )
     ]
     if not approved:
@@ -1317,3 +1984,226 @@ def _preview_paper(bundle, *, course_id: str, class_id: str, learner_id: str):
         return PaperGenerator().generate(plan, bundle, None, None)
     except DomainError:
         return None
+
+
+def _question_review_views(
+    *,
+    course,
+    task: object,
+    paper: AssessmentPaper,
+    scoring: ScoringResultBundle,
+    coordinator: object,
+    reviewer_id: str,
+    course_id: str,
+    class_id: str,
+    paper_id: str,
+) -> tuple[TeacherQuestionReviewView, ...]:
+    """Project one teacher-rescore form for each current paper item."""
+
+    if type(task) is not TaskPlan:
+        return ()
+    assessment_bundle = _assessment_bundle(
+        course,
+        task,
+        course_id=course_id,
+        class_id=class_id,
+    )
+    audits = {audit.item_instance_id: audit for audit in _current_audits(scoring)}
+    answers = _frozen_answers_for_attempt(coordinator, scoring.attempt_id)
+    details = question_feedback_details(
+        task=task,
+        paper=paper,
+        scoring=scoring,
+        answers=answers,
+        teacher_notes=teacher_notes_for_attempt(scoring.attempt_id),
+    )
+    rows: list[TeacherQuestionReviewView] = []
+    for detail in details:
+        audit = audits.get(detail.item_instance_id)
+        if audit is None:
+            rows.append(
+                TeacherQuestionReviewView(
+                    detail=detail,
+                    form=None,
+                    action_url=None,
+                )
+            )
+            continue
+        flow = issue_flow_token(
+            purpose="teacher_item_rescore",
+            actor_id=reviewer_id,
+            course_id=course_id,
+            class_id=class_id,
+            paper_id=paper_id,
+            audit_id=audit.audit_id,
+            audit_version=audit.audit_version,
+        )
+        form = TeacherItemRescoreForm(
+            audit=audit,
+            reviewer_id=reviewer_id,
+            criterion_caps=criterion_caps(
+                paper=paper,
+                audit=audit,
+                knowledge_bundle=assessment_bundle,
+            ),
+            initial={
+                "score": audit.total_score,
+                "teacher_note": detail.teacher_note,
+                "flow_token": flow,
+            },
+        )
+        rows.append(
+            TeacherQuestionReviewView(
+                detail=detail,
+                form=form,
+                action_url=reverse(
+                    "teacher-item-rescore",
+                    kwargs={
+                        "course_id": course_id,
+                        "class_id": class_id,
+                        "paper_id": paper_id,
+                        "item_instance_id": detail.item_instance_id,
+                    },
+                ),
+            )
+        )
+    return tuple(rows)
+
+
+def _frozen_answers_for_attempt(
+    coordinator: object,
+    attempt_id: str,
+) -> dict[str, object]:
+    loader = getattr(coordinator, "frozen_assessment_submission", None)
+    if not callable(loader):
+        return {}
+    try:
+        submission = loader(attempt_id)
+    except (DomainError, TypeError, ValueError):
+        return {}
+    answers = getattr(submission, "answers", None)
+    return dict(answers) if isinstance(answers, Mapping) else {}
+
+
+def _frozen_student_evidence(
+    coordinator: object,
+    attempt_id: str,
+    item_instance_id: str,
+) -> str | None:
+    """Return the server-owned submitted answer used by a positive override."""
+
+    value = _frozen_answers_for_attempt(coordinator, attempt_id).get(
+        item_instance_id
+    )
+    if isinstance(value, str):
+        normalized = value.strip()
+        return normalized or None
+    if isinstance(value, bool):
+        return "是" if value else "否"
+    if type(value) in {int, float}:
+        return str(value)
+    return None
+
+
+def _audit_for_item(
+    scoring: ScoringResultBundle,
+    item_instance_id: str,
+) -> ScoreAuditRecord | None:
+    return next(
+        (
+            audit
+            for audit in _current_audits(scoring)
+            if audit.item_instance_id == item_instance_id
+        ),
+        None,
+    )
+
+
+def _record_item_rescore_and_projection(
+    *,
+    web_runtime,
+    course_id: str,
+    class_id: str,
+    paper_id: str,
+    item_instance_id: str,
+    teacher: User,
+    teacher_note: str,
+) -> None:
+    """Persist the visible note and fan the finalized score into M0→M5→M9."""
+
+    refreshed = _teacher_context(
+        course_id=course_id,
+        class_id=class_id,
+        paper_id=paper_id,
+    )
+    task = refreshed.get("task_plan")
+    paper = refreshed.get("assessment_paper")
+    scoring = refreshed.get("scoring_result")
+    if not (
+        type(task) is TaskPlan
+        and type(paper) is AssessmentPaper
+        and type(scoring) is ScoringResultBundle
+    ):
+        return
+    learner = User.objects.filter(actor_id=paper.learner_id).first()
+    audit = _audit_for_item(scoring, item_instance_id)
+    if learner is None or audit is None:
+        return
+    sync_suggested_review_case(
+        course_id=course_id,
+        class_id=class_id,
+        learner=learner,
+        task=task,
+        paper=paper,
+        scoring=scoring,
+    )
+    project_finalized_assessment(
+        course_id=course_id,
+        class_id=class_id,
+        learner=learner,
+        task=task,
+        paper=paper,
+        scoring=scoring,
+    )
+    workspace, _ = CourseClassWorkspace.objects.get_or_create(
+        course_id=course_id,
+        class_id=class_id,
+    )
+    TeacherItemReviewNote.objects.get_or_create(
+        attempt_id=scoring.attempt_id,
+        item_instance_id=item_instance_id,
+        audit_version=audit.audit_version,
+        defaults={
+            "workspace": workspace,
+            "learner": learner,
+            "reviewed_by": teacher,
+            "paper_id": paper.paper_id,
+            "audit_id": audit.audit_id,
+            "score": Decimal(str(audit.total_score)).quantize(
+                Decimal("0.001")
+            ),
+            "max_score": Decimal(str(audit.max_score)).quantize(
+                Decimal("0.001")
+            ),
+            "teacher_note": teacher_note.strip(),
+        },
+    )
+
+
+def _class_weak_mastery_threshold(course) -> float:
+    """Use the same consolidation boundary that drives student weak status."""
+
+    return StatePolicy.from_path(course.state_policy_path).consolidating_threshold
+
+
+def _teaching_advice_client(settings: ScopedDeepSeekSettings) -> DeepSeekClient:
+    """Build one bounded client from the exact course/class secret only."""
+
+    return DeepSeekClient(
+        api_key=settings.api_key,
+        model_name=settings.model_name,
+        thinking_enabled=settings.thinking_enabled,
+        temperature=0.0,
+        max_tokens=900,
+        max_attempts=3,
+    )

@@ -262,6 +262,152 @@ def _identifier_digest(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:24]
 
 
+class TeacherItemRescoreForm(forms.Form):
+    """One bounded item score for the simplified teacher review workflow."""
+
+    score = forms.FloatField(min_value=0.0)
+    teacher_note = forms.CharField(
+        required=False,
+        max_length=_MAX_REASON_LENGTH,
+        strip=True,
+        widget=forms.Textarea,
+    )
+    flow_token = forms.CharField(
+        min_length=1,
+        max_length=2_048,
+        strip=True,
+        widget=forms.HiddenInput,
+    )
+
+    def __init__(
+        self,
+        *,
+        audit: ScoreAuditRecord,
+        reviewer_id: str,
+        criterion_caps: Mapping[str, float],
+        data=None,
+        **kwargs,
+    ) -> None:
+        audit.validate_business_rules()
+        if not reviewer_id:
+            raise ValueError("reviewer identity is required")
+        current_ids = tuple(
+            criterion.criterion_id for criterion in audit.criterion_scores
+        )
+        if set(criterion_caps) != set(current_ids):
+            raise ValueError("criterion score caps are incomplete")
+        normalized: dict[str, float] = {}
+        for criterion_id, cap in criterion_caps.items():
+            if (
+                type(cap) not in {int, float}
+                or not math.isfinite(float(cap))
+                or float(cap) < 0.0
+            ):
+                raise ValueError("criterion score cap is invalid")
+            normalized[criterion_id] = float(cap)
+        if not math.isclose(
+            math.fsum(normalized.values()),
+            audit.max_score,
+            rel_tol=0.0,
+            abs_tol=_SCORE_TOLERANCE,
+        ):
+            raise ValueError("criterion score caps do not match audit maximum")
+        self._audit = audit.model_copy(deep=True)
+        self._reviewer_id = reviewer_id
+        self._criterion_caps = MappingProxyType(normalized)
+        super().__init__(data=data, **kwargs)
+        self.fields["score"].max_value = self._audit.max_score
+
+    def clean(self) -> dict[str, object]:
+        cleaned = super().clean()
+        if self.is_bound:
+            allowed = {*self.fields, "csrfmiddlewaretoken"}
+            if set(self.data) - allowed:
+                raise forms.ValidationError("Unexpected form field.")
+            getlist = getattr(self.data, "getlist", None)
+            if callable(getlist):
+                for field_name in self.fields:
+                    if len(getlist(field_name)) != 1:
+                        self.add_error(
+                            field_name,
+                            "Submit each field exactly once.",
+                        )
+        score = cleaned.get("score")
+        if type(score) is float and not math.isfinite(score):
+            self.add_error("score", "Enter a finite number.")
+        elif type(score) in {int, float} and float(score) > self._audit.max_score:
+            self.add_error("score", "Score exceeds the item maximum.")
+        return cleaned
+
+    def to_submission(
+        self,
+        *,
+        submission_id: str,
+        submitted_at: datetime,
+    ) -> TeacherReviewSubmission:
+        if not self.is_valid():
+            raise ValueError("teacher item rescore form is invalid")
+        score = float(self.cleaned_data["score"])
+        note = str(self.cleaned_data.get("teacher_note") or "").strip()
+        comment = note or "教师题目级改判（未填写备注）。"
+        overrides = self._overrides(score=score, reason=comment)
+        submission = TeacherReviewSubmission(
+            submission_id=submission_id,
+            audit_id=self._audit.audit_id,
+            expected_audit_version=self._audit.audit_version,
+            expected_audit_checksum=self._audit.content_checksum(),
+            reviewer_id=self._reviewer_id,
+            decision="override",
+            final_total_score=score,
+            criterion_overrides=overrides,
+            teacher_comment=comment,
+            submitted_at=submitted_at,
+        )
+        decision = TeacherReviewDecision(
+            decision_id=submission.submission_id,
+            audit_id=submission.audit_id,
+            expected_audit_version=submission.expected_audit_version,
+            expected_audit_checksum=submission.expected_audit_checksum,
+            decision=submission.decision,
+            final_total_score=submission.final_total_score,
+            criterion_overrides=[item.model_copy(deep=True) for item in overrides],
+            teacher_comment=submission.teacher_comment,
+            reviewer_id=submission.reviewer_id,
+            reviewed_at=submission.submitted_at,
+        )
+        decision.validate_business_rules()
+        decision.assert_matches(self._audit)
+        return submission.model_copy(deep=True)
+
+    def _overrides(
+        self,
+        *,
+        score: float,
+        reason: str,
+    ) -> list[CriterionOverride]:
+        total_cap = math.fsum(self._criterion_caps.values())
+        remaining = score
+        overrides: list[CriterionOverride] = []
+        criteria = tuple(self._audit.criterion_scores)
+        for index, criterion in enumerate(criteria):
+            if index == len(criteria) - 1:
+                allocated = remaining
+            else:
+                allocated = score * (
+                    self._criterion_caps[criterion.criterion_id] / total_cap
+                )
+                remaining -= allocated
+            overrides.append(
+                CriterionOverride(
+                    criterion_id=criterion.criterion_id,
+                    previous_score=criterion.score,
+                    new_score=allocated,
+                    reason=reason,
+                )
+            )
+        return overrides
+
+
 class SuggestionDecisionForm(forms.Form):
     """Validate a teacher decision on one candidate teaching suggestion."""
 

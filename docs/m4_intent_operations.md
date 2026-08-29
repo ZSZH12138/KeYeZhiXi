@@ -96,8 +96,8 @@ course_package_id, blueprint_id`。所以不同 hint/文本可产生不同的私
 只说明示例管线可运行，不能作为真实学生数据的效果、上线或门禁证据。
 
 ```powershell
-& 'D:\software\MyAnaconda\envs\course_insight_m4_intent_20260726\python.exe' -m pip install --constraint requirements/ci-constraints.txt -e '.[intent]'
-& 'D:\software\MyAnaconda\envs\course_insight_m4_intent_20260726\python.exe' scripts/train_m4_intent.py --input data/m4_intent/example.jsonl --runtime-dir runtime --output-dir runtime/models/m4_intent/m4-intent-sample/1.0.0 --model-id m4-intent-sample --model-version 1.0.0 --seed 17 --min-confidence 0.70 --min-margin 0.10
+python -m pip install --constraint requirements/ci-constraints.txt -e '.[intent]'
+python scripts/train_m4_intent.py --input data/m4_intent/example.jsonl --runtime-dir runtime --output-dir runtime/models/m4_intent/m4-intent-sample/1.0.0 --model-id m4-intent-sample --model-version 1.0.0 --seed 17 --min-confidence 0.70 --min-margin 0.10
 ```
 
 检查 `metrics.json` 的 train/validation/test 五任务 `task_macro_f1`、逐类指标、

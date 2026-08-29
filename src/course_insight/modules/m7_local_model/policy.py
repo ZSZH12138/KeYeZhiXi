@@ -8,10 +8,7 @@ from types import MappingProxyType
 from typing import Literal, Mapping
 
 
-ReviewSelectionMode = Literal["all_review", "shadow", "selective"]
-
 DEEPSEEK_MODEL_CATALOG_VERSION = "deepseek-v4-api-2026-04-24"
-M7_REVIEW_FEATURE_SCHEMA_VERSION = "m7-review-features-v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +59,7 @@ DEEPSEEK_MODEL_CANDIDATES: Mapping[
 class M7ExecutionPolicy:
     """Keep model, prompt, review, and output limits auditable as one policy."""
 
-    policy_version: str = "m7-governed-v2"
+    policy_version: str = "m7-governed-v3"
     model_catalog_version: str = DEEPSEEK_MODEL_CATALOG_VERSION
     model_name: str = "deepseek-v4-flash"
     model_version: str = "runtime-api"
@@ -72,8 +69,7 @@ class M7ExecutionPolicy:
     max_student_answer_characters: int = 24_000
     max_evidence_characters: int = 64_000
     max_scoring_reason_characters: int = 600
-    review_selection_mode: ReviewSelectionMode = "all_review"
-    review_feature_schema_version: str = M7_REVIEW_FEATURE_SCHEMA_VERSION
+    format_retry_count: int = 8
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -81,7 +77,6 @@ class M7ExecutionPolicy:
             "model_catalog_version",
             "model_name",
             "model_version",
-            "review_feature_schema_version",
         ):
             value = getattr(self, field_name)
             if type(value) is not str or not value.strip():
@@ -94,17 +89,6 @@ class M7ExecutionPolicy:
             DEEPSEEK_MODEL_CANDIDATES
         ):
             raise ValueError("M7 policy requires a supported DeepSeek candidate")
-        if self.review_selection_mode not in {
-            "all_review",
-            "shadow",
-            "selective",
-        }:
-            raise ValueError("unsupported M7 review selection mode")
-        if (
-            self.review_feature_schema_version
-            != M7_REVIEW_FEATURE_SCHEMA_VERSION
-        ):
-            raise ValueError("unsupported M7 review feature schema")
         if (
             type(self.temperature) not in {int, float}
             or not math.isfinite(self.temperature)
@@ -119,6 +103,14 @@ class M7ExecutionPolicy:
         )
         if any(type(limit) is not int or limit <= 0 for limit in limits):
             raise ValueError("M7 execution limits must be positive integers")
+        if type(self.format_retry_count) is not int or self.format_retry_count != 8:
+            raise ValueError("M7 scoring requires exactly eight format retries")
+
+    @property
+    def max_format_attempts(self) -> int:
+        """Return the initial scoring call plus eight format retries."""
+
+        return self.format_retry_count + 1
 
     @property
     def model_candidate(self) -> DeepSeekModelCandidate:
@@ -127,13 +119,6 @@ class M7ExecutionPolicy:
         return DEEPSEEK_MODEL_CANDIDATES[
             (self.model_name, self.thinking_enabled)
         ]
-
-    @property
-    def require_teacher_review_for_all_scores(self) -> bool:
-        """Compatibility view of the explicit review-selection mode."""
-
-        return self.review_selection_mode != "selective"
-
 
 DEFAULT_M7_EXECUTION_POLICY = M7ExecutionPolicy()
 
@@ -144,6 +129,4 @@ __all__ = [
     "DEFAULT_M7_EXECUTION_POLICY",
     "DeepSeekModelCandidate",
     "M7ExecutionPolicy",
-    "M7_REVIEW_FEATURE_SCHEMA_VERSION",
-    "ReviewSelectionMode",
 ]

@@ -132,3 +132,78 @@ def test_repeated_scoring_after_restart_returns_the_first_result(
 
     assert retried == first
     assert retried.finalized_at == UTC_TIME
+
+
+def test_wrong_objective_answer_targets_its_frozen_concepts_for_feedback(
+    tmp_path,
+) -> None:
+    repository = SQLiteM8Repository(tmp_path / "objective-remediation.sqlite3")
+    repository.initialize()
+    service = _service_at(repository, UTC_TIME)
+    knowledge = make_knowledge_bundle(subjective=False)
+    paper = service.generate_paper(
+        make_task_plan(),
+        knowledge,
+        None,
+        None,
+    )
+    instance = paper.all_items()[0]
+    wrong_submission = make_submission(paper).model_copy(
+        update={"answers": {instance.item_instance_id: "no"}},
+        deep=True,
+    )
+
+    preparation = service.prepare_scoring(
+        paper,
+        wrong_submission,
+        knowledge,
+    )
+    result = service.finalize_scoring(preparation, [])
+
+    assert result.total_score == 0.0
+    assert result.remediation_plan.target_concept_ids() == ["concept_2"]
+    assert result.remediation_plan.targets[0].recommended_item_ids == ["item_2"]
+
+
+def test_subjective_teacher_answer_is_rule_scored_without_model_or_review(
+    tmp_path,
+) -> None:
+    repository = SQLiteM8Repository(tmp_path / "subjective-exact.sqlite3")
+    repository.initialize()
+    service = _service_at(repository, UTC_TIME)
+    original = make_knowledge_bundle(subjective=True)
+    item = original.items[0].model_copy(
+        update={
+            "answer_key": {
+                "answers": ["TCP 提供端到端的可靠字节流服务。"],
+                "max_score": 1.0,
+            }
+        },
+        deep=True,
+    )
+    knowledge = original.model_copy(update={"items": [item]}, deep=True)
+    paper = service.generate_paper(
+        make_task_plan(),
+        knowledge,
+        None,
+        None,
+    )
+    instance = paper.all_items()[0]
+    submission = make_submission(paper).model_copy(
+        update={
+            "answers": {
+                instance.item_instance_id: "TCP 提供端到端的可靠字节流服务。"
+            }
+        },
+        deep=True,
+    )
+
+    preparation = service.prepare_scoring(paper, submission, knowledge)
+    result = service.finalize_scoring(preparation, [])
+
+    assert preparation.rubric_scoring_tasks == []
+    assert preparation.evidence_queries == []
+    assert len(preparation.objective_audit_records) == 1
+    assert result.total_score == instance.max_score
+    assert result.score_audit_records[0].scoring_method == "rule"
+    assert result.score_audit_records[0].review_status == "not_required"

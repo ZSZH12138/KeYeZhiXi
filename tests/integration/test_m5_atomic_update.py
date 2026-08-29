@@ -145,7 +145,7 @@ def test_v14_creates_all_m5_m8_model_runtime_tables(tmp_path) -> None:
             }
             assert {"payload", "payload_checksum", "schema_version"} <= columns
 
-    assert SCHEMA_VERSION == 19
+    assert SCHEMA_VERSION == 21
     assert expected <= actual
     assert "m5_learning_observation_audits" in actual
     assert next(

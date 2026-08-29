@@ -201,7 +201,38 @@ def test_student_cannot_cross_class_or_reuse_another_actor_token(
     assert stolen.status_code == 400
 
 
-def test_follow_up_result_links_back_to_source_correction(
+def test_student_authorized_for_an_unpublished_course_gets_not_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    user = make_user(
+        actor_id="pseudonym_student_unpublished_course",
+        role="student",
+        permissions=STUDENT_PERMISSIONS,
+        course_id="course_other",
+        class_id="class_99",
+    )
+    web_runtime = runtime.WebRuntime(
+        container=object(),  # type: ignore[arg-type]
+        courses={},
+    )
+    monkeypatch.setattr(runtime, "get_web_runtime", lambda: web_runtime)
+    client = Client()
+    client.force_login(user)
+
+    response = client.get(
+        reverse(
+            "student-start",
+            kwargs={"course_id": "course_other", "class_id": "class_99"},
+        )
+    )
+
+    content = response.content.decode("utf-8")
+    assert response.status_code == 404, content
+    assert "请求的资源不存在" in content
+    assert "RUNTIME_CONTEXT" not in content
+
+
+def test_legacy_correction_json_is_not_used_as_student_history(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -268,7 +299,7 @@ def test_follow_up_result_links_back_to_source_correction(
 
     assert result_page.status_code == 200
     content = result_page.content.decode("utf-8")
-    assert "返回原卷订正页" in content
+    assert "返回原卷订正页" not in content
     assert "返回掌握画像（首页）" in content
-    assert "paper_source" in content
-    assert "#lost-lost_instance" in content
+    assert "paper_source" not in content
+    assert "#lost-lost_instance" not in content

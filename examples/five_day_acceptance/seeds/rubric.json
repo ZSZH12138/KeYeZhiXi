@@ -31,7 +31,6 @@
         }
       ],
       "review_policy": {
-        "double_score_disagreement_threshold": 1.0,
         "low_confidence_threshold": 0.75,
         "require_evidence_for_positive_score": true
       },
@@ -80,7 +79,6 @@
         }
       ],
       "review_policy": {
-        "double_score_disagreement_threshold": 1.0,
         "low_confidence_threshold": 0.75,
         "require_evidence_for_positive_score": true
       },

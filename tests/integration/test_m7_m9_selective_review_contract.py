@@ -63,7 +63,6 @@ def _task() -> RubricScoringTask:
             ],
             review_policy=ReviewPolicy(
                 low_confidence_threshold=0.7,
-                double_score_disagreement_threshold=1.0,
                 require_evidence_for_positive_score=True,
             ),
             status="published",
@@ -151,7 +150,7 @@ def test_public_m7_flags_drive_m8_status_and_m9_queue_without_contract_changes()
 
     low_confidence = service.finalize_scoring(
         _preparation(),
-        [_result(flags=[], confidence=0.6)],
+        [_result(flags=[], confidence=0.4)],
     )
     assert low_confidence.score_audit_records[0].review_reason == ["low_confidence"]
 

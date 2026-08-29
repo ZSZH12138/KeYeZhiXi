@@ -9,6 +9,7 @@ from course_insight.modules.m0_platform.workflow import (
     WAITING_WORKFLOW_STATUSES,
     AssessmentRun,
 )
+from course_insight.contracts.tasking import PROFILE_AFFECTING_TASK_TYPES
 from course_insight.modules.m9_teacher_analytics.service import (
     teacher_analytics_report_id,
 )
@@ -160,6 +161,15 @@ class AssessmentResults:
         task = self.require_task(run.task_id)
         paper = self.require_paper(run.paper_id)
         scoring = self.exact_scoring(run)
+        if task.task_type not in PROFILE_AFFECTING_TASK_TYPES:
+            feedback = self._m7.get_feedback(run.feedback_id)
+            require_results(scoring, feedback)
+            return {
+                "task_plan": task,
+                "assessment_paper": paper,
+                "scoring_result": scoring,
+                "feedback": feedback,
+            }
         state = self.exact_state(run)
         feedback = self._m7.get_feedback(run.feedback_id)
         analytics = self._m9.get_analytics(run.report_id)

@@ -31,6 +31,7 @@ from course_insight.contracts.platform import (
 from course_insight.contracts.state import StateUpdateResult
 from course_insight.infrastructure.json_io import write_json
 from course_insight.application.assessment_workflow import AssessmentWorkflow
+from course_insight.application.class_roster import ClassRosterSnapshot
 from course_insight.application.retrieval import retrieve_for_application
 from course_insight.modules.m0_platform.service import M0PlatformService
 from course_insight.modules.m1_course_governance.service import M1CourseGovernanceService
@@ -122,6 +123,7 @@ class AppCoordinator:
         knowledge_bundle: KnowledgeBundle,
         state_policy_path: Path,
         teacher_threshold_policy_path: Path,
+        class_roster_snapshot: ClassRosterSnapshot | None = None,
     ) -> dict[str, ContractModel]:
         """Resume a submission from module-owned results and M0 checkpoints."""
 
@@ -132,6 +134,7 @@ class AppCoordinator:
             knowledge_bundle=knowledge_bundle,
             state_policy_path=state_policy_path,
             teacher_threshold_policy_path=teacher_threshold_policy_path,
+            class_roster_snapshot=class_roster_snapshot,
         )
 
     def get_pending_assessment(
@@ -204,6 +207,8 @@ class AppCoordinator:
         course_id: str,
         class_id: str,
         index_ref: EvidenceIndexRef | None = None,
+        class_roster_snapshot: ClassRosterSnapshot | None = None,
+        student_evidence: str | None = None,
     ) -> dict[str, ContractModel]:
         """Resume a teacher review without applying an existing audit twice."""
 
@@ -217,6 +222,8 @@ class AppCoordinator:
             course_id=course_id,
             class_id=class_id,
             index_ref=index_ref,
+            class_roster_snapshot=class_roster_snapshot,
+            student_evidence=student_evidence,
         )
 
     def rescore_assessment(
@@ -231,6 +238,7 @@ class AppCoordinator:
         knowledge_bundle: KnowledgeBundle,
         state_policy_path: Path,
         teacher_threshold_policy_path: Path,
+        class_roster_snapshot: ClassRosterSnapshot | None = None,
     ) -> dict[str, ContractModel]:
         """Replay a bound model rescore without posting pending scores."""
 
@@ -244,6 +252,7 @@ class AppCoordinator:
             knowledge_bundle=knowledge_bundle,
             state_policy_path=state_policy_path,
             teacher_threshold_policy_path=teacher_threshold_policy_path,
+            class_roster_snapshot=class_roster_snapshot,
         )
 
     def frozen_assessment_submission(
@@ -253,6 +262,14 @@ class AppCoordinator:
         """Return the frozen original answers bound to one attempt."""
 
         return self._assessment_workflow.frozen_submission(attempt_id)
+
+    def purge_transient_assessment(self, *, paper_id: str, attempt_id: str) -> None:
+        """Remove raw storage for one completed non-profile assessment."""
+
+        self._assessment_workflow.purge_transient_assessment(
+            paper_id=paper_id,
+            attempt_id=attempt_id,
+        )
 
     def initialize_course(
         self,
@@ -472,20 +489,24 @@ class AppCoordinator:
             request_id=f"assessment:{scoring_query.query_id}:grading",
             policy=self._retrieval_policy,
         )
-        first_result = self._m7.score_subjective_answer(
-            rubric_scoring_task=scoring_task,
-            evidence_bundle=scoring_evidence,
-        )
-        second_result = self._m7.score_subjective_answer(
-            rubric_scoring_task=scoring_task,
-            evidence_bundle=scoring_evidence,
-        )
-        merger = getattr(self._m8, "merge_independent_rubric_results", None)
-        rubric_result = (
-            merger(scoring_task, first_result, second_result)
-            if callable(merger)
-            else first_result
-        )
+        try:
+            rubric_result = self._m7.score_subjective_answer(
+                rubric_scoring_task=scoring_task,
+                evidence_bundle=scoring_evidence,
+            )
+        except DomainError as error:
+            if error.code not in {
+                "INVALID_MODEL_JSON",
+                "MODEL_ADAPTER_UNCONFIGURED",
+                "MODEL_API_UNAVAILABLE",
+                "MODEL_INPUT_PRIVACY_BLOCKED",
+                "MODEL_OUTPUT_BLOCKED",
+            }:
+                raise
+            rubric_result = self._m8.defer_rubric_scoring(
+                scoring_task,
+                reason_code=error.code,
+            )
         scoring = self._m8.finalize_scoring(
             scoring_preparation_result=preparation,
             rubric_scoring_results=[rubric_result],

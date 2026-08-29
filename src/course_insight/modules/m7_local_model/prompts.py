@@ -27,7 +27,7 @@ from course_insight.modules.m7_local_model.privacy_reviewer import PrivacyReview
 
 
 SCORING_PROMPT_ID = "m7-rubric-scoring-json"
-SCORING_PROMPT_VERSION = "5.0.0"
+SCORING_PROMPT_VERSION = "6.0.0"
 FEEDBACK_PROMPT_ID = "m7-deterministic-feedback"
 FEEDBACK_PROMPT_VERSION = "1.0.0"
 KNOWLEDGE_EXTRACTION_PROMPT_ID = "m7-knowledge-extraction-json"
@@ -141,10 +141,13 @@ def prepare_scoring_prompt(
     user_payload = {
         "scoring_task_id": governed_task.scoring_task_id,
         "student_answer": governed_task.student_answer,
+        "question_type": governed_task.question_type,
+        "reference_answers": list(governed_task.reference_answers),
         "item": {
             "item_id": governed_task.item_instance.item_id,
             "stem": governed_task.item_instance.stem,
             "concept_ids": list(governed_task.item_instance.concept_ids),
+            "concept_names": list(governed_task.concept_names),
             "max_score": governed_task.item_instance.max_score,
         },
         "rubric": {
@@ -154,7 +157,7 @@ def prepare_scoring_prompt(
             "criteria": rubric,
             "review_policy": {
                 "low_confidence_threshold": (
-                    governed_task.rubric.review_policy.low_confidence_threshold
+                    governed_task.review_confidence_threshold
                 ),
                 "require_evidence_for_positive_score": (
                     governed_task.rubric.review_policy.require_evidence_for_positive_score

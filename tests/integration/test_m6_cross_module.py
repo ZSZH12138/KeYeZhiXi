@@ -593,11 +593,6 @@ class _FixedM8:
     def finalize_scoring(self, **_: Any) -> ScoringResultBundle:
         return self._scoring_result.model_copy(deep=True)
 
-    @staticmethod
-    def merge_independent_rubric_results(task: Any, first: Any, second: Any) -> Any:
-        return first
-
-
 class _CoordinatorM2:
     @staticmethod
     def retrieve(

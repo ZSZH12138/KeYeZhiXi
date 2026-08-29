@@ -24,7 +24,7 @@
     <ul>
       {% for item in review.lost_items %}
         <li>
-          <p>{{ item.stem }}</p>
+          <p><strong>题目：</strong>{{ item.stem|default:"题目内容暂不可用" }}</p>
           <p class="muted">错因：{{ item.cause }}</p>
           <p>订正：{{ item.status }}</p>
         </li>

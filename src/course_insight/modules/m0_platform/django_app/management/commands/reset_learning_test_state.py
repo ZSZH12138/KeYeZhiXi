@@ -16,6 +16,7 @@ from django.utils import timezone
 
 from course_insight.modules.m0_platform.django_app.models import (
     AssessmentProjectionReceipt,
+    ClassLearningSnapshot,
     CourseClassWorkspace,
     CourseKnowledgeRelease,
     CourseSource,
@@ -23,6 +24,8 @@ from course_insight.modules.m0_platform.django_app.models import (
     KnowledgeChangeOperation,
     KnowledgeIngestionJob,
     LearnerConceptMastery,
+    LearningProfileProjectionEvent,
+    TeacherItemReviewNote,
     WrongQuestionRecord,
 )
 
@@ -171,11 +174,19 @@ def _clear_database() -> dict[str, int]:
     counts = {
         "assessment_projection_receipts": AssessmentProjectionReceipt.objects.count(),
         "learner_masteries": LearnerConceptMastery.objects.count(),
+        "class_learning_snapshots": ClassLearningSnapshot.objects.count(),
+        "learning_profile_projection_events": (
+            LearningProfileProjectionEvent.objects.count()
+        ),
+        "teacher_item_review_notes": TeacherItemReviewNote.objects.count(),
         "wrong_questions": WrongQuestionRecord.objects.count(),
         "course_sources": CourseSource.objects.count(),
         "knowledge_releases": CourseKnowledgeRelease.objects.count(),
     }
     AssessmentProjectionReceipt.objects.all().delete()
+    TeacherItemReviewNote.objects.all().delete()
+    LearningProfileProjectionEvent.objects.all().delete()
+    ClassLearningSnapshot.objects.all().delete()
     LearnerConceptMastery.objects.all().delete()
     WrongQuestionRecord.objects.all().delete()
     CourseClassWorkspace.objects.update(

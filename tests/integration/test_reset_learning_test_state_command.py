@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -10,16 +11,22 @@ from django.test import override_settings
 
 from course_insight.modules.m0_platform.django_app.models import (
     ActorGrant,
+    ClassLearningSnapshot,
     CourseClassWorkspace,
     CourseKnowledgeRelease,
     CourseSource,
     LearnerConceptMastery,
+    LearningProfileProjectionEvent,
     ScopedDeepSeekConfiguration,
+    TeacherItemReviewNote,
     User,
     WrongQuestionRecord,
 )
 from course_insight.modules.m0_platform.django_app.scoped_deepseek import (
     save_scoped_deepseek_settings,
+)
+from course_insight.modules.m5_learner_class_state.class_snapshot import (
+    synchronize_class_learning_snapshot,
 )
 from tests.integration.test_django_student_qa import _active_release
 
@@ -153,6 +160,36 @@ def test_reset_backs_up_then_clears_learning_state_but_preserves_accounts_and_ap
         attempt_status="attempted",
         mastery=0,
     )
+    snapshot = synchronize_class_learning_snapshot(
+        workspace=workspace,
+        reason="test",
+    )
+    persisted_snapshot = ClassLearningSnapshot.objects.get(
+        snapshot_id=snapshot.snapshot_id,
+    )
+    LearningProfileProjectionEvent.objects.create(
+        workspace=workspace,
+        learner=user,
+        attempt_id="attempt-reset-event",
+        task_type="diagnostic",
+        scoring_checksum="b" * 64,
+        changed_concept_ids=["concept-1"],
+        reason="test",
+        snapshot=persisted_snapshot,
+    )
+    TeacherItemReviewNote.objects.create(
+        workspace=workspace,
+        learner=user,
+        reviewed_by=user,
+        attempt_id="attempt-reset-note",
+        paper_id="paper-reset-note",
+        item_instance_id="item-reset-note",
+        audit_id="audit-reset-note",
+        audit_version=1,
+        score=Decimal("0"),
+        max_score=Decimal("1"),
+        teacher_note="待删除的教师备注",
+    )
     WrongQuestionRecord.objects.create(
         workspace=workspace,
         learner=user,
@@ -189,6 +226,9 @@ def test_reset_backs_up_then_clears_learning_state_but_preserves_accounts_and_ap
     assert not CourseSource.objects.exists()
     assert not CourseKnowledgeRelease.objects.exists()
     assert not LearnerConceptMastery.objects.exists()
+    assert not ClassLearningSnapshot.objects.exists()
+    assert not LearningProfileProjectionEvent.objects.exists()
+    assert not TeacherItemReviewNote.objects.exists()
     assert not WrongQuestionRecord.objects.exists()
     assert not any(upload_root.iterdir())
     assert not any(frozen_root.iterdir())

@@ -178,7 +178,6 @@ def _roles(package: CoursePackage) -> dict[str, dict[str, Any]]:
                     ],
                     "review_policy": {
                         "low_confidence_threshold": 0.5,
-                        "double_score_disagreement_threshold": 1.0,
                         "require_evidence_for_positive_score": True,
                     },
                     "status": " published ",

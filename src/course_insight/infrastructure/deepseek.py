@@ -9,7 +9,6 @@ API keys and returns privacy-safe contract metadata for every attempted call.
 from __future__ import annotations
 
 import json
-import os
 import socket
 import time
 from dataclasses import dataclass

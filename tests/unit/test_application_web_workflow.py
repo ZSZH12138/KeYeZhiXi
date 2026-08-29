@@ -63,7 +63,6 @@ from tests.integration.test_web_workflow_persistence import (
     _analytics,
     _feedback,
     _paper,
-    _review,
 )
 
 
@@ -1003,6 +1002,10 @@ class _M7:
         self.store.trip("feedback")
         return self.store.feedback.model_copy(deep=True)
 
+    def save_transient_feedback(self, package):
+        self.store.feedback = package.model_copy(deep=True)
+        return self.store.feedback.model_copy(deep=True)
+
 
 class _M9:
     def __init__(self, store: _WorkflowStore) -> None:
@@ -1505,6 +1508,38 @@ def _start_and_submission(
     return knowledge, submission, arguments
 
 
+@pytest.mark.parametrize("task_type", ["practice", "correction"])
+def test_non_profile_assessment_finishes_without_m5_m9_or_teacher_queue(
+    tmp_path: Path,
+    task_type: str,
+) -> None:
+    store = _WorkflowStore()
+    store.plan = store.plan.model_copy(update={"task_type": task_type})
+    store.pending_review = True
+    coordinator = _coordinator(tmp_path, store)
+    _, _, arguments = _start_and_submission(coordinator, tmp_path)
+
+    submitted = coordinator.submit_assessment(**arguments)
+    reloaded = _coordinator(tmp_path, store).get_student_assessment(
+        paper_id="paper_1",
+        learner_id="learner_1",
+    )
+
+    assert set(submitted) == {
+        "task_plan",
+        "assessment_paper",
+        "scoring_result",
+        "feedback",
+    }
+    assert "waiting_status" not in submitted
+    assert reloaded["feedback"] == submitted["feedback"]
+    assert store.appended_events == []
+    assert store.state_history == []
+    assert store.observation_batches_received == []
+    assert store.tutoring_calls == 0
+    assert store.analytics_history == {}
+
+
 @pytest.mark.parametrize(
     ("failure_point", "checkpoint"),
     [
@@ -1537,6 +1572,41 @@ def test_submit_recovers_after_module_save_before_checkpoint(
     replayed = _coordinator(tmp_path, store).submit_assessment(**arguments)
     assert recovered == replayed
     assert recovered["scoring_result"].attempt_id == submission.attempt_id
+
+
+def test_submit_defers_unavailable_subjective_model_to_teacher_review(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    store.pending_review = True
+    coordinator = _coordinator(tmp_path, store)
+    _, _, arguments = _start_and_submission(coordinator, tmp_path)
+    deferred_reasons: list[str] = []
+
+    class _UnavailableM7:
+        @staticmethod
+        def score_subjective_answer(**_: Any):
+            raise DomainError(
+                code="MODEL_ADAPTER_UNCONFIGURED",
+                module="m7",
+                message="no rubric scoring adapter is configured",
+                recoverable=True,
+            )
+
+    def defer(scoring_task, *, reason_code: str):
+        deferred_reasons.append(reason_code)
+        return SimpleNamespace(
+            scoring_task_id=scoring_task.scoring_task_id,
+        )
+
+    workflow = coordinator._assessment_workflow
+    workflow._m7 = _UnavailableM7()
+    workflow._m8.defer_rubric_scoring = defer
+
+    submitted = coordinator.submit_assessment(**arguments)
+
+    assert submitted["waiting_status"] == "awaiting_review"
+    assert deferred_reasons == ["MODEL_ADAPTER_UNCONFIGURED"]
 
 
 def test_submit_freezes_rules_policy_before_deciding(tmp_path: Path) -> None:
@@ -2029,8 +2099,6 @@ def test_submit_supports_multiple_subjective_tasks_in_stable_order(
 
     assert store.scored_task_ids == [
         "rubric_task_1",
-        "rubric_task_1",
-        "rubric_task_2",
         "rubric_task_2",
     ]
     assert [
@@ -2270,6 +2338,7 @@ def test_pending_subjective_score_does_not_post_until_teacher_confirms(
         learner_id="learner_1",
     )
     assert student["waiting_status"] == "awaiting_review"
+    assert student["scoring_result"].attempt_id == "attempt_1"
     replayed = coordinator.submit_assessment(**arguments)
     assert replayed["waiting_status"] == "awaiting_review"
     assert store.state_history == []
@@ -2308,6 +2377,49 @@ def test_pending_subjective_score_does_not_post_until_teacher_confirms(
     assert "waiting_status" not in student_final
     assert "scoring_result" in student_final
     assert "feedback" in student_final
+
+
+def test_waiting_review_rebases_on_latest_profile_state_before_posting(
+    tmp_path: Path,
+) -> None:
+    """A delayed review must not overwrite class changes made while it waited."""
+
+    store = _WorkflowStore()
+    store.pending_review = True
+    m5 = _BaselineM5(store)
+    m5.fail_first_update = False
+    coordinator = _coordinator(tmp_path, store, m5=m5)
+    knowledge, _, arguments = _start_and_submission(coordinator, tmp_path)
+    submitted = coordinator.submit_assessment(**arguments)
+    audit = submitted["scoring_result"].get_audit_record("audit_attempt_1")
+
+    m5.install_new_latest()
+    reviewed = coordinator.review_assessment(
+        paper_id="paper_1",
+        review_submission=TeacherReviewSubmission(
+            submission_id="decision_after_class_advanced",
+            audit_id=audit.audit_id,
+            expected_audit_version=audit.audit_version,
+            expected_audit_checksum=audit.content_checksum(),
+            reviewer_id="teacher_1",
+            decision="confirm",
+            final_total_score=audit.total_score,
+            criterion_overrides=[],
+            teacher_comment="Confirmed after another class update.",
+            submitted_at=NOW + timedelta(minutes=1),
+        ),
+        request_id="review_after_class_advanced",
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+        course_id="course_1",
+        class_id="class_1",
+    )
+
+    previous_learner, previous_class = m5.update_inputs[-1]
+    assert previous_learner.snapshot_id == "learner_snapshot_8"
+    assert previous_class.snapshot_id == "class_snapshot_8"
+    assert reviewed["recomputed_state_result"] is not None
 
 
 def test_reject_then_model_rescore_stays_unposted_until_confirm(
@@ -2471,7 +2583,7 @@ def test_pending_submit_recovers_after_crash_before_waiting_room(
         learner_id="learner_1",
     )
     assert student["waiting_status"] == "awaiting_review"
-    assert "scoring_result" not in student
+    assert student["scoring_result"].attempt_id == "attempt_1"
 
 
 def test_rescore_replays_park_after_completed_rescore_crashes(
@@ -2544,7 +2656,7 @@ def test_rescore_replays_park_after_completed_rescore_crashes(
     assert recovered["waiting_status"] == "awaiting_review"
     assert submit.status == "awaiting_review"
     assert student["waiting_status"] == "awaiting_review"
-    assert "scoring_result" not in student
+    assert student["scoring_result"].attempt_id == "attempt_1"
     assert store.state_history == []
     assert store.appended_events == []
 

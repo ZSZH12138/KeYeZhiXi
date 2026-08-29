@@ -2,8 +2,6 @@ from __future__ import annotations
 
 import hashlib
 from datetime import timedelta
-from io import BytesIO
-from zipfile import ZIP_DEFLATED, ZipFile
 
 import pytest
 from django.contrib.auth.models import Group, Permission

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import hashlib
-
 from collections.abc import Mapping
 from typing import Any
 
@@ -24,7 +22,8 @@ def build_follow_up_bundle(
 ) -> tuple[KnowledgeBundle, ItemCard]:
     """Return a bundle whose approved blueprint contains one follow-up item."""
 
-    follow_item = _select_or_clone(bundle, source_item, salt)
+    del salt
+    follow_item = source_item.model_copy(deep=True)
     items = list(bundle.items)
     q_matrix = list(bundle.q_matrix)
     if all(item.item_id != follow_item.item_id for item in items):
@@ -158,29 +157,6 @@ def _follow_up_link(
             ):
                 return source_paper_id, item_instance_id, str(item["source_item_id"])
     return None
-
-
-def _select_or_clone(
-    bundle: KnowledgeBundle,
-    source_item: ItemCard,
-    salt: str,
-) -> ItemCard:
-    source_concepts = set(source_item.concept_ids)
-    siblings = [
-        item
-        for item in bundle.approved_items()
-        if item.item_id != source_item.item_id
-        and source_concepts.intersection(item.concept_ids)
-    ]
-    if siblings:
-        digest = hashlib.sha256(salt.encode("utf-8")).digest()
-        chosen = siblings[int.from_bytes(digest[:8], "big") % len(siblings)]
-        return chosen.model_copy(deep=True)
-    digest = hashlib.sha256(salt.encode("utf-8")).hexdigest()[:8]
-    return source_item.model_copy(
-        update={"item_id": f"{source_item.item_id}_fu_{digest}"},
-        deep=True,
-    )
 
 
 def _approved_blueprint(bundle: KnowledgeBundle):

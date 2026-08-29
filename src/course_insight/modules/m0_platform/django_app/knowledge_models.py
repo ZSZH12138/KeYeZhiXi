@@ -174,6 +174,29 @@ class WrongQuestionRecord(models.Model):
     item_id = models.CharField(max_length=128)
     item_version = models.CharField(max_length=128)
     latest_attempt_id = models.CharField(max_length=128)
+    source_paper_id = models.CharField(max_length=128, blank=True, default="")
+    source_item_instance_id = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+    )
+    resolved_through_attempt_id = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+    )
+    active_follow_up_paper_id = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+    )
+    active_follow_up_item_id = models.CharField(
+        max_length=128,
+        blank=True,
+        default="",
+    )
+    hint_revealed = models.BooleanField(default=False)
+    resolved_at = models.DateTimeField(null=True, blank=True)
     wrong_count = models.PositiveBigIntegerField(default=1)
     status = models.CharField(
         max_length=16,
@@ -197,7 +220,11 @@ class WrongQuestionRecord(models.Model):
             models.Index(
                 fields=("workspace", "learner", "status"),
                 name="m0_wrong_selection_idx",
-            )
+            ),
+            models.Index(
+                fields=("workspace", "active_follow_up_paper_id"),
+                name="m0_wrong_followup_idx",
+            ),
         ]
 
 
@@ -220,6 +247,302 @@ class AssessmentProjectionReceipt(models.Model):
     scoring_checksum = models.CharField(max_length=64)
     projection_payload = models.JSONField(default=dict)
     applied_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.CheckConstraint(
+                condition=Q(task_type__in=("diagnostic", "stage_assessment")),
+                name="m0_projection_profile_task_only",
+            )
+        ]
+
+
+class ClassLearningSnapshot(models.Model):
+    """Immutable M5 class-level projection of the currently active roster."""
+
+    snapshot_id = models.UUIDField(
+        primary_key=True,
+        default=uuid.uuid4,
+        editable=False,
+    )
+    workspace = models.ForeignKey(
+        CourseClassWorkspace,
+        on_delete=models.CASCADE,
+        related_name="class_learning_snapshots",
+    )
+    release = models.ForeignKey(
+        "CourseKnowledgeRelease",
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="class_learning_snapshots",
+    )
+    input_checksum = models.CharField(max_length=64, validators=[_checksum_validator])
+    roster_checksum = models.CharField(max_length=64, validators=[_checksum_validator])
+    active_student_count = models.PositiveIntegerField(default=0)
+    reason = models.CharField(max_length=32)
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("workspace", "input_checksum"),
+                name="m5_class_snapshot_input_unique",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=("workspace", "created_at"),
+                name="m5_class_snapshot_latest_idx",
+            )
+        ]
+
+
+class ClassConceptLearningSnapshot(models.Model):
+    """One named knowledge-point aggregate in an immutable class snapshot."""
+
+    snapshot = models.ForeignKey(
+        ClassLearningSnapshot,
+        on_delete=models.CASCADE,
+        related_name="concepts",
+    )
+    concept_id = models.CharField(max_length=80)
+    concept_name = models.CharField(max_length=255)
+    attempted_student_count = models.PositiveIntegerField(default=0)
+    unattempted_student_count = models.PositiveIntegerField(default=0)
+    attempted_item_count = models.PositiveBigIntegerField(default=0)
+    correct_item_count = models.PositiveBigIntegerField(default=0)
+    average_mastery = models.DecimalField(max_digits=4, decimal_places=3, default=0)
+    priority_support_count = models.PositiveIntegerField(default=0)
+    priority_support_rate = models.DecimalField(
+        max_digits=4,
+        decimal_places=3,
+        default=0,
+    )
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("snapshot", "concept_id"),
+                name="m5_class_snapshot_concept_unique",
+            ),
+            models.CheckConstraint(
+                condition=Q(correct_item_count__lte=models.F("attempted_item_count")),
+                name="m5_class_snapshot_correct_lte_attempted",
+            ),
+            models.CheckConstraint(
+                condition=Q(average_mastery__gte=0) & Q(average_mastery__lte=0.9),
+                name="m5_class_snapshot_mastery_range",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    Q(priority_support_rate__gte=0)
+                    & Q(priority_support_rate__lte=1)
+                ),
+                name="m5_class_snapshot_support_rate_range",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("snapshot", "concept_id"),
+                name="m5_class_snapshot_concept_idx",
+            )
+        ]
+
+
+class LearningProfileProjectionEvent(models.Model):
+    """Append-only record linking a profile change to the M5/M9 refresh path."""
+
+    event_id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    workspace = models.ForeignKey(
+        CourseClassWorkspace,
+        on_delete=models.CASCADE,
+        related_name="learning_profile_projection_events",
+    )
+    learner = models.ForeignKey(
+        "m0_platform_web.User",
+        on_delete=models.CASCADE,
+        related_name="learning_profile_projection_events",
+    )
+    attempt_id = models.CharField(max_length=128)
+    task_type = models.CharField(max_length=32)
+    previous_scoring_checksum = models.CharField(
+        max_length=64,
+        validators=[_checksum_validator],
+        null=True,
+        blank=True,
+    )
+    scoring_checksum = models.CharField(max_length=64, validators=[_checksum_validator])
+    changed_concept_ids = models.JSONField(default=list)
+    reason = models.CharField(max_length=32)
+    snapshot = models.ForeignKey(
+        ClassLearningSnapshot,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name="projection_events",
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("workspace", "attempt_id", "scoring_checksum"),
+                name="m5_profile_event_idempotency_unique",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=("workspace", "created_at"),
+                name="m5_profile_event_latest_idx",
+            ),
+            models.Index(
+                fields=("learner", "attempt_id"),
+                name="m5_profile_event_learner_idx",
+            ),
+        ]
+
+
+class TeacherItemReviewNote(models.Model):
+    """Teacher-visible note attached to one immutable item review version."""
+
+    workspace = models.ForeignKey(
+        CourseClassWorkspace,
+        on_delete=models.CASCADE,
+        related_name="teacher_item_review_notes",
+    )
+    learner = models.ForeignKey(
+        "m0_platform_web.User",
+        on_delete=models.CASCADE,
+        related_name="teacher_item_review_notes",
+    )
+    reviewed_by = models.ForeignKey(
+        "m0_platform_web.User",
+        on_delete=models.PROTECT,
+        related_name="authored_item_review_notes",
+    )
+    attempt_id = models.CharField(max_length=128)
+    paper_id = models.CharField(max_length=128)
+    item_instance_id = models.CharField(max_length=128)
+    audit_id = models.CharField(max_length=128)
+    audit_version = models.PositiveIntegerField()
+    score = models.DecimalField(max_digits=9, decimal_places=3)
+    max_score = models.DecimalField(max_digits=9, decimal_places=3)
+    teacher_note = models.TextField(blank=True, default="")
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("attempt_id", "item_instance_id", "audit_version"),
+                name="m0_item_review_note_version_unique",
+            ),
+            models.CheckConstraint(
+                condition=Q(score__gte=0) & Q(score__lte=models.F("max_score")),
+                name="m0_item_review_note_score_range",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("workspace", "learner", "attempt_id"),
+                name="m0_item_review_note_lookup_idx",
+            ),
+            models.Index(
+                fields=("attempt_id", "item_instance_id", "audit_version"),
+                name="m0_item_note_version_idx",
+            ),
+        ]
+
+
+class SuggestedTeacherReviewCase(models.Model):
+    """One grouped low-confidence review case for one attempt and paper."""
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        RESOLVED = "resolved", "Resolved"
+        SUPERSEDED = "superseded", "Superseded"
+
+    workspace = models.ForeignKey(
+        CourseClassWorkspace,
+        on_delete=models.CASCADE,
+        related_name="suggested_teacher_review_cases",
+    )
+    learner = models.ForeignKey(
+        "m0_platform_web.User",
+        on_delete=models.CASCADE,
+        related_name="suggested_teacher_review_cases",
+    )
+    attempt_id = models.CharField(max_length=128)
+    paper_id = models.CharField(max_length=128)
+    task_type = models.CharField(max_length=32)
+    scoring_checksum = models.CharField(max_length=64, validators=[_checksum_validator])
+    attempted_at = models.DateTimeField()
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.OPEN,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("workspace", "attempt_id", "paper_id"),
+                name="m0_suggested_review_case_unique",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=("workspace", "status", "attempted_at"),
+                name="m0_suggested_case_queue_idx",
+            )
+        ]
+
+
+class SuggestedTeacherReviewItem(models.Model):
+    """One current low-confidence item contained by a grouped review case."""
+
+    class Status(models.TextChoices):
+        OPEN = "open", "Open"
+        RESOLVED = "resolved", "Resolved"
+        SUPERSEDED = "superseded", "Superseded"
+
+    case = models.ForeignKey(
+        SuggestedTeacherReviewCase,
+        on_delete=models.CASCADE,
+        related_name="items",
+    )
+    item_instance_id = models.CharField(max_length=128)
+    audit_id = models.CharField(max_length=128)
+    audit_version = models.PositiveIntegerField()
+    confidence = models.DecimalField(max_digits=4, decimal_places=3)
+    review_reasons = models.JSONField(default=list)
+    status = models.CharField(
+        max_length=16,
+        choices=Status.choices,
+        default=Status.OPEN,
+    )
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("case", "item_instance_id", "audit_version"),
+                name="m0_suggested_review_item_unique",
+            ),
+            models.CheckConstraint(
+                condition=Q(confidence__gte=0) & Q(confidence__lte=1),
+                name="m0_suggested_item_conf_range",
+            ),
+        ]
+        indexes = [
+            models.Index(
+                fields=("case", "status", "item_instance_id"),
+                name="m0_suggested_item_queue_idx",
+            )
+        ]
 
 
 class CourseSource(models.Model):

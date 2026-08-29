@@ -522,6 +522,13 @@ def criterion_caps(
         for criterion in rubric.criteria
     }
     if set(caps) != audit_ids:
+        # A subjective question with teacher-supplied reference answers may
+        # have been rule-scored before the rubric path was introduced.  Such
+        # an audit has one authoritative item-level criterion, whose cap is
+        # the frozen audit maximum rather than the current rubric criterion.
+        # Keep it rejudgeable without rewriting its historical audit record.
+        if len(audit_ids) == 1:
+            return {next(iter(audit_ids)): audit.max_score}
         raise ValueError("audit and rubric criteria do not match")
     return caps
 
@@ -613,16 +620,17 @@ def count_mastery_profile_view(
         "mastered": [],
         "consolidating": [],
         "priority_support": [],
-        "unseen": [],
     }
     for concept in knowledge_bundle.concepts:
         record = by_concept.get(concept.concept_id)
         attempted = int(getattr(record, "attempted_count", 0))
+        # The student profile is an evidence view, not the complete syllabus:
+        # unseen concepts must neither appear nor be interpreted as weak.
+        if attempted <= 0:
+            continue
         correct = int(getattr(record, "correct_count", 0))
         mastery = float(getattr(record, "mastery", 0.0))
-        if attempted == 0:
-            band = "unseen"
-        elif mastery >= mastered_threshold:
+        if mastery >= mastered_threshold:
             band = "mastered"
         elif mastery >= consolidating_threshold:
             band = "consolidating"
@@ -652,7 +660,7 @@ def count_mastery_profile_view(
         message=(
             "掌握度仅由诊断测评和阶段评测更新，最高为 0.9。"
             if ready
-            else "还没有计入画像的作答；未做过与做过但掌握度为 0 会分别显示。"
+            else "还没有计入画像的作答。"
         ),
         mastered=tuple(grouped["mastered"]),
         consolidating=tuple(grouped["consolidating"]),
@@ -660,7 +668,7 @@ def count_mastery_profile_view(
         next_practice_concept_ids=tuple(item.concept_id for item in priority),
         next_practice_names=tuple(item.name for item in priority),
         progress=(),
-        unseen=tuple(grouped["unseen"]),
+        unseen=(),
     )
 
 

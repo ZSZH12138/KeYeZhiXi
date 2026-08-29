@@ -6,7 +6,7 @@ import inspect
 import math
 import os
 from dataclasses import dataclass
-from typing import Callable, Iterable, Mapping
+from typing import Callable, Iterable
 
 from course_insight.infrastructure.deepseek import DEEPSEEK_API_KEY_ENV
 from course_insight.modules.m7_local_model.policy import DEEPSEEK_MODEL_CANDIDATES

@@ -2,13 +2,19 @@
 
 from __future__ import annotations
 
-from course_insight.contracts.knowledge import KnowledgeBundle, MisconceptionTag
+from types import SimpleNamespace
+
+from course_insight.contracts.knowledge import (
+    KnowledgeConcept,
+    MisconceptionTag,
+)
 from course_insight.contracts.state import (
     ConceptState,
     LearnerStateSnapshot,
     MisconceptionStrength,
 )
 from course_insight.modules.m0_platform.django_app.views.viewmodels import (
+    count_mastery_profile_view,
     student_profile_view,
 )
 from tests.factories.m5_m8 import UTC_TIME, make_knowledge_bundle
@@ -132,3 +138,37 @@ def test_student_profile_omits_concepts_without_attempt_evidence() -> None:
     assert profile.mastered == ()
     assert profile.consolidating == ()
     assert profile.priority_support == ()
+
+
+def test_count_profile_hides_unattempted_concepts_and_does_not_mark_them_weak() -> None:
+    base = make_knowledge_bundle()
+    bundle = base.model_copy(
+        update={
+            "concepts": [
+                *base.concepts,
+                KnowledgeConcept(
+                    concept_id="concept_unseen",
+                    name="Unseen concept",
+                    chapter_id="chapter_1",
+                    description="Never attempted",
+                    aliases=[],
+                    status="published",
+                ),
+            ]
+        }
+    )
+
+    profile = count_mastery_profile_view(
+        mastery_records=[
+            SimpleNamespace(
+                concept_id="concept_2",
+                attempted_count=1,
+                correct_count=0,
+                mastery=0.0,
+            )
+        ],
+        knowledge_bundle=bundle,
+    )
+
+    assert [item.concept_id for item in profile.priority_support] == ["concept_2"]
+    assert profile.unseen == ()

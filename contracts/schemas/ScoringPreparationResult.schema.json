@@ -229,13 +229,8 @@
     },
     "ReviewPolicy": {
       "additionalProperties": false,
-      "description": "Thresholds that route uncertain or divergent scores to review.",
+      "description": "Confidence threshold that routes uncertain semantic scores to review.",
       "properties": {
-        "double_score_disagreement_threshold": {
-          "minimum": 0.0,
-          "title": "Double Score Disagreement Threshold",
-          "type": "number"
-        },
         "low_confidence_threshold": {
           "maximum": 1.0,
           "minimum": 0.0,
@@ -254,7 +249,6 @@
       },
       "required": [
         "low_confidence_threshold",
-        "double_score_disagreement_threshold",
         "require_evidence_for_positive_score"
       ],
       "title": "ReviewPolicy",
@@ -359,12 +353,19 @@
     },
     "RubricScoringTask": {
       "additionalProperties": false,
-      "description": "M8 subjective-answer task passed unchanged to M7.",
+      "description": "M8 constructed-response task passed unchanged to governed DeepSeek scoring.",
       "properties": {
         "attempt_id": {
           "minLength": 1,
           "title": "Attempt Id",
           "type": "string"
+        },
+        "concept_names": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Concept Names",
+          "type": "array"
         },
         "created_at": {
           "format": "date-time",
@@ -383,6 +384,29 @@
           "minLength": 1,
           "title": "Paper Id",
           "type": "string"
+        },
+        "question_type": {
+          "default": "subjective",
+          "enum": [
+            "fill_blank",
+            "subjective"
+          ],
+          "title": "Question Type",
+          "type": "string"
+        },
+        "reference_answers": {
+          "items": {
+            "type": "string"
+          },
+          "title": "Reference Answers",
+          "type": "array"
+        },
+        "review_confidence_threshold": {
+          "default": 0.5,
+          "maximum": 1.0,
+          "minimum": 0.0,
+          "title": "Review Confidence Threshold",
+          "type": "number"
         },
         "rubric": {
           "$ref": "#/$defs/Rubric"
@@ -514,7 +538,7 @@
     }
   },
   "additionalProperties": false,
-  "description": "M8 split of completed objective audits and pending rubric tasks.",
+  "description": "M8 split of completed rule audits and pending rubric tasks.",
   "properties": {
     "attempt_id": {
       "minLength": 1,
@@ -538,6 +562,13 @@
         "$ref": "#/$defs/ScoreAuditRecord"
       },
       "title": "Objective Audit Records",
+      "type": "array"
+    },
+    "objective_item_instances": {
+      "items": {
+        "$ref": "#/$defs/ItemInstance"
+      },
+      "title": "Objective Item Instances",
       "type": "array"
     },
     "paper_id": {

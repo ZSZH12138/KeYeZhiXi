@@ -63,6 +63,11 @@ def test_teacher_review_builds_existing_contract_and_uses_prg(
         role="teacher",
         permissions=TEACHER_PERMISSIONS,
     )
+    make_user(
+        actor_id="pseudonym_student_001",
+        role="student",
+        permissions=(),
+    )
     coordinator = FakeCoordinator("pseudonym_student_001")
     web_runtime = FakeWebRuntime(
         coordinator=coordinator,
@@ -264,6 +269,11 @@ def test_teacher_can_request_bound_model_rescore_without_auto_accept(
         actor_id="pseudonym_teacher_rescore",
         role="teacher",
         permissions=TEACHER_PERMISSIONS,
+    )
+    make_user(
+        actor_id="pseudonym_student_001",
+        role="student",
+        permissions=(),
     )
     coordinator = FakeCoordinator("pseudonym_student_001")
     rejected = coordinator.scoring.get_audit_record("audit_1").model_copy(

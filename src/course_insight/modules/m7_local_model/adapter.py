@@ -43,11 +43,8 @@ from course_insight.modules.m7_local_model.privacy_reviewer import (
     PrivacyReviewer,
 )
 from course_insight.modules.m7_local_model.review_selection import (
-    AllReviewSelector,
-    IsotonicReviewSelector,
+    ConfidenceThresholdReviewSelector,
     ReviewSelectionDecision,
-    ReviewSelector,
-    select_teacher_review,
 )
 
 
@@ -138,7 +135,6 @@ class DeepSeekM7Adapter:
             DEFAULT_M7_OUTBOUND_PRIVACY_POLICY
         ),
         privacy_reviewer: PrivacyReviewer | None = None,
-        review_selector: ReviewSelector | None = None,
     ) -> None:
         client_policy = client.policy
         if (
@@ -162,38 +158,7 @@ class DeepSeekM7Adapter:
                 reviewer_id="privacy-unconfigured",
             )
         )
-        self._review_selector = (
-            review_selector
-            if review_selector is not None
-            else AllReviewSelector(
-                configured_mode=policy.review_selection_mode,
-                fallback=policy.review_selection_mode != "all_review",
-            )
-        )
-        if isinstance(self._review_selector, IsotonicReviewSelector):
-            binding = self._review_selector.binding
-            expected = (
-                policy.model_name,
-                policy.model_version,
-                policy.model_candidate.thinking_mode,
-                SCORING_PROMPT_ID,
-                SCORING_PROMPT_VERSION,
-                policy.policy_version,
-                privacy_policy.policy_version,
-                policy.review_feature_schema_version,
-            )
-            actual = (
-                binding.model_name,
-                binding.model_version,
-                binding.thinking_mode,
-                binding.prompt_id,
-                binding.prompt_version,
-                binding.execution_policy_version,
-                binding.privacy_policy_version,
-                binding.feature_schema_version,
-            )
-            if actual != expected:
-                raise ValueError("review selector binding does not match M7 runtime")
+        self._review_selector = ConfidenceThresholdReviewSelector()
 
     def score_governed(
         self,
@@ -215,66 +180,84 @@ class DeepSeekM7Adapter:
         assert prepared.governed_task is not None
         prompt = prepared.prompt
         governed_task = prepared.governed_task
-        request = self._request(
-            request_id=(
-                f"m7_score_{task.scoring_task_id}_"
-                f"{prompt.input_checksum[:12]}"
-            ),
-            use_case="rubric_scoring",
-            prompt=prompt,
-            created_at=governed_task.created_at,
-        )
-        invocation = self._client.invoke_json(
-            request=request,
-            messages=prompt.messages,
-        )
-        prompt_record = {
-            **prompt.safe_record(
-                request_id=request.request_id,
-                use_case=request.use_case,
-            ),
-            "scoring_task_id": governed_task.scoring_task_id,
-            "model_version": self._client.model_version,
-            **prepared.privacy.safe_record(),
-        }
         privacy_flags = _privacy_safety_flags(prepared.privacy)
-        self._require_success(
-            invocation.result,
-            invocation.audit,
-            request=request,
-            prompt_record=prompt_record,
-            privacy_flags=privacy_flags,
-        )
-        try:
-            result = _parse_scoring_result(
-                task=governed_task,
-                evidence_bundle=evidence_bundle,
-                generation=invocation.result,
-                model_name=self._client.model_name,
-                model_version=self._client.model_version,
-                policy=self._policy,
+        invalid_error: Exception | None = None
+        for attempt_number in range(1, self._policy.max_format_attempts + 1):
+            request = self._request(
+                request_id=(
+                    f"m7_score_{task.scoring_task_id}_"
+                    f"{prompt.input_checksum[:12]}_attempt_{attempt_number}"
+                ),
+                use_case="rubric_scoring",
+                prompt=prompt,
+                created_at=governed_task.created_at,
             )
-            review_selection = select_teacher_review(
-                self._review_selector,
-                task=governed_task,
-                evidence_bundle=evidence_bundle,
-                result=result,
-                privacy=prepared.privacy,
-                configured_mode=self._policy.review_selection_mode,
-            )
-            result = result.model_copy(
-                update={"review_flags": list(review_selection.review_flags)},
-                deep=True,
-            )
-        except (DomainError, ValidationError, TypeError, ValueError) as error:
-            self._invalid_output(
+            messages = prompt.messages
+            if attempt_number > 1:
+                messages = (
+                    *messages,
+                    {
+                        "role": "user",
+                        "content": (
+                            "上一次输出未通过严格 JSON 与评分契约校验。请重新完成整道题评分，"
+                            "只返回系统要求的 JSON 对象，不要添加代码块或解释文字。"
+                        ),
+                    },
+                )
+            invocation = self._client.invoke_json(
                 request=request,
-                generation=invocation.result,
-                audit=invocation.audit,
+                messages=messages,
+            )
+            prompt_record = {
+                **prompt.safe_record(
+                    request_id=request.request_id,
+                    use_case=request.use_case,
+                ),
+                "scoring_task_id": governed_task.scoring_task_id,
+                "model_version": self._client.model_version,
+                "format_attempt": attempt_number,
+                "max_format_attempts": self._policy.max_format_attempts,
+                **prepared.privacy.safe_record(),
+            }
+            self._require_success(
+                invocation.result,
+                invocation.audit,
+                request=request,
                 prompt_record=prompt_record,
                 privacy_flags=privacy_flags,
-                cause=error,
             )
+            try:
+                result = _parse_scoring_result(
+                    task=governed_task,
+                    evidence_bundle=evidence_bundle,
+                    generation=invocation.result,
+                    model_name=self._client.model_name,
+                    model_version=self._client.model_version,
+                    policy=self._policy,
+                )
+                review_selection = self._review_selector.select(
+                    task=governed_task,
+                    result=result,
+                )
+                result = result.model_copy(
+                    update={"review_flags": list(review_selection.review_flags)},
+                    deep=True,
+                )
+                break
+            except (DomainError, ValidationError, TypeError, ValueError) as error:
+                invalid_error = error
+                if attempt_number < self._policy.max_format_attempts:
+                    continue
+                self._invalid_output(
+                    request=request,
+                    generation=invocation.result,
+                    audit=invocation.audit,
+                    prompt_record=prompt_record,
+                    privacy_flags=privacy_flags,
+                    cause=error,
+                )
+        else:  # pragma: no cover - loop always returns or raises
+            raise RuntimeError(f"unreachable scoring retry state: {invalid_error}")
         prompt_record.update(review_selection.safe_record())
         safety_flags = list(
             dict.fromkeys(

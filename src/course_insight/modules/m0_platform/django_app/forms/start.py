@@ -80,9 +80,9 @@ class ScopeSelectionForm(forms.Form):
 
 
 class ReviewLookupForm(ScopeSelectionForm):
-    """Validate teacher-owned scope plus an opaque paper identity."""
+    """Validate teacher-owned scope plus one student account identity."""
 
-    paper_id = forms.CharField(
+    learner_account = forms.CharField(
         min_length=1,
         max_length=128,
         strip=True,

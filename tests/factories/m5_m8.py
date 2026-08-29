@@ -86,7 +86,6 @@ def make_rubric(*, version: str = "1.0.0", rubric_id: str = "rubric_1") -> Rubri
         ],
         review_policy=ReviewPolicy(
             low_confidence_threshold=0.5,
-            double_score_disagreement_threshold=0.25,
             require_evidence_for_positive_score=True,
         ),
         status="teacher_approved",

@@ -1,0 +1,29 @@
+{% extends "course_insight/base.html" %}
+{% block title %}学生成绩复核 · 课业智析{% endblock %}
+{% block content %}
+  <h1>学生成绩复核</h1>
+  <p>课程：{{ course_id }}；班级：{{ class_id }}；学生账号：{{ learner.actor_id }}</p>
+  <p class="muted">这里仅列出会影响该学生掌握画像的诊断测评和阶段测评。</p>
+  <table>
+    <thead>
+      <tr><th>试卷</th><th>类型</th><th>完成时间</th><th>当前得分</th><th>操作</th></tr>
+    </thead>
+    <tbody>
+      {% for item in assessment_history %}
+        <tr>
+          <td>{{ item.paper_id }}</td>
+          <td>{{ item.task_label }}</td>
+          <td>{{ item.completed_at|date:"Y-m-d H:i" }}</td>
+          {% if item.result_available %}
+            <td>{{ item.total_score }} / {{ item.max_score }}</td>
+          {% else %}
+            <td class="muted">暂不可读取</td>
+          {% endif %}
+          <td><a href="{{ item.result_url }}">查看逐题情况并改判</a></td>
+        </tr>
+      {% empty %}
+        <tr><td colspan="5" class="muted">该学生没有会影响画像的已完成作答。</td></tr>
+      {% endfor %}
+    </tbody>
+  </table>
+{% endblock %}

@@ -17,9 +17,9 @@ from course_insight.infrastructure.postgresql.migration_runner import (
 
 
 def test_s1_s6_migration_is_the_next_checksum_locked_version() -> None:
-    assert SCHEMA_VERSION == 21
+    assert SCHEMA_VERSION == 22
     migrations = load_migrations()
-    assert migrations[-1].version == 21
+    assert migrations[-1].version == 22
     migration = next(item for item in migrations if item.version == 16)
     assert migration.path.name == "0016_m1_m2_m3_capabilities.sql"
     assert migration.checksum
@@ -46,9 +46,12 @@ def test_s1_s6_migration_is_the_next_checksum_locked_version() -> None:
     assert waiting_migration.path.name == "0020_m0_waiting_rooms.sql"
     assert "awaiting_review" in waiting_migration.sql
     assert "awaiting_rescore" in waiting_migration.sql
-    rescore_migration = migrations[-1]
+    rescore_migration = next(item for item in migrations if item.version == 21)
     assert rescore_migration.path.name == "0021_m0_rescore_operation.sql"
     assert "rescore" in rescore_migration.sql
+    roster_migration = migrations[-1]
+    assert roster_migration.path.name == "0022_m0_dynamic_class_roster.sql"
+    assert "class_roster_size" in roster_migration.sql
 
 
 def test_s1_s6_migration_is_transaction_safe_and_parameterized_by_runner() -> None:

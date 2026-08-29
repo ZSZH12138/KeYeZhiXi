@@ -471,6 +471,9 @@ def dependencies_from_run(run: AssessmentRun) -> AssessmentDependencies:
         evidence_index_checksum=run.evidence_index_checksum,
         state_policy_checksum=run.state_policy_checksum,
         teacher_policy_checksum=run.teacher_policy_checksum,
+        class_roster_size=run.class_roster_size,
+        class_roster_checksum=run.class_roster_checksum,
+        class_roster_captured_at=run.class_roster_captured_at,
     )
 
 

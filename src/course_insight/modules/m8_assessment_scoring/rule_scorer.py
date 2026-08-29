@@ -1,4 +1,4 @@
-"""Deterministic objective-answer matching and audit scoring."""
+"""Deterministic teacher-answer matching and audit scoring."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ from course_insight.modules.m8_assessment_scoring.clock import Clock, SystemUTCC
 
 
 class RuleScorer:
-    """Score objective values against teacher-listed exact answer strings."""
+    """Score supported answers against teacher-listed exact strings."""
 
     def __init__(self, clock: Clock | None = None) -> None:
         self._clock = SystemUTCClock() if clock is None else clock
@@ -29,18 +29,28 @@ class RuleScorer:
         item: ItemCard,
         raw_answer: Any,
     ) -> ScoreAuditRecord:
-        if (
-            not item.is_objective()
-            or item_instance.is_subjective()
-            or item.item_id != item_instance.item_id
-            or item.version != item_instance.item_version
+        aligned = (
+            item.item_id == item_instance.item_id
+            and item.version == item_instance.item_version
+        )
+        exact_subjective = (
+            item_instance.is_subjective()
+            and not item.is_objective()
+            and self.has_teacher_answers(item)
+        )
+        if not aligned or not (
+            (item.is_objective() and not item_instance.is_subjective())
+            or exact_subjective
         ):
             raise DomainError(
                 code="ANSWER_FORMAT_INVALID",
                 module="m8",
-                message="rule scoring requires one aligned objective item",
+                message=(
+                    "rule scoring requires one aligned objective item "
+                    "or exact-answer subjective item"
+                ),
             )
-        expected_values = self._accepted_answers(item)
+        expected_values = self.accepted_answers(item)
         frozen = item_instance.parameters.get("_frozen_answers")
         if type(frozen) is list and frozen:
             expected_values = list(frozen)
@@ -50,7 +60,11 @@ class RuleScorer:
         score = item_instance.max_score if correct else 0.0
         evidence = self.display(raw_answer)
         criterion = CriterionScore(
-            criterion_id=f"objective_{item.item_id}",
+            criterion_id=(
+                f"exact_{item.item_id}"
+                if item_instance.is_subjective()
+                else f"objective_{item.item_id}"
+            ),
             score=score,
             student_evidence=evidence,
             course_evidence_id=(
@@ -59,9 +73,17 @@ class RuleScorer:
                 else None
             ),
             reason=(
-                "The normalized answer matches the approved answer key."
+                (
+                    "The submitted answer exactly matches the approved answer key."
+                    if item_instance.is_subjective()
+                    else "The normalized answer matches the approved answer key."
+                )
                 if correct
-                else "The normalized answer does not match the approved answer key."
+                else (
+                    "The submitted answer does not exactly match the approved answer key."
+                    if item_instance.is_subjective()
+                    else "The normalized answer does not match the approved answer key."
+                )
             ),
         )
         return ScoreAuditRecord(
@@ -80,7 +102,16 @@ class RuleScorer:
         )
 
     @staticmethod
-    def _accepted_answers(item: ItemCard) -> list[Any]:
+    def has_teacher_answers(item: ItemCard) -> bool:
+        """Return whether an item has at least one teacher-listed answer."""
+
+        answers = item.answer_key.get("answers")
+        return type(answers) is list and bool(answers)
+
+    @staticmethod
+    def accepted_answers(item: ItemCard) -> list[Any]:
+        """Return a defensive copy of the teacher-approved answers."""
+
         answers = item.answer_key.get("answers")
         if answers is not None:
             if type(answers) is not list or not answers:

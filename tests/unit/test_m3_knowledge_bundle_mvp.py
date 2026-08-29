@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import copy
 import json
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,7 +15,6 @@ from course_insight.contracts.course import (
 )
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.knowledge import KnowledgeBundle
-from course_insight.modules.m3_knowledge_bundle.repository import M3Repository
 from course_insight.modules.m3_knowledge_bundle.seed_snapshot import (
     M3ValidationIssue,
     capture_seed_snapshot,
@@ -58,7 +56,7 @@ def _roles(package: CoursePackage, *, version: str = "v1") -> dict[str, dict[str
     return {
         "concept": {"knowledge_bundle_id": "bundle_1", "bundle_version": version, "published_at": NOW.isoformat(), "course_id": package.course_id, "course_package_id": package.course_package_id, "course_package_checksum": package.checksum, "concepts": [{"concept_id": "concept_1", "name": "Linear equation", "chapter_id": "chapter_1", "description": "Solve equations.", "aliases": ["equation"], "status": "published"}], "concept_evidence_ids": {"concept_1": ["evidence_chunk_1"]}},
         "item": {"items": [{"item_id": "item_1", "version": "v1", "stem": "One plus one equals two.", "item_type": "true_false", "concept_ids": ["concept_1"], "misconception_ids": [], "difficulty_level": 1, "cognitive_level": "remember", "parameter_rules": [], "answer_key": {"answer": True, "max_score": 1.0}, "rubric_id": None, "source_evidence_ids": ["evidence_chunk_1"], "status": "teacher_approved"}, {"item_id": "item_2", "version": "v1", "stem": "Explain the fact.", "item_type": "short_answer", "concept_ids": ["concept_1"], "misconception_ids": [], "difficulty_level": 2, "cognitive_level": "explain", "parameter_rules": [], "answer_key": {}, "rubric_id": "rubric_1", "source_evidence_ids": ["evidence_chunk_2"], "status": "teacher_approved"}], "q_matrix": [{"item_id": "item_1", "item_version": "v1", "concept_id": "concept_1", "weight": 1.0}, {"item_id": "item_2", "item_version": "v1", "concept_id": "concept_1", "weight": 1.0}]},
-        "rubric": {"rubrics": [{"rubric_id": "rubric_1", "version": "v1", "total_score": 2.0, "criteria": [{"criterion_id": "criterion_1", "description": "Explains the fact.", "max_score": 2.0, "expected_student_evidence": "Explanation.", "course_evidence_ids": ["evidence_chunk_2"]}], "review_policy": {"low_confidence_threshold": 0.5, "double_score_disagreement_threshold": 1.0, "require_evidence_for_positive_score": True}, "status": "published"}]},
+        "rubric": {"rubrics": [{"rubric_id": "rubric_1", "version": "v1", "total_score": 2.0, "criteria": [{"criterion_id": "criterion_1", "description": "Explains the fact.", "max_score": 2.0, "expected_student_evidence": "Explanation.", "course_evidence_ids": ["evidence_chunk_2"]}], "review_policy": {"low_confidence_threshold": 0.5, "require_evidence_for_positive_score": True}, "status": "published"}]},
         "blueprint": {"blueprints": [{"blueprint_id": "blueprint_1", "version": "v1", "course_id": package.course_id, "sections": [{"section_id": "section_1", "name": "Mixed", "item_count": 2, "score": 3.0, "item_types": [], "concept_weights": {"concept_1": 1.0}, "difficulty_range": [1, 2], "anchor_item_ids": ["item_1"], "anchor_item_versions": {"item_1": "v1"}}], "total_score": 3.0, "duration_minutes": 30, "status": "teacher_approved"}]},
         "prerequisite": {"prerequisite_relations": []},
         "misconception": {"misconception_tags": []},

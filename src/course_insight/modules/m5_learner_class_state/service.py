@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+from dataclasses import replace
 from pathlib import Path
 from typing import Any
 
@@ -378,20 +379,31 @@ class M5StateService:
         previous_class_state_snapshot: ClassStateSnapshot | None,
         state_policy_path: Path,
         expected_policy_checksum: str,
+        class_roster_size: int | None = None,
         learning_observation_batch: LearningObservationBatch | None = None,
         learning_model_run: LearningModelRun | None = None,
     ) -> StateUpdateResult:
         """Update state using the exact policy bytes identified by M0."""
 
+        policy = _read_verified_state_policy(
+            state_policy_path,
+            expected_policy_checksum,
+        )
+        if class_roster_size is not None:
+            if type(class_roster_size) is not int or class_roster_size < 1:
+                raise DomainError(
+                    code="CLASS_ROSTER_INVALID",
+                    module="m5",
+                    message="dynamic class roster size is invalid",
+                    recoverable=True,
+                )
+            policy = replace(policy, class_size=class_roster_size)
         return self._update_state_with_policy(
             scoring_result_bundle=scoring_result_bundle,
             knowledge_bundle=knowledge_bundle,
             previous_learner_state_snapshot=previous_learner_state_snapshot,
             previous_class_state_snapshot=previous_class_state_snapshot,
-            policy=_read_verified_state_policy(
-                state_policy_path,
-                expected_policy_checksum,
-            ),
+            policy=policy,
             learning_observation_batch=learning_observation_batch,
             learning_model_run=learning_model_run,
         )

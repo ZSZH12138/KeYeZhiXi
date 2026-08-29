@@ -9,51 +9,32 @@
       <a href="#misconceptions">误区</a> ·
       <a href="#individuals">学生个体</a> ·
       <a href="#reviews">复核</a> ·
-      <a href="#suggestions">教学建议</a>
+      <a href="#ai-teaching-advice">AI 教学建议</a>
     </p>
     <p><a href="{{ objective_answers_url }}">编辑客观题标准答案</a> · <a href="{{ blueprint_url }}">配置四段诊断卷</a></p>
   </nav>
-  {% if preview %}
-  <section class="card">
-    <h2>生成卷预览</h2>
-    <p class="muted">按当前蓝图生成一份示例卷，便于核对应四段用途和参数题干。不会发给学生。</p>
-    {% for section in preview.sections %}
-      <h3>{{ section.name }}{% if section.purpose %}（{{ section.purpose }}）{% endif %}</h3>
-      <ol>
-        {% for item in section.items %}
-          <li>{{ item.stem }}</li>
+  <details class="card" id="class-map">
+    <summary><strong>班级知识地图</strong>（点击展开）</summary>
+    {% if class_snapshot %}
+      <p>当前有效学生：{{ class_snapshot.active_student_count }} 人。未做题学生不会按掌握度 0 计入均值或补学度。</p>
+      <ul>
+        {% for item in class_snapshot.concepts %}
+          <li>{{ item.name }}：班级掌握度 {{ item.average_mastery }}，补学度 {{ item.priority_support_rate }}，已做 {{ item.attempted_student_count }} 人，未做 {{ item.unattempted_student_count }} 人</li>
+        {% empty %}
+          <li>当前发布版本没有知识点。</li>
         {% endfor %}
-      </ol>
-    {% empty %}
-      <p>当前蓝图没有可预览题目。</p>
-    {% endfor %}
-  </section>
-  {% else %}
-  <p class="muted">还没有可预览的已审核蓝图，或题目组合不满足蓝图约束。</p>
-  {% endif %}
-  {% if analytics %}
-  <section class="card" id="class-map">
-    <h2>班级知识地图</h2>
+      </ul>
+    {% else %}
+      <p class="muted">尚无可同步的课程知识版本；发布课程后会自动建立班级知识地图。</p>
+    {% endif %}
+    {% if analytics %}
     <p>证据覆盖率：{{ analytics.coverage_rate }}；状态：{{ analytics.evidence_status }}</p>
     {% if analytics.correction_completion_rate != None %}
       <p>订正完成率：{{ analytics.correction_completion_rate }}{% if analytics.post_hint_correction_rate != None %}；提示后改正率：{{ analytics.post_hint_correction_rate }}{% endif %}</p>
     {% endif %}
-    {% if analytics.chapters %}
-    <h3>按章节</h3>
-    <ul>
-      {% for chapter in analytics.chapters %}
-        <li>{{ chapter.chapter_id }}：均掌握 {{ chapter.mean_mastery }}（{{ chapter.concept_ids|join:"、" }}）</li>
-      {% endfor %}
-    </ul>
     {% endif %}
-    <ul>
-      {% for item in analytics.concept_summaries %}
-        <li>{{ item.concept_id }}：均掌握 {{ item.mean_mastery }}，优先补学占比 {{ item.priority_support }}{% if item.trend_delta != None %}，趋势 {{ item.trend_delta }}{% endif %}</li>
-      {% empty %}
-        <li>证据不足，暂不给出班级知识点结论。</li>
-      {% endfor %}
-    </ul>
-  </section>
+  </details>
+  {% if analytics %}
   <section class="card" id="misconceptions">
     <h2>误区</h2>
     <ul>
@@ -69,49 +50,40 @@
     {% for report in analytics.individual_reports %}
       <details>
         <summary>{{ report.learner_id }}：掌握度 {{ report.overall_mastery }}，最近得分 {{ report.recent_score }}，待复核 {{ report.review_required_count }}</summary>
-        <p>{% if report.hint_dependency != None %}提示依赖 {{ report.hint_dependency }}；{% endif %}{% if report.recent_correction_rate != None %}订正率 {{ report.recent_correction_rate }}{% endif %}</p>
-        <p><a href="{% url 'teacher-learner' course_id=course_id class_id=class_id learner_id=report.learner_id %}">查看该生掌握、错因与订正</a></p>
-        {% if report.weak_concept_ids %}<p>薄弱：{{ report.weak_concept_ids|join:"、" }}</p>{% endif %}
-        {% if report.active_misconception_ids %}<p>误区：{{ report.active_misconception_ids|join:"、" }}</p>{% endif %}
+        <p><a href="{% url 'teacher-learner' course_id=course_id class_id=class_id learner_id=report.learner_id %}">查看该生掌握、错因、订正</a></p>
       </details>
     {% empty %}<p>暂无个体报告。</p>{% endfor %}
   </section>
   {% endif %}
   <section class="card" id="reviews">
     <h2>复核</h2>
-    <p class="muted">输入试卷号打开该份答卷的复核队列。班级分析本身不依赖试卷号。</p>
+    <p><a href="{{ suggested_review_url }}">建议教师复核（{{ suggested_review_count }}）</a></p>
+    <p class="muted">输入学生账号，查看该学生所有会影响画像的答卷并逐题改判。</p>
     <form method="get" action="{% url 'teacher-review-lookup' %}">
       {{ lookup_form.as_p }}
-      <button type="submit">查看试卷复核</button>
+      <button type="submit">查看学生复核记录</button>
     </form>
   </section>
-  {% if analytics %}
-  <section class="card" id="suggestions">
-    <h2>教学建议</h2>
-    <p class="muted">确认只表示采纳这条候选，不等于已经上过那堂课。忽略也是一种教学决定，依据会保留。</p>
-    {% for suggestion in analytics.suggestions %}
+  <section class="card" id="ai-teaching-advice">
+    <h2>AI 教学建议</h2>
+    <p class="muted">点击后仅把已做且班级掌握度低于巩固线的前 10 个知识点、对应课程来源文本和匿名班级聚合数据发送给 DeepSeek；未做题学生不参与筛选。</p>
+    {% if teaching_advice_available and teaching_advice_flow %}
+      <form method="post" action="{{ teaching_advice_url }}">
+        {% csrf_token %}
+        <input type="hidden" name="flow_token" value="{{ teaching_advice_flow }}">
+        <button type="submit">生成教学建议</button>
+      </form>
+    {% else %}
+      <p class="muted">当前班级尚未配置 DeepSeek API。{% if deepseek_settings_url %}<a href="{{ deepseek_settings_url }}">配置接口</a>{% endif %}</p>
+    {% endif %}
+    {% if teaching_advice_error %}
+      <p role="alert">{{ teaching_advice_error }}</p>
+    {% endif %}
+    {% if teaching_advice %}
       <article>
-        <p>{{ suggestion.content }}（状态 {{ suggestion.status }}；覆盖率 {{ suggestion.coverage_rate }}，置信度 {{ suggestion.confidence }}；证据 {{ suggestion.evidence_ids|join:", " }}）</p>
-        {% if suggestion_flow %}
-        {% if suggestion.status == "candidate" or suggestion.status == "observe" %}
-        <form method="post" action="{{ suggestion_url }}">
-          {% csrf_token %}
-          <input type="hidden" name="flow_token" value="{{ suggestion_flow }}">
-          <input type="hidden" name="suggestion_id" value="{{ suggestion.suggestion_id }}">
-          <label>处理
-            <select name="decision">
-              <option value="confirmed">确认</option>
-              <option value="modified">改写</option>
-              <option value="ignored">忽略</option>
-            </select>
-          </label>
-          <label>改写表述<textarea name="content" rows="2"></textarea></label>
-          <button type="submit">保存决定</button>
-        </form>
-        {% endif %}
-        {% endif %}
+        <p>本次依据：{{ teaching_advice.concept_names|join:"、" }}</p>
+        <p>{{ teaching_advice.advice|linebreaksbr }}</p>
       </article>
-    {% empty %}<p>暂无建议。</p>{% endfor %}
+    {% endif %}
   </section>
-  {% endif %}
 {% endblock %}

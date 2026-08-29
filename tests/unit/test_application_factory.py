@@ -19,10 +19,7 @@ from course_insight.application.factory import (
     ServiceOverrides,
     build_application,
 )
-from course_insight.application.runtime_context import (
-    CourseRuntimeRegistry,
-    RuntimeSnapshotRefs,
-)
+from course_insight.application.runtime_context import RuntimeSnapshotRefs
 from course_insight.contracts.course import (
     ContentChunk,
     CoursePackage,
@@ -50,9 +47,6 @@ from course_insight.infrastructure.config import (
     RetrievalSettings,
 )
 from course_insight.infrastructure.config.models import M6PolicySettings
-from course_insight.infrastructure.m1_file_repository import FileM1Repository
-from course_insight.infrastructure.m2_file_repository import FileM2Repository
-from course_insight.infrastructure.m3_file_repository import FileM3Repository
 from course_insight.infrastructure.sqlite.m1_m2_m3_repository import (
     SQLiteM1M2M3Repository,
 )

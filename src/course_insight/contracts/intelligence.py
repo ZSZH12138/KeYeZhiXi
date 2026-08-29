@@ -114,6 +114,7 @@ class LLMGenerationRequest(ContractModel):
         "rubric_scoring",
         "student_feedback",
         "teacher_narrative",
+        "teacher_teaching_advice",
         "knowledge_extraction",
         "question_concept_linking",
         "student_rag_qa",

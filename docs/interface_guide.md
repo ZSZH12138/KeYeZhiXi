@@ -1,6 +1,6 @@
 # 接口与生产者—消费者指南
 
-> 2026-08-27：知识文件入库、题目自动标注和学生答疑已经采用新的活动发布版本。旧 M3 审批接口仅为兼容保留，不再是生产者入口。新入库对象是 M0/M1/M3/M7 内部接口，因此公共根契约仍为 91 个。
+> 2026-08-29：知识文件入库、题目自动标注和学生答疑已经采用新的活动发布版本。旧 M3 审批接口仅为兼容保留，不再是生产者入口。新入库对象是 M0/M1/M3/M7 内部接口，因此公共根契约仍为 91 个。当前 Django 页面在这些公共契约外增加动态班级快照、画像历史清洗和逐题建议复核投影。
 
 ## 使用规则
 
@@ -93,7 +93,10 @@ M6 的私有 policy runtime、LinUCB、reward/OPE 和持久化已实现，但默
 | `ModelQualityReport` | `M9.build_model_quality_report` | M9 教师审核与 M8 发布门槛 | `ready`、`failed` 或证据不足时 `insufficient_data` |
 | `CalibrationReviewDecision` | M9 教师审核 | M8 参数版本发布 | approve/reject/defer 驱动追加式参数状态机 |
 
-M0 的 `TeacherReviewSubmission` 只用于 M8/M9 成绩复核。M3 的旧 `TeacherReviewWorkflow` 已退出当前知识发布链，不能把它重新接到教师文件页。
+M0 的 `TeacherReviewSubmission` 仍用于 M8/M9 公共兼容复核服务。当前 Django 教师页
+使用更窄的逐题改判表单：只接收本题合法分值和可选备注，并在服务端重建当前审计
+身份；普通复核只列已完成画像测评，低置信度建议复核按试卷聚合。M3 的旧
+`TeacherReviewWorkflow` 已退出当前知识发布链，不能把它重新接到教师文件页。
 
 ## 新知识入库内部接口
 

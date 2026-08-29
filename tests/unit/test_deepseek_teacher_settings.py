@@ -87,3 +87,56 @@ def test_test_environment_does_not_wire_deepseek_even_with_api_key(
         assert isinstance(adapter, PlaceholderRubricAdapter)
     finally:
         container.close()
+
+
+def test_development_wires_deepseek_with_local_presidio_when_artifact_is_absent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    from course_insight.application.factory import build_application
+    from course_insight.infrastructure import deepseek_secrets
+    from course_insight.infrastructure.config import (
+        DatabaseSettings,
+        LoggingSettings,
+        PlatformSettings,
+    )
+    from course_insight.modules.m7_local_model import privacy_reviewer, runtime
+
+    class _AllowingDevelopmentReviewer:
+        reviewer_id = "development-presidio-fixture"
+
+    reviewer = _AllowingDevelopmentReviewer()
+    adapter = object()
+    monkeypatch.setenv(DEEPSEEK_API_KEY_ENV, "sk-development-scoring-key")
+    monkeypatch.setattr(
+        deepseek_secrets,
+        "inspect_m7_privacy_artifacts",
+        lambda runtime_dir: (False, "missing_pinned_checksums"),
+    )
+    monkeypatch.setattr(
+        privacy_reviewer,
+        "build_presidio_spacy_reviewer",
+        lambda **kwargs: reviewer,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "build_deepseek_m7_adapter",
+        lambda **kwargs: adapter,
+    )
+    runtime_dir = tmp_path / "runtime"
+    settings = PlatformSettings(
+        environment="development",
+        runtime_dir=runtime_dir,
+        config_dir=tmp_path / "config",
+        database=DatabaseSettings(
+            backend="sqlite",
+            sqlite_path=runtime_dir / "course_insight.sqlite3",
+        ),
+        logging=LoggingSettings(directory=runtime_dir / "logs"),
+    )
+
+    container = build_application(settings)
+    try:
+        assert container.m7_service._local_model_adapter is adapter
+    finally:
+        container.close()

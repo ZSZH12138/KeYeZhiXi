@@ -6,8 +6,10 @@ import hashlib
 import hmac
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 
+from course_insight.application.class_roster import ClassRosterSnapshot
 from course_insight.contracts.errors import DomainError
 from course_insight.contracts.evidence import EvidenceIndexRef
 from course_insight.contracts.knowledge import KnowledgeBundle
@@ -34,8 +36,35 @@ class AssessmentDependencies:
     evidence_index_checksum: str | None
     state_policy_checksum: str | None
     teacher_policy_checksum: str | None
+    class_roster_size: int | None = None
+    class_roster_checksum: str | None = None
+    class_roster_captured_at: datetime | None = None
 
-    def as_run_fields(self) -> dict[str, str | None]:
+    def __post_init__(self) -> None:
+        roster_identity = (
+            self.class_roster_size,
+            self.class_roster_checksum,
+            self.class_roster_captured_at,
+        )
+        invalid_roster = (
+            any(value is None for value in roster_identity)
+            and any(value is not None for value in roster_identity)
+        ) or (
+            self.class_roster_size is not None
+            and (
+                type(self.class_roster_size) is not int
+                or self.class_roster_size < 1
+                or self.class_roster_checksum is None
+                or len(self.class_roster_checksum) != 64
+                or self.class_roster_captured_at is None
+                or self.class_roster_captured_at.tzinfo is None
+                or self.class_roster_captured_at.utcoffset() is None
+            )
+        )
+        if invalid_roster:
+            raise _dependency_mismatch("class roster identity is invalid")
+
+    def as_run_fields(self) -> dict[str, object | None]:
         """Return a fresh mapping accepted by private AssessmentRun metadata."""
 
         return {
@@ -48,6 +77,9 @@ class AssessmentDependencies:
             "evidence_index_checksum": self.evidence_index_checksum,
             "state_policy_checksum": self.state_policy_checksum,
             "teacher_policy_checksum": self.teacher_policy_checksum,
+            "class_roster_size": self.class_roster_size,
+            "class_roster_checksum": self.class_roster_checksum,
+            "class_roster_captured_at": self.class_roster_captured_at,
         }
 
 
@@ -98,6 +130,7 @@ def capture_assessment_dependencies(
     evidence_index_ref: EvidenceIndexRef | None,
     state_policy_path: Path | None,
     teacher_policy_path: Path | None,
+    class_roster_snapshot: ClassRosterSnapshot | None = None,
 ) -> AssessmentDependencies:
     """Validate and freeze exact dependency identities before recording a run."""
 
@@ -144,6 +177,21 @@ def capture_assessment_dependencies(
         ),
         state_policy_checksum=state_checksum,
         teacher_policy_checksum=teacher_checksum,
+        class_roster_size=(
+            None
+            if class_roster_snapshot is None
+            else class_roster_snapshot.active_student_count
+        ),
+        class_roster_checksum=(
+            None
+            if class_roster_snapshot is None
+            else class_roster_snapshot.roster_checksum
+        ),
+        class_roster_captured_at=(
+            None
+            if class_roster_snapshot is None
+            else class_roster_snapshot.captured_at
+        ),
     )
 
 

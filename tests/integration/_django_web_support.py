@@ -377,6 +377,17 @@ class FakeWebRuntime:
         self.courses = {"course_1": course}
         self.container = SimpleNamespace(
             coordinator=coordinator,
+            m2_service=SimpleNamespace(
+                build_index=lambda package: evidence_index().model_copy(
+                    update={
+                        "index_id": f"index_{package.course_package_id}",
+                        "course_package_id": package.course_package_id,
+                        "storage_ref": (
+                            f"lexical:index_{package.course_package_id}"
+                        ),
+                    }
+                )
+            ),
             settings=SimpleNamespace(
                 runtime_dir=runtime_dir,
                 web=SimpleNamespace(session_timeout_seconds=3600),

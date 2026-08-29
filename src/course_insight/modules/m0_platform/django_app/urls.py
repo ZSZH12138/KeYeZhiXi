@@ -179,6 +179,30 @@ urlpatterns = [
         name="teacher-deepseek-settings",
     ),
     path("teacher/reviews/", teacher.lookup, name="teacher-review-lookup"),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "reviews/learners/<str:learner_id>/"
+        ),
+        teacher.review_list,
+        name="teacher-learner-review-list",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "suggested-reviews/"
+        ),
+        teacher.suggested_review_list,
+        name="teacher-suggested-review-list",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "suggested-reviews/<int:case_id>/"
+        ),
+        teacher.suggested_review_detail,
+        name="teacher-suggested-review-detail",
+    ),
     path("teacher/classes/", teacher.class_lookup, name="teacher-class-lookup"),
     path(
         "teacher/knowledge-reviews/",
@@ -197,6 +221,14 @@ urlpatterns = [
         ),
         teacher.decide_class_suggestion,
         name="teacher-class-suggestion",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "teaching-advice/"
+        ),
+        teacher.generate_class_teaching_advice,
+        name="teacher-class-teaching-advice",
     ),
     path(
         (
@@ -245,6 +277,14 @@ urlpatterns = [
         ),
         teacher.rescore,
         name="teacher-rescore",
+    ),
+    path(
+        (
+            "teacher/courses/<str:course_id>/classes/<str:class_id>/"
+            "reviews/<str:paper_id>/items/<str:item_instance_id>/rescore/"
+        ),
+        teacher.item_rescore,
+        name="teacher-item-rescore",
     ),
     path(
         (

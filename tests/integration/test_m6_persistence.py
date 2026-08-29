@@ -48,7 +48,6 @@ from course_insight.modules.m6_tutoring_fsm.policy_types import (
     PolicyArtifactManifest,
     PolicyEvaluationRecord,
     PolicyExecutionRef,
-    PolicyObservation,
     PolicyRewardRecord,
 )
 from course_insight.modules.m6_tutoring_fsm.state_machine import (
@@ -326,7 +325,7 @@ def test_migration_v3_creates_m6_decision_table_with_required_keys(
         migrate(connection)
         migrate(connection)
 
-        assert SCHEMA_VERSION == 19
+        assert SCHEMA_VERSION == 21
         assert current_schema_version(connection) == SCHEMA_VERSION
         versions = [
             int(row[0])

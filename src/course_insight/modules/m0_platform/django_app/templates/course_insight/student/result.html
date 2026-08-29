@@ -37,6 +37,17 @@
         {% endif %}
         <h3>题目正确答案</h3>
         <p>{{ item.correct_answer }}</p>
+        <h3>学生答案</h3>
+        <p>{{ item.student_answer }}</p>
+        <h3>学生得分</h3>
+        <p>{% if item.student_score != None %}{{ item.student_score }} / {{ item.max_score }}{% else %}—{% endif %}</p>
+        {% if item.requires_ai_assessment %}
+          <h3>AI评判</h3>
+          <p>{{ item.ai_assessment }}</p>
+          <p>AI 置信度：{% if item.ai_confidence != None %}{{ item.ai_confidence }}{% else %}—{% endif %}</p>
+        {% endif %}
+        <h3>教师备注</h3>
+        <p>{{ item.teacher_note|default:"—" }}</p>
         <h3>题目涉及知识点</h3>
         <p>{{ item.concept_names|join:"、" }}</p>
         <h3>知识点对应原文件</h3>
@@ -57,7 +68,7 @@
     <h2>安全反馈</h2>
     <p>{{ result.feedback.message }}</p>
     <p>订正说明：{{ result.feedback.correction_note }}</p>
-    <p><a href="{{ feedback_url }}">查看完整反馈与证据引用</a></p>
+    {% if feedback_url %}<p><a href="{{ feedback_url }}">查看完整反馈与证据引用</a></p>{% endif %}
     {% endif %}
     {% if result.correction_available and correction_url %}
     <section class="card">

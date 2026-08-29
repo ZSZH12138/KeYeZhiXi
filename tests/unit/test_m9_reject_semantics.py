@@ -545,9 +545,9 @@ def test_review_workflow_skips_an_additional_m5_write_and_hides_score_fields(
         class_id="class_1",
     )
 
-    # This is a prospective guard only: the submitted state already consumed
-    # the pre-review score. A cross-module M5 compensation protocol is tracked
-    # in docs/m7_m9_cross_module_change_request.md.
+    # This legacy coordinator path remains prospective: the submitted state
+    # already consumed the pre-review score. The current Django teacher flow
+    # instead projects only after all pending review items are resolved.
     assert len(store.state_history) == state_history_count
     assert result["recomputed_state_result"] == submitted["state_result"]
     assert result["review_decision"].teacher_comment == submission.teacher_comment

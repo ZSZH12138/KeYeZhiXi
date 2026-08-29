@@ -5,7 +5,6 @@ import uuid
 from datetime import datetime, timezone
 from pathlib import Path
 
-import pytest
 
 from course_insight.contracts.events import LearningEvent
 from course_insight.contracts.tasking import TaskPlan

@@ -14,6 +14,7 @@ from course_insight.contracts.errors import DomainError
 _ASSESSMENT_TASK_TYPES = frozenset(
     {"diagnostic", "practice", "correction", "stage_assessment"}
 )
+PROFILE_AFFECTING_TASK_TYPES = frozenset({"diagnostic", "stage_assessment"})
 _ASSESSMENT_WORKFLOW = ("M8", "M2", "M7", "M5", "M6", "M9")
 _QA_WORKFLOW = ("M2", "M7", "M6")
 

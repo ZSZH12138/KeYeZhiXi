@@ -79,6 +79,9 @@ _DEPENDENCY_FIELDS = (
     "evidence_index_checksum",
     "state_policy_checksum",
     "teacher_policy_checksum",
+    "class_roster_size",
+    "class_roster_checksum",
+    "class_roster_captured_at",
 )
 _LEGACY_RECOVERY_FIELDS = (
     *_DEPENDENCY_FIELDS,
@@ -166,6 +169,9 @@ class AssessmentRun:
     evidence_index_checksum: str | None = None
     state_policy_checksum: str | None = None
     teacher_policy_checksum: str | None = None
+    class_roster_size: int | None = None
+    class_roster_checksum: str | None = None
+    class_roster_captured_at: datetime | None = None
     previous_state_frozen: bool | None = None
     previous_learner_snapshot_id: str | None = None
     previous_learner_state_version: int | None = None
@@ -198,6 +204,7 @@ class AssessmentRun:
                 self.evidence_index_checksum,
                 self.state_policy_checksum,
                 self.teacher_policy_checksum,
+                self.class_roster_checksum,
                 self.artifact_sha256,
             )
         )
@@ -212,15 +219,29 @@ class AssessmentRun:
             self.evidence_index_version,
             self.evidence_index_checksum,
         )
+        class_roster_identity = (
+            self.class_roster_size,
+            self.class_roster_checksum,
+            self.class_roster_captured_at,
+        )
         dependency_identity_invalid = (
             not _all_or_none(knowledge_identity)
             or not _all_or_none(evidence_identity)
+            or not _all_or_none(class_roster_identity)
             or any(
                 value is not None and not value
                 for value in (
                     *knowledge_identity,
                     *evidence_identity,
                 )
+            )
+            or self.class_roster_size is not None
+            and (
+                type(self.class_roster_size) is not int
+                or self.class_roster_size < 1
+                or self.class_roster_captured_at is None
+                or self.class_roster_captured_at.tzinfo is None
+                or self.class_roster_captured_at.utcoffset() is None
             )
         )
         policy_identity = (
@@ -281,9 +302,8 @@ class AssessmentRun:
             self.operation == "submit"
             and (
                 self.scoring_result_checksum is None
-                or self.state_version is None
-                or self.report_id is None
                 or self.feedback_id is None
+                or (self.state_version is None) != (self.report_id is None)
             )
             or self.operation == "review"
             and self.scoring_result_checksum is None

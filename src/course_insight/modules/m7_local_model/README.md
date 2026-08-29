@@ -17,10 +17,12 @@ M7 现在提供两条明确分离的运行路径：
 - 默认路径使用 `PlaceholderRubricAdapter` 和 `EmptyDeepSeekAdapter`，不读密钥、
   不访问网络，架构空示例保持 `status=empty`；
 - 通过 `build_deepseek_m7_adapter` 显式构造客户端、本地隐私复核器与适配器后，才允许
-  真实评分请求；任何复核器缺失、损坏、异常或结果不确定都会在网络前失败关闭；
+  真实评分请求；生产环境必须使用完整的 Presidio＋钉住语义模型组合，
+  本地 `development` 环境在语义工件未部署时可使用已安装且版本匹配的
+  Presidio＋中文 spaCy 检查器；检查器缺失、损坏、异常或结果不确定仍会在网络前失败关闭；
   学生反馈始终由本地模板生成，不读取密钥、不访问网络。客户端仅接受
   `deepseek-v4-flash` 或 `deepseek-v4-pro`；冻结的
-  `m7-governed-v2` 默认使用 Flash、非思考模式、`temperature=0` 和 4096 最大输出
+  `m7-governed-v3` 默认使用 Flash、非思考模式、`temperature=0` 和 4096 最大输出
   token；Flash/Pro × 思考/非思考四组合只作为版本化候选，未凭空指定优胜模型。
 
 ## 输入来源
@@ -32,10 +34,9 @@ M7 现在提供两条明确分离的运行路径：
 
 ## 输出
 
-- `RubricScoringResult` 返回 M8；默认 `all_review` 强制加入
-  `teacher_review_required`。只有身份/SHA 完全匹配且通过课程域校准门的 `selective`
-  选择器才能返回空标记，M8 自己的低置信门仍可重新要求复核；当前公共 DeepSeek
-  审计尚不暴露 provider fingerprint，因此本 PR 的证据只批准 `shadow`，不自动打开生产免审；
+- `RubricScoringResult` 返回 M8；本地固定按置信度 0.5 路由，低于 0.5 加入
+  `teacher_review_required` 与 `low_confidence`，达到 0.5 不进入建议复核；模型输出的
+  `review_flags` 必须为空，不能自行决定是否送审；
 - `StudentFeedbackPackage` 返回 M0 学生外层，引用只能来自当前
   `EvidenceBundle`，短期只携带来源与定位，不携带证据原文；所有学生可见文字
   必须通过答案泄露检查；
@@ -44,7 +45,7 @@ M7 现在提供两条明确分离的运行路径：
   并以仓储事务幂等写入；这不表示外部 HTTP 请求与数据库写入具有原子性。
   最终 `RubricScoringResult` 仍由 M8 的评分流程负责审计。
 
-评分提示使用 `m7-rubric-scoring-json@5.0.0`；模型必须返回空 `review_flags`，复核路由
+评分提示使用 `m7-rubric-scoring-json@6.0.0`；模型必须返回空 `review_flags`，复核路由
 只由本地程序决定。反馈模板使用
 `m7-deterministic-feedback@1.0.0`。评分输入的题干、学生答案、量规文字和
 课程证据全部位于 user JSON，并被 system 规则声明为不可信数据，不能改变角色、
@@ -69,11 +70,13 @@ Presidio/spaCy 与语义分类器是进程内专用检测组件，不是生成�
 
 ## 显式启用
 
-默认应用工厂仍使用占位适配器。教师配置页可以保存密钥，但只有同时存在
+测试环境和未配置密钥的运行环境使用占位适配器。生产环境只有同时存在
 `COURSE_INSIGHT_M7_PRIVACY_MODEL_SHA256` / `COURSE_INSIGHT_M7_PRIVACY_MANIFEST_SHA256`
 和 `runtime/m7_privacy/privacy-model/` 工件时，工厂才会调用
 `build_required_m7_privacy_reviewer` 并装配真实评分适配器。缺工件时保持占位适配器，
-不会改用 DenyAll 假装已启用。M9 教师解读在密钥存在时单独配置，不发送学生原文。
+不会改用 DenyAll 假装已启用。本地 `development` 环境可在上述语义工件缺失时
+改用版本匹配的 Presidio＋`zh_core_web_sm`；如果该本地检查器构造失败，仍保持
+占位评分器且不出站。M9 教师解读在密钥存在时单独配置，不发送学生原文。
 
 ```python
 from course_insight.modules.m7_local_model import (
@@ -130,12 +133,13 @@ sklearn 工件启用时，模型文件和 manifest 必须分别由部署配置�
 - 使用非流式 JSON Output、有限超时、有限指数退避和响应大小上限；
 - 默认策略使用 V4 Flash、非思考模式和零温度；候选矩阵绑定版本，不接受自定义主机或密钥变量名；
 - 评分必须完整且仅覆盖冻结量规分项，正分必须引用学生原文和允许的课程证据，
-  单项/总分不能越界；模型无权输出复核标记，默认全部复核，`shadow` 仍全部复核，
-  `selective` 只有校准风险上界、样本门和 OOD 门同时通过才允许自动接受；
+  单项/总分不能越界；模型无权输出复核标记，本地程序固定以 0.5 为建议复核阈值；
 - 反馈根据 M6 `action_type` 选择固定模板，只引用当前证据包，缺失概念必须属于
   M6 目标；该路径不会消费任何模型生成文本；
-- 主观评分路径只对 429、可恢复 5xx、超时、空 JSON content 和资源不足做有限重试；
-  内容过滤、截断、畸形/越界 JSON 均失败关闭，不做模型语义修复；
+- 填空/主观题只有精确匹配失败才进入该路径；题目、冻结参考答案、学生答案、
+  知识点名称、课程原文和分值同时进入受控提示；
+- 畸形、越界或不满足评分契约的 JSON 会重新完成整题评分，固定执行首次调用加 8 次
+  格式重试；仍失败时由 M8 暂记 0 分、置信度 0、生成中文错误评语并要求教师复核；
 - 所有错误使用稳定、安全错误码，不回传服务端响应正文。
 
 ## 调用审计的当前边界
@@ -183,10 +187,10 @@ M7_PRESIDIO_ZH_SMOKE=1 python -m pytest -q \
 不得接入 DeepSeek 以外的生成式 LLM、把 DeepSeek 用于无证据的测评补救反馈、加载未经审批或
 未钉住校验和的本地模型权重、
 硬编码密钥、默认联网、保存完整模型响应、接受不匹配证据、引用不存在证据、
-绕过本地选择器/教师复核门、绕过出站隐私治理，或在学生反馈中泄漏答案/证据原文。
+绕过本地置信度门/教师复核门、绕过出站隐私治理，或在学生反馈中泄漏答案/证据原文。
 
-选择性审核、数据切分、公开数据边界、M9 抽检和 live 评测安全要求见
-[`docs/M7_M9_SELECTIVE_REVIEW_EVALUATION.md`](../../../../docs/M7_M9_SELECTIVE_REVIEW_EVALUATION.md)。
+被替换的全量审核、双次评分和选择器评测设计只保留在
+[`docs/legacy_architecture_snapshot_2026-08-25.md`](../../../../docs/legacy_architecture_snapshot_2026-08-25.md)。
 
 ## 2026-08-27 新知识链用例
 

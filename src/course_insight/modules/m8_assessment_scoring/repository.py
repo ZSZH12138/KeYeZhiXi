@@ -157,6 +157,9 @@ class M8Repository(Protocol):
     ) -> ScoringResultBundle | None:
         """Load the earliest result at one exact target-audit version."""
 
+    def purge_assessment_attempt(self, *, paper_id: str, attempt_id: str) -> None:
+        """Delete one non-profile attempt and its unneeded frozen evidence."""
+
     def insert_or_get_calibration_run(
         self,
         result: CalibrationRunResult,

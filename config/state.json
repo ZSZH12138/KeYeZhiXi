@@ -1,7 +1,7 @@
 {
   "aggregation_policy_version": "1.0.0",
   "class_id": "class_01",
-  "class_size": 1,
+  "class_size": 3,
   "consolidating_threshold": 0.5,
   "mastered_threshold": 0.8,
   "minimum_assessed_count": 1,

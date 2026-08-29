@@ -43,7 +43,11 @@ _ANSWER_MARKERS = (
 # copying EvidenceChunk.text into a learner-visible contract.
 STUDENT_CITATION_QUOTE_PLACEHOLDER = "证据摘录暂不展示"
 
-_SOURCE_CITATION_ID = re.compile(r"^source_[0-9]{1,9}$")
+_SOURCE_CITATION_ID = re.compile(
+    r"^(?:source_[0-9]{1,9}|source-version-(?:"
+    r"[0-9a-f]{32}|[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}"
+    r"))$"
+)
 _EVIDENCE_CITATION_ID = re.compile(
     r"^evidence_(?:[0-9]{1,9}|chunk_[0-9]{1,9}|chunk_[0-9a-f]{64})$"
 )
@@ -56,6 +60,26 @@ _CITATION_PRC_ID = re.compile(
 )
 _APPROVED_LOCATORS = (
     re.compile(r"^paragraph:[1-9][0-9]{0,8}$"),
+    re.compile(
+        r"^paragraph:[1-9][0-9]{0,8};lines:[1-9][0-9]{0,8}-"
+        r"[1-9][0-9]{0,8}$"
+    ),
+    re.compile(
+        r"^table:[1-9][0-9]{0,8};row:[1-9][0-9]{0,8};"
+        r"cell:[1-9][0-9]{0,8}$"
+    ),
+    re.compile(
+        r"^page:[1-9][0-9]{0,8};block:[1-9][0-9]{0,8}$"
+    ),
+    re.compile(r"^slide:[1-9][0-9]{0,8}$"),
+    re.compile(
+        r"^slide:[1-9][0-9]{0,8};shape:[1-9][0-9]{0,8};"
+        r"paragraph:[1-9][0-9]{0,8}$"
+    ),
+    re.compile(
+        r"^slide:[1-9][0-9]{0,8};table:[1-9][0-9]{0,8};"
+        r"row:[1-9][0-9]{0,8};cell:[1-9][0-9]{0,8}$"
+    ),
     # Numeric-only legacy forms already present in repository fixtures.  They
     # remain compatibility aliases, not a promise that arbitrary locators are
     # part of the public v1 contract.

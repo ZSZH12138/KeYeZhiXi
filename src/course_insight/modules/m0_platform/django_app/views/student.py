@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from collections.abc import Mapping
 from dataclasses import replace
@@ -23,19 +24,8 @@ from course_insight.contracts.tasking import TaskPlan
 from course_insight.modules.m0_platform.blueprint_overlay import (
     bundle_with_blueprint,
 )
-from course_insight.modules.m0_platform.correction_records import (
-    link_follow_up,
-    load_records,
-    record_follow_up_outcome,
-    record_hint,
-    records_path,
-    save_records,
-    upsert_lost_items,
-)
 from course_insight.modules.m0_platform.follow_up import (
     build_follow_up_bundle,
-    follow_up_source,
-    merge_follow_up_items,
 )
 from course_insight.modules.m5_learner_class_state.update_policy import (
     StatePolicy,
@@ -45,18 +35,32 @@ from course_insight.modules.m0_platform.django_app import runtime
 from course_insight.modules.m0_platform.django_app.authz import authorize_scope
 from course_insight.modules.m0_platform.django_app.assessment_feedback import (
     question_feedback_details,
+    teacher_notes_for_attempt,
 )
 from course_insight.modules.m0_platform.django_app.assessment_history import (
     load_profile_assessment_history,
 )
+from course_insight.modules.m0_platform.django_app.assessment_evidence import (
+    evidence_index_for_assessment,
+)
+from course_insight.modules.m0_platform.django_app.class_roster import (
+    capture_profile_class_roster,
+)
 from course_insight.modules.m0_platform.django_app.learning_projection import (
+    PROFILE_TASK_TYPES,
+    link_correction_follow_up,
     project_finalized_assessment,
+    record_finalized_correction,
     selection_context_for_learner,
+)
+from course_insight.modules.m0_platform.django_app.suggested_review import (
+    sync_suggested_review_case,
 )
 from course_insight.modules.m0_platform.django_app.models import (
     CourseClassWorkspace,
     CourseKnowledgeRelease,
     LearnerConceptMastery,
+    WrongQuestionRecord,
 )
 from course_insight.modules.m0_platform.django_app.qa_handoff import (
     issue_qa_handoff,
@@ -90,6 +94,9 @@ from course_insight.modules.m0_platform.objective_answers import (
 from course_insight.modules.m3_knowledge_bundle.release_compatibility import (
     knowledge_bundle_from_release,
 )
+
+
+logger = logging.getLogger(__name__)
 
 
 @login_required
@@ -390,6 +397,29 @@ def submit(
         attempt_id=attempt_id,
         submitted_at=flow_issued_at(verified),
     )
+    knowledge_bundle = (
+        _bundle_for_task(
+            task_value,
+            course_id=course_id,
+            class_id=class_id,
+            legacy_course=course,
+        )
+        if type(task_value) is TaskPlan
+        else _legacy_test_bundle(course)
+    )
+    index_ref = evidence_index_for_assessment(
+        web_runtime,
+        course,
+        task=task_value,
+        knowledge_bundle=knowledge_bundle,
+        course_id=course_id,
+        class_id=class_id,
+    )
+    class_roster_snapshot = capture_profile_class_roster(
+        course_id=course_id,
+        class_id=class_id,
+        learner_id=request.user.actor_id,
+    )
     with bind_log_context(
         course_id=course_id,
         class_id=class_id,
@@ -398,21 +428,13 @@ def submit(
         submitted = web_runtime.container.coordinator.submit_assessment(
             assessment_submission=submission,
             request_id=stable_flow_identifier("request", flow),
-            index_ref=course.course_context.evidence_index_ref,
-            knowledge_bundle=(
-                _bundle_for_task(
-                    task_value,
-                    course_id=course_id,
-                    class_id=class_id,
-                    legacy_course=course,
-                )
-                if type(task_value) is TaskPlan
-                else _legacy_test_bundle(course)
-            ),
+            index_ref=index_ref,
+            knowledge_bundle=knowledge_bundle,
             state_policy_path=course.state_policy_path,
             teacher_threshold_policy_path=(
                 course.teacher_threshold_policy_path
             ),
+            class_roster_snapshot=class_roster_snapshot,
         )
     _project_response_if_final(
         submitted,
@@ -468,14 +490,30 @@ def result(
         )
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
     task_value = response.get("task_plan")
+    if "waiting_status" in response:
+        return render(
+            request,
+            "course_insight/student/pending_result.html",
+            {
+                "waiting_status": response["waiting_status"],
+                "paper": paper_view(paper),
+                "question_details": _question_details_with_qa(
+                    task=task_value,
+                    paper=paper,
+                    scoring=scoring,
+                    request=request,
+                    course_id=course_id,
+                    class_id=class_id,
+                    paper_id=paper_id,
+                ),
+            },
+        )
     if type(task_value) is TaskPlan:
-        project_finalized_assessment(
+        _project_response_if_final(
+            response,
+            request=request,
             course_id=course_id,
             class_id=class_id,
-            learner=request.user,
-            task=task_value,
-            paper=paper,
-            scoring=scoring,
         )
     elif not _legacy_test_runtime():
         raise DomainError(
@@ -485,7 +523,6 @@ def result(
         )
     feedback = _contract(response, "feedback", StudentFeedbackPackage)
     course = web_runtime.require_course(course_id)
-    _record_follow_up_if_needed(course, paper_id, scoring)
     result = student_result_view(paper, scoring, feedback)
     question_details = (
         ()
@@ -493,14 +530,19 @@ def result(
         else _question_details_with_qa(
             task=task_value,
             paper=paper,
+            scoring=scoring,
             request=request,
             course_id=course_id,
             class_id=class_id,
             paper_id=paper_id,
         )
     )
+    profile_result = (
+        type(task_value) is TaskPlan
+        and task_value.task_type in PROFILE_TASK_TYPES
+    )
     correction_url = None
-    if result.correction_available:
+    if result.correction_available and profile_result:
         correction_url = _url_with_flow(
             "student-correction",
             flow,
@@ -508,7 +550,24 @@ def result(
             class_id=class_id,
             paper_id=paper_id,
         )
-    return render(
+    feedback_url = (
+        _url_with_flow(
+            "student-feedback",
+            issue_flow_token(
+                purpose="student_feedback",
+                actor_id=request.user.actor_id,
+                course_id=course_id,
+                class_id=class_id,
+                paper_id=paper_id,
+            ),
+            course_id=course_id,
+            class_id=class_id,
+            paper_id=paper_id,
+        )
+        if profile_result
+        else None
+    )
+    rendered = render(
         request,
         "course_insight/student/result.html",
         {
@@ -518,19 +577,7 @@ def result(
                 "student-qa",
                 kwargs={"course_id": course_id, "class_id": class_id},
             ),
-            "feedback_url": _url_with_flow(
-                "student-feedback",
-                issue_flow_token(
-                    purpose="student_feedback",
-                    actor_id=request.user.actor_id,
-                    course_id=course_id,
-                    class_id=class_id,
-                    paper_id=paper_id,
-                ),
-                course_id=course_id,
-                class_id=class_id,
-                paper_id=paper_id,
-            ),
+            "feedback_url": feedback_url,
             "correction_url": correction_url,
             "source_correction_url": _source_correction_url(
                 request,
@@ -541,6 +588,21 @@ def result(
             ),
         },
     )
+    if type(task_value) is TaskPlan and not profile_result:
+        purge = getattr(
+            web_runtime.container.coordinator,
+            "purge_transient_assessment",
+            None,
+        )
+        if callable(purge):
+            try:
+                purge(paper_id=paper.paper_id, attempt_id=scoring.attempt_id)
+            except (DomainError, OSError, RuntimeError, TypeError, ValueError):
+                logger.exception(
+                    "transient assessment cleanup failed",
+                    extra={"paper_id": paper.paper_id},
+                )
+    return rendered
 
 
 @login_required
@@ -596,12 +658,18 @@ def feedback(
         )
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
     web_runtime = runtime.get_web_runtime()
-    course = web_runtime.require_course(course_id)
-    records = _load_records(course)
+    web_runtime.require_course(course_id)
+    records = _correction_records_for_paper(
+        course_id=course_id,
+        class_id=class_id,
+        learner=request.user,
+        paper=paper,
+    )
     notes = item_correction_notes(paper, scoring, records)
     question_details = _question_details_with_qa(
         task=task_value,
         paper=paper,
+        scoring=scoring,
         request=request,
         course_id=course_id,
         class_id=class_id,
@@ -676,20 +744,29 @@ def correction(
         bundle,
         hint_revealed=False,
     )
-    records = _persist_correction_progress(
-        course,
-        paper_id=paper_id,
-        learner_id=request.user.actor_id,
+    records = _correction_records_for_paper(
         course_id=course_id,
         class_id=class_id,
-        guide=guide,
-        hint_requested=hint_requested,
+        learner=request.user,
+        paper=paper,
     )
-    hint_revealed = hint_requested or _hint_already_revealed(
-        records,
-        paper_id=paper_id,
-        item_instance_ids=[item.item_instance_id for item in guide.lost_items],
-    )
+    if hint_requested:
+        _mark_correction_hints(
+            course_id=course_id,
+            class_id=class_id,
+            learner=request.user,
+            item_ids=tuple(
+                paper.get_item_instance(item.item_instance_id).item_id
+                for item in guide.lost_items
+            ),
+        )
+        records = _correction_records_for_paper(
+            course_id=course_id,
+            class_id=class_id,
+            learner=request.user,
+            paper=paper,
+        )
+    hint_revealed = _has_revealed_hint(records, paper_id=paper_id)
     guide = correction_guide_view(
         paper,
         scoring,
@@ -795,15 +872,16 @@ def follow_up(
             knowledge_bundle=follow_bundle,
         )
     follow_paper = _contract(started, "assessment_paper", AssessmentPaper)
-    records = link_follow_up(
-        _load_records(course),
-        paper_id=paper_id,
-        item_instance_id=instance_id,
+    link_correction_follow_up(
+        course_id=course_id,
+        class_id=class_id,
+        learner=request.user,
+        source_paper_id=paper_id,
+        source_item_instance_id=instance_id,
+        source_item_id=source_item.item_id,
         follow_up_paper_id=follow_paper.paper_id,
         follow_up_item_id=follow_item.item_id,
-        source_item_id=source_item.item_id,
     )
-    _save_records(course, records)
     submit_flow = issue_flow_token(
         purpose="assessment_submit",
         actor_id=request.user.actor_id,
@@ -885,6 +963,7 @@ def _question_details_with_qa(
     *,
     task: object,
     paper: AssessmentPaper,
+    scoring: ScoringResultBundle,
     request: HttpRequest,
     course_id: str,
     class_id: str,
@@ -892,6 +971,7 @@ def _question_details_with_qa(
 ):
     if type(task) is not TaskPlan:
         return ()
+    web_runtime = runtime.get_web_runtime()
     return tuple(
         replace(
             detail,
@@ -903,8 +983,32 @@ def _question_details_with_qa(
                 item_instance_id=detail.item_instance_id,
             ),
         )
-        for detail in question_feedback_details(task=task, paper=paper)
+        for detail in question_feedback_details(
+            task=task,
+            paper=paper,
+            scoring=scoring,
+            answers=_frozen_answers(web_runtime, scoring.attempt_id),
+            teacher_notes=teacher_notes_for_attempt(scoring.attempt_id),
+        )
     )
+
+
+def _frozen_answers(web_runtime, attempt_id: str) -> dict[str, object]:
+    """Read the server-owned frozen answer payload without exposing failures."""
+
+    loader = getattr(
+        web_runtime.container.coordinator,
+        "frozen_assessment_submission",
+        None,
+    )
+    if not callable(loader):
+        return {}
+    try:
+        submission = loader(attempt_id)
+    except (DomainError, TypeError, ValueError):
+        return {}
+    answers = getattr(submission, "answers", None)
+    return dict(answers) if isinstance(answers, Mapping) else {}
 
 
 def _student_profile(web_runtime, course, *, class_id: str, learner_id: str):
@@ -968,7 +1072,7 @@ def _course_bundle(course):
 
 
 def _knowledge_bundle(course):
-    return merge_follow_up_items(_course_bundle(course), _load_records(course))
+    return _course_bundle(course)
 
 
 def _legacy_test_runtime() -> bool:
@@ -1065,14 +1169,32 @@ def _project_response_if_final(
         and type(scoring) is ScoringResultBundle
     ):
         return
-    project_finalized_assessment(
-        course_id=course_id,
-        class_id=class_id,
-        learner=request.user,
-        task=task,
-        paper=paper,
-        scoring=scoring,
-    )
+    if task.task_type in PROFILE_TASK_TYPES:
+        sync_suggested_review_case(
+            course_id=course_id,
+            class_id=class_id,
+            learner=request.user,
+            task=task,
+            paper=paper,
+            scoring=scoring,
+        )
+        project_finalized_assessment(
+            course_id=course_id,
+            class_id=class_id,
+            learner=request.user,
+            task=task,
+            paper=paper,
+            scoring=scoring,
+        )
+    elif task.task_type == "correction":
+        record_finalized_correction(
+            course_id=course_id,
+            class_id=class_id,
+            learner=request.user,
+            task=task,
+            paper=paper,
+            scoring=scoring,
+        )
 
 
 def _source_correction_url(
@@ -1083,105 +1205,61 @@ def _source_correction_url(
     class_id: str,
     paper_id: str,
 ) -> str | None:
-    link = follow_up_source(_load_records(course), paper_id)
-    if link is None:
-        return None
-    source_paper_id, item_instance_id, _ = link
-    flow = issue_flow_token(
-        purpose="student_result",
-        actor_id=request.user.actor_id,
-        course_id=course_id,
-        class_id=class_id,
-        paper_id=source_paper_id,
-    )
-    return (
-        _url_with_flow(
-            "student-correction",
-            flow,
-            course_id=course_id,
-            class_id=class_id,
-            paper_id=source_paper_id,
-        )
-        + f"#lost-{item_instance_id}"
-    )
+    del request, course, course_id, class_id, paper_id
+    return None
 
 
-def _load_records(course):
-    return load_records(records_path(course.state_policy_path))
-
-
-def _save_records(course, records) -> None:
-    save_records(records_path(course.state_policy_path), records)
-
-
-def _persist_correction_progress(
-    course,
+def _correction_records_for_paper(
     *,
-    paper_id: str,
-    learner_id: str,
     course_id: str,
     class_id: str,
-    guide,
-    hint_requested: bool,
-):
-    records = _load_records(course)
-    if not guide.available:
-        return records
-    records = upsert_lost_items(
-        records,
-        paper_id=paper_id,
-        learner_id=learner_id,
-        course_id=course_id,
-        class_id=class_id,
-        items=tuple(
-            {
-                "item_instance_id": item.item_instance_id,
-                "stem": item.stem,
-                "cause": item.cause,
-                "concept_ids": list(item.concept_ids),
-            }
-            for item in guide.lost_items
-        ),
+    learner,
+    paper: AssessmentPaper,
+) -> dict[str, object]:
+    rows = WrongQuestionRecord.objects.filter(
+        workspace__course_id=course_id,
+        workspace__class_id=class_id,
+        learner=learner,
+        item_id__in=tuple(item.item_id for item in paper.all_items()),
     )
-    if hint_requested:
-        for item in guide.lost_items:
-            records = record_hint(records, paper_id, item.item_instance_id)
-    _save_records(course, records)
-    return records
+    by_item_id = {row.item_id: row for row in rows}
+    items: dict[str, object] = {}
+    for instance in paper.all_items():
+        row = by_item_id.get(instance.item_id)
+        if row is None:
+            continue
+        items[instance.item_instance_id] = {
+            "follow_up_correct": row.status == WrongQuestionRecord.Status.RESOLVED,
+            "hint_revealed": row.hint_revealed,
+        }
+    return {paper.paper_id: {"items": items}}
 
 
-def _hint_already_revealed(records, *, paper_id: str, item_instance_ids) -> bool:
+def _mark_correction_hints(
+    *,
+    course_id: str,
+    class_id: str,
+    learner,
+    item_ids: tuple[str, ...],
+) -> None:
+    if not item_ids:
+        return
+    WrongQuestionRecord.objects.filter(
+        workspace__course_id=course_id,
+        workspace__class_id=class_id,
+        learner=learner,
+        item_id__in=item_ids,
+        status=WrongQuestionRecord.Status.OPEN,
+    ).update(hint_revealed=True)
+
+
+def _has_revealed_hint(records, *, paper_id: str) -> bool:
     payload = records.get(paper_id, {})
     items = payload.get("items", {}) if isinstance(payload, dict) else {}
     return any(
-        isinstance(items.get(item_id), dict) and items[item_id].get("hint_revealed")
-        for item_id in item_instance_ids
+        isinstance(item, dict) and item.get("hint_revealed")
+        for item in items.values()
     )
-
-
-def _record_follow_up_if_needed(course, paper_id: str, scoring: ScoringResultBundle) -> None:
-    if scoring.requires_teacher_review() or scoring.has_rejected_score():
-        return
-    records = _load_records(course)
-    linked = False
-    for payload in records.values():
-        items = payload.get("items", {}) if isinstance(payload, dict) else {}
-        if not isinstance(items, dict):
-            continue
-        if any(
-            isinstance(item, dict) and item.get("follow_up_paper_id") == paper_id
-            for item in items.values()
-        ):
-            linked = True
-            break
-    if not linked:
-        return
-    records = record_follow_up_outcome(
-        records,
-        follow_up_paper_id=paper_id,
-        follow_up_correct=scoring.total_score >= scoring.max_score,
-    )
-    _save_records(course, records)
 
 
 def _latest_snapshot(web_runtime, *, course_id: str, class_id: str, learner_id: str):

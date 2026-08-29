@@ -17,7 +17,6 @@ from .metrics import ScorePrediction, evaluate_scoring, load_score_predictions
 from .live_matrix import LiveCaseResult, LiveEvaluationCase, run_live_matrix
 from .narrative import evaluate_narrative_cases, load_narrative_cases
 from .prepare import prepare_local_dataset_package
-from .selector import fit_pav_selector, load_selector_observations, predict_pav
 
 __all__ = [
     "DatasetPackage",
@@ -29,12 +28,9 @@ __all__ = [
     "compute_package_sha256",
     "evaluate_narrative_cases",
     "evaluate_scoring",
-    "fit_pav_selector",
     "load_local_dataset_package",
     "load_narrative_cases",
     "load_score_predictions",
-    "load_selector_observations",
-    "predict_pav",
     "prepare_local_dataset_package",
     "run_live_matrix",
     "split_by_question",

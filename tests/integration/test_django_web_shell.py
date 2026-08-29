@@ -131,6 +131,6 @@ def test_teacher_home_renders_for_authorized_teacher(
         if template.name
     )
     page = response.content.decode("utf-8")
-    assert "paper_id" in page
+    assert "learner_account" in page
     assert "course_id" in page
     assert "查看" in page

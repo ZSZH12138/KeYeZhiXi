@@ -5,6 +5,15 @@ from datetime import datetime, timezone
 
 import pytest
 
+from course_insight.application.assessment_evidence_binding import (
+    bind_release_rubric_evidence,
+)
+from course_insight.contracts.assessment import RubricScoringTask
+from course_insight.contracts.evidence import (
+    EvidenceBundle,
+    EvidenceChunk,
+    evidence_id_for_chunk,
+)
 from course_insight.contracts.errors import DomainError
 from course_insight.modules.m0_platform.django_app.models import (
     CourseKnowledgeRelease,
@@ -18,6 +27,7 @@ from course_insight.modules.m0_platform.django_app.models import (
     User,
 )
 from course_insight.modules.m3_knowledge_bundle.release_compatibility import (
+    course_package_from_release,
     knowledge_bundle_from_release,
     summarize_release_quality,
 )
@@ -182,6 +192,88 @@ def test_release_answer_contract_scores_objective_submission() -> None:
 
     assert audit.total_score == 1.0
     assert audit.review_status == "not_required"
+
+
+@pytest.mark.parametrize(
+    "retrieved_concept_ids",
+    [["concept-1"], []],
+    ids=["same-concept", "unlabelled-retrieval"],
+)
+def test_legacy_release_rubric_is_bound_to_aligned_canonical_retrieval_evidence(
+    retrieved_concept_ids: list[str],
+) -> None:
+    release = _release(1)
+    question = release.questions.get()
+    question.question_type = "subjective"
+    question.payload = {
+        "options": {},
+        "accepted_answers": [],
+        "rubric": "说明课程中的核心机制。（10 分）",
+        "explanation": "对应课程定义。",
+    }
+    question.save(update_fields=["question_type", "payload"])
+
+    bundle = knowledge_bundle_from_release(release)
+    package = course_package_from_release(release)
+    service = M4TaskOrchestrationService(
+        _TaskRepository(),
+        lambda identity: bundle.content_checksum()[:24],
+    )
+    plan = service.create_task_plan(
+        student_text="请开始阶段评测",
+        task_type_hint="stage_assessment",
+        course_id="course_1",
+        class_id="class_1",
+        learner_id="pseudonym_student_1",
+        session_id="session_1",
+        knowledge_bundle=bundle,
+        learner_state_snapshot=None,
+    )
+    instance = PaperGenerator().generate(plan, bundle, None, None).all_items()[0]
+    rubric = bundle.get_rubric(instance.rubric_id)
+    scoring_task = RubricScoringTask(
+        scoring_task_id="scoring-1",
+        attempt_id="attempt-1",
+        paper_id="paper-1",
+        item_instance=instance,
+        student_answer="课程中的核心机制用于完成课程测试。",
+        rubric=rubric,
+        evidence_query_id="query-1",
+        created_at=datetime(2026, 8, 25, tzinfo=timezone.utc),
+    )
+    chunk = package.content_chunks[0]
+    canonical_evidence_id = evidence_id_for_chunk(chunk.chunk_id)
+    evidence = EvidenceBundle(
+        query_id="query-1",
+        index_id="index-1",
+        course_id="course_1",
+        course_package_id=package.course_package_id,
+        course_package_checksum=package.checksum,
+        index_checksum="a" * 64,
+        evidence_chunks=[
+            EvidenceChunk(
+                evidence_id=canonical_evidence_id,
+                source_id=chunk.source_id,
+                chunk_id=chunk.chunk_id,
+                text=chunk.text,
+                locator=chunk.locator,
+                concept_ids=retrieved_concept_ids,
+                relevance=0.9,
+                checksum=chunk.sha256,
+            )
+        ],
+        retrieved_at=datetime(2026, 8, 25, tzinfo=timezone.utc),
+    )
+
+    bound = bind_release_rubric_evidence(scoring_task, evidence)
+
+    source_reference = release.concepts.get().source_references.get()
+    assert scoring_task.rubric.criteria[0].course_evidence_ids == [
+        f"evidence-{source_reference.pk}"
+    ]
+    assert bound.rubric.criteria[0].course_evidence_ids == [
+        canonical_evidence_id
+    ]
 
 
 def test_quality_summary_reports_links_without_approval_state() -> None:

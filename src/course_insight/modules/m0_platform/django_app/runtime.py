@@ -86,10 +86,9 @@ class WebRuntime:
         context = self.courses.get(course_id)
         if context is None:
             raise DomainError(
-                code="RUNTIME_CONTEXT_UNAVAILABLE",
+                code="COURSE_RUNTIME_NOT_FOUND",
                 module="m0",
-                message="course runtime context is not ready",
-                recoverable=True,
+                message="course runtime context was not published",
             )
         return WebCourseRuntime(
             course_id=context.course_id,

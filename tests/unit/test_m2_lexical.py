@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
 import hashlib
 import json
 from dataclasses import fields, replace

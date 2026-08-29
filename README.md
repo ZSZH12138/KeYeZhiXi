@@ -22,6 +22,12 @@
 
 学生开始测评只选择诊断、随心练习、阶段评测或订正，不再提交自由文本。诊断和阶段评测完成后进入画像测评记录，可按试卷 ID 查看得分、错题、原题（含选择题选项）、正确答案、知识点和课程原文；逐题答疑按钮使用签名引用直接进入独立答疑，不改变画像。答疑严格使用当前课程班级的教师密钥，可匹配零到多个知识点；课程资料不足时允许外部检索，但必须提示学生核对事实。
 
+### 2026-08-29 评分、复核与班级画像闭环
+
+平台只长期保留已完成且会改变画像的诊断测评和阶段评测；随心练习、订正和独立答疑不进入学生测评历史或教师复核列表。选择题完全匹配才得满分，填空题和主观题字符串不匹配时进入 DeepSeek 语义评分；置信度低于 `0.5` 或评分生成失败时，按同一答卷聚合到教师“建议复核”。教师改判后按“只有满分算正确”同步学生画像与班级快照。
+
+班级人数从当前有效学生账号授权动态读取，不再以固定配置作为当前班级人数。班级知识地图默认折叠，显示知识点名称、未做人数，并只用做过该知识点的学生计算平均掌握度和补学度；无人做过时两项均为 `0`。学生画像只显示本人做过的知识点。教师可用课程、班级和学生账号查询普通复核记录，也可让 DeepSeek 根据已做且掌握度最低的前 10 个知识点及课程原文生成教学建议。
+
 ### 2026-07-27 运维补充
 
 - Web、部署、进程角色与回滚边界见 [deployment.md](docs/deployment.md)；
@@ -46,7 +52,8 @@
 - 证据化学生反馈、教师报告与低证据保护；
 - M5 真实 DINA 认知诊断、BKT 知识追踪、完整历史恢复和模型驱动状态；
 - M8 真实 2PL IRT、能力估计和受约束自适应选题，M9 模型质量与教师审核发布；自适应选题默认关闭，须 IRT shadow → M9 质量门槛 → 教师批准后才能生产启用。
-- M7/M9 仅 DeepSeek；测试环境即使存在 `DEEPSEEK_API_KEY` 也不会自动出站。学生评分还要有钉住的本地隐私工件，缺工件失败关闭。默认 `all_review`。
+- M7/M9 仅 DeepSeek；测试环境即使存在 `DEEPSEEK_API_KEY` 也不会自动出站。学生评分还要有钉住的本地隐私工件，缺工件失败关闭。语义评分置信度低于 0.5 时建议教师复核。
+- 当前有效学生授权形成动态班级名单；画像变化同步重建 M5/M9 班级快照，教师读取时还会按当前名单和活动知识版本修复陈旧快照；
 - M0 配置优先级、真实 Django 学生/教师 Web、两层权限、roles 完整状态同步、
   runtime snapshot 与独立 leased outbox Worker；
 - SQLite 适配器用于 M1—M3 离线、测试和迁移演练，生产环境必须使用
@@ -98,7 +105,6 @@ python -m course_insight.cli export-schemas
 │  └─ contract_provenance.json    契约生产者—消费者来源图
 ├─ data/raw_course/               本地原始资料占位；真实资料不提交
 ├─ docs/                           架构与接口说明
-├─ progress/                       仅按陈、谢、童、冯记录协作进度
 ├─ scripts/export_schemas.py       Schema 导出入口
 ├─ src/course_insight/
 │  ├─ contracts/                  Pydantic 契约 Python 包
@@ -133,11 +139,11 @@ python -m course_insight.cli export-schemas
 | [M2](src/course_insight/modules/m2_evidence_retrieval/README.md) | 谢 | RAG；词法/pgvector 索引与审计 | M1 `CoursePackage`；M6/M8 `EvidenceQuery`；检索策略 | `EvidenceIndexRef`、`EvidenceBundle`、`RetrievalAudit` | M7、M9 |
 | [M3](src/course_insight/modules/m3_knowledge_bundle/README.md) | 谢 | 知识、题卡、量规、蓝图、Q 矩阵和标定依据 | M1 `CoursePackage`；教师确认 JSON | `KnowledgeBundle` | M4、M5、M8、M9 |
 | [M4](src/course_insight/modules/m4_task_orchestration/README.md) | 陈 | 任务识别、私有可重放意图决策、蓝图选择、引用冻结和工作流编排 | 学生文本；M3 bundle；可选 M5 state | `TaskPlan` | M8、M6 |
-| [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA 认知诊断、BKT 知识追踪、个体/班级状态 | M8 观测；M3 Q 矩阵；前版状态 | `StateUpdateResult`、`CognitiveDiagnosisResult`、`KnowledgeTraceSnapshot`、`LearningModelRun` | M6、M9 |
+| [M5](src/course_insight/modules/m5_learner_class_state/README.md) | 童 | DINA/BKT、权威掌握计数与动态班级快照 | M8 观测；M3 Q 矩阵；当前班级名单；前版状态 | `StateUpdateResult`、`CognitiveDiagnosisResult`、`KnowledgeTraceSnapshot`、`LearningModelRun`、班级知识地图快照 | M6、M9、教师端 |
 | [M6](src/course_insight/modules/m6_tutoring_fsm/README.md) | 陈 | S0—S5 状态机；安全候选、版本化私有策略与会话幂等 | M4 task；M8 scoring；M5 state；前版 session | `TutoringControlResult`；私有策略记录不进入公共契约 | M2、M7 |
 | [M7](src/course_insight/modules/m7_local_model/README.md) | 冯 | 量规评分、学生反馈与 DeepSeek API 边界 | M8 scoring task；M6 feedback task；M2 evidence | `RubricScoringResult`、`StudentFeedbackPackage`、`LLMGenerationResult` | M8、M0 |
 | [M8](src/course_insight/modules/m8_assessment_scoring/README.md) | 童 | 组卷、评分、IRT、自适应选题与在线标定 | M4/M3/M5；作答；M7 result；M9 review | `AssessmentPaper`、`ScoringPreparationResult`、`ScoringResultBundle`、`IRTParameterSet`、`CalibrationRunResult`、`AdaptiveSelectionResult` | M0、M2、M5、M6、M9 |
-| [M9](src/course_insight/modules/m9_teacher_analytics/README.md) | 冯 | 教师分析、DeepSeek 叙述、模型质量和审核 | M3/M8/M5；标定 result；复核表单 | `TeacherAnalyticsBundle`、`TeacherReviewDecision`、`LLMGenerationResult`、`ModelQualityReport`、`CalibrationReviewDecision` | M0、M8 |
+| [M9](src/course_insight/modules/m9_teacher_analytics/README.md) | 冯 | 教师分析、建议复核、教学建议、模型质量和审核 | M3/M8/M5；班级快照；标定 result；复核表单 | `TeacherAnalyticsBundle`、`TeacherReviewDecision`、教学建议、`LLMGenerationResult`、`ModelQualityReport`、`CalibrationReviewDecision` | M0、M8 |
 
 生产者—消费者的机器可检验映射见
 [contract_provenance.json](contracts/contract_provenance.json)。
@@ -183,7 +189,7 @@ python -m course_insight.cli export-schemas
 | `PrerequisiteRelation` | `from_concept_id:str; to_concept_id:str; relation_type:Literal[prerequisite,related]; strength:float` | `is_prerequisite` |
 | `MisconceptionTag` | `misconception_id:str; name:str; description:str; concept_ids:list[str]; evidence_rules:list[str]` | `applies_to` |
 | `RubricCriterion` | `criterion_id:str; description:str; max_score:float; expected_student_evidence:str; course_evidence_ids:list[str]` | `allows(score)` |
-| `ReviewPolicy` | `low_confidence_threshold:float; double_score_disagreement_threshold:float; require_evidence_for_positive_score:bool` | `needs_review(confidence,disagreement)` |
+| `ReviewPolicy` | `low_confidence_threshold:float; require_evidence_for_positive_score:bool` | `needs_review(confidence)` |
 | `Rubric` | `rubric_id:str; version:str; total_score:float; criteria:list[RubricCriterion]; review_policy:ReviewPolicy; status:str` | `criterion; criterion_score_sum` |
 | `ParameterRule` | `name:str; value_type:str; minimum:float\|None; maximum:float\|None; choices:list[str]; constraints:list[str]` | `accepts(value)` |
 | `ItemCard` | `item_id:str; version:str; stem:str; item_type:str; concept_ids:list[str]; misconception_ids:list[str]; difficulty_level:int; cognitive_level:str; parameter_rules:list[ParameterRule]; answer_key:dict[str,Any]; rubric_id:str\|None; source_evidence_ids:list[str]; status:str` | `is_objective; is_approved; max_score` |
@@ -758,7 +764,7 @@ M7 的持久表保存现有学生反馈契约，不保存 DeepSeek 密钥、完�
 | M4 | 五类规则识别、私有 SHA-256 决策重放、显式蓝图映射和 SQLite 原子复用；可选 adapter 默认关闭 | 经离线与 shadow 门禁后启用可信 adapter，但保持 91 个公开契约、`TaskPlan` 和八字段业务身份；当前不把可配置 adapter 写成已生产启用 |
 | M5 | 真实 DINA/BKT、完整历史、版本化模型与模型驱动状态 | 使用达到治理门槛的去标识化数据训练；数据不足时明确失败 |
 | M6 | 8 条安全迁移、确定性 baseline、rules/shadow/active、纯 Python LinUCB、版本化制品、奖励/OPE、双后端持久化和 M0 七字段冻结；默认 rules/零 rollout/零探索；提供 fail-closed 受控验证脚本 | 先完成真实教学数据治理、shadow 观察、OPE 审核和受控 rollout；当前不声称 active 可生产启用或优于 baseline；M6 OPE 不接入 M9 |
-| M7 | 默认 `PlaceholderRubricAdapter` 与 `all_review`；非 test 且密钥+钉住隐私工件齐备时才接 DeepSeek | 没有本校金标和隐私工件前，不得把选择性审核或真实学生出站写成已上线 |
+| M7 | 默认 `PlaceholderRubricAdapter`；非 test 且密钥+钉住隐私工件齐备时才接 DeepSeek；格式失败固定重试 8 次，置信度低于 0.5 进入建议复核 | 缺密钥或隐私工件时失败关闭并转教师复核 |
 | M8 | 权重组卷、冻结评分证据、真实 2PL/EAP、审核发布和受约束自适应选题 | 生产启用自适应前提供足量作答并完成 IRT shadow、M9 质量与教师审批；默认不启用 active 自适应 |
 | M9 | 阈值统计/规则建议、真实 IRT 质量门槛与标定审核；DeepSeek 叙述仍 `empty` | 安全、超时、限流和输出校验完成后启用 DeepSeek 教师叙述 |
 
@@ -775,9 +781,8 @@ M6 私有 OPE/approval 尚未正式接入 M9；当前 M9 公共质量入口只�
 - 禁止核心内部 HTTP、路由装饰器、网络客户端和绕过 `AppCoordinator` 的编排。
 - 禁止真实姓名、学号、邮箱、电话、身份映射、密钥和真实 `.env`。
 - 禁止 DeepSeek 以外的 LLM、本地模型权重、硬编码 `DEEPSEEK_API_KEY`，以及未经教师审核的高风险自动评分。
-- 尚未启用的算法空实现（M5/M7/M8/M9）禁止访问模型网络、读取 DeepSeek 密钥或
-  伪造 DINA/BKT/IRT/模型质量指标；M2 生产路径可按显式配置连接 PostgreSQL+pgvector，
-  缺少依赖时必须 fail closed。
+- Legacy 空脚手架不得访问模型网络或伪造 DINA/BKT/IRT/模型质量指标；M2、M7、M8、
+  M9 的正式路径只能在对应配置、证据和质量门满足时启用，缺少依赖必须 fail closed。
 - 禁止把数据库、日志、索引、快照、模型文件或真实课程资料写入受管数据目录。
 - 所有路径、JSON/CSV、时间、引用、分数和版本都必须在系统边界校验；错误只
   返回稳定代码和相对/安全信息。
@@ -796,8 +801,9 @@ OpenAI-compatible embedding、pgvector 两阶段建索引、lexical/vector/hybri
 
 SQLite 适配器用于离线、测试和迁移演练，PostgreSQL + pgvector 是生产权威适配器。
 PostgreSQL 的 S1-S6 核心 migration 为 `0016_m1_m2_m3_capabilities.sql`，向量索引
-元数据绑定由 `0017_vector_index_metadata.sql` 补充；当前 PostgreSQL core schema 为
-v17。M1/M2/M3 共用一个仓储与事务边界；完整制品使用
+元数据绑定由 `0017_vector_index_metadata.sql` 补充；后续审计、等待复核、重评和
+动态班级名单冻结由 0018—0022 追加，当前 PostgreSQL core schema 为 v22。
+M1/M2/M3 共用一个仓储与事务边界；完整制品使用
 `export_manifest/import_manifest` 做校验后迁移。
 
 关键配置为 `COURSE_INSIGHT_EMBEDDING__*` 和 `OPENAI_API_KEY`。生产 embedding endpoint

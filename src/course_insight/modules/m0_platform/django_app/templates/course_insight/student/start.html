@@ -31,8 +31,6 @@
       <p>建议下一步练习：{{ profile.next_practice_names|join:"、" }}</p>
       {% endif %}
     {% endif %}
-    <h3>尚未作答</h3>
-    <ul>{% for item in profile.unseen %}<li>{{ item.name }}（未做过，不等同于掌握度为 0）</li>{% empty %}<li>暂无</li>{% endfor %}</ul>
   </section>
   {% endif %}
   <section class="card">

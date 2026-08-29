@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from typing import Literal, Protocol
@@ -236,7 +236,7 @@ def persist_retrieval_audit(
 
     existing = store.get(envelope.audit.audit_id)
     if existing is not None:
-        if existing != envelope:
+        if not _same_retrieval_outcome(existing, envelope):
             raise DomainError(
                 code="RETRIEVAL_AUDIT_CONFLICT",
                 module="m2",
@@ -252,6 +252,26 @@ def persist_retrieval_audit(
             message="retrieval audit could not be verified",
         )
     return stored
+
+
+def _same_retrieval_outcome(
+    first: RetrievalAuditEnvelope,
+    second: RetrievalAuditEnvelope,
+) -> bool:
+    """Ignore retry-local timing while preserving every result binding."""
+
+    normalized_audit = first.audit.model_copy(
+        update={"created_at": second.audit.created_at},
+        deep=True,
+    )
+    normalized_metadata = replace(
+        first.metadata,
+        latency_ms=second.metadata.latency_ms,
+    )
+    return (
+        normalized_audit == second.audit
+        and normalized_metadata == second.metadata
+    )
 
 
 def _validate_inputs(

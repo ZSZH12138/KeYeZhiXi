@@ -12,7 +12,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from pydantic import ValidationError
 
 from course_insight.contracts.course import CoursePackage
 from course_insight.contracts.errors import DomainError
