@@ -14,6 +14,8 @@ KeYeZhiXi/
 
 目标电脑不需要安装 Python、Conda 或项目依赖。程序文件保持只读，账号、数据库、上传资料、模型配置和日志不进入安装目录。
 
+解压发布压缩包后必须保留整个 `KeYeZhiXi` 目录，不能只复制 EXE。双击 EXE 即可启动；Windows 桌面版不要求管理员权限，也不写入系统服务或注册表自启动项。
+
 ## 组件与生命周期
 
 用户双击 `KeYeZhiXi.exe` 后，桌面主进程显示状态窗口，并以同一个 EXE 的内部服务模式启动三个独立子进程：
@@ -60,6 +62,10 @@ KeYeZhiXi/
 - 浏览器打开失败：平台继续运行，用户可通过状态窗口再次打开登录页。
 - Worker 锁冲突或数据库错误：停止整套服务，避免不完整运行。
 
+状态窗口会显示日志目录。默认日志位于 `%LOCALAPPDATA%\KeYeZhiXi\logs\`：`launcher.log` 记录启动器问题，三个服务各有独立日志。日志不会记录首个管理员密码或 DeepSeek 密钥。
+
+升级时，先关闭状态窗口，再用新版本完整替换程序文件夹；不要删除 `%LOCALAPPDATA%\KeYeZhiXi\`。卸载程序只需关闭应用并删除程序文件夹；如需同时永久清除本机全部业务数据，再由用户单独删除该本地应用数据目录。
+
 ## 安全边界
 
 - Web 平台仅绑定本机回环地址；
@@ -77,6 +83,14 @@ KeYeZhiXi/
 打包时必须显式包含 Django 模板、迁移、项目动态模块、Tkinter、SQLite 和无密钥配置模板。不得包含本地数据库、账号、课程资料、题库、知识点、日志、`.env`、API 密钥、Git 数据或测试缓存。
 
 当前 `course-insight` Conda 环境不因打包而安装额外依赖。构建工具安装到被 Git 忽略的隔离目录，构建完成后仅保留 `dist` 交付物。
+
+在项目根目录运行：
+
+```powershell
+.\scripts\build_windows_app.ps1 -PythonExecutable python
+```
+
+脚本先校验 `packaging/desktop_manifest.json` 的显式资源白名单，再使用 `packaging/KeYeZhiXi.spec` 构建。产物为 `dist\KeYeZhiXi\KeYeZhiXi.exe` 和可分发的 `dist\KeYeZhiXi-windows-x64.zip`。构建目录、隔离工具和产物均被 Git 忽略。
 
 ## 验证标准
 

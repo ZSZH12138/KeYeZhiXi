@@ -1,0 +1,27 @@
+{
+  "formatVersion": 1,
+  "appName": "KeYeZhiXi",
+  "entrypoint": "src/course_insight/desktop/__main__.py",
+  "mode": "onedir",
+  "contentsDirectory": "_internal",
+  "resources": [
+    {
+      "source": "config/app.example.json",
+      "destination": "config"
+    },
+    {
+      "source": "config/state.json",
+      "destination": "config"
+    },
+    {
+      "source": "config/teacher.json",
+      "destination": "config"
+    }
+  ],
+  "forbiddenPaths": [
+    ".env",
+    "config/app.json",
+    "config/roles.csv",
+    "runtime"
+  ]
+}
