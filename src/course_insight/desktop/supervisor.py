@@ -201,7 +201,25 @@ def _readiness_probe(url: str) -> bool:
             payload = json.loads(response.read().decode("utf-8"))
     except (HTTPError, URLError, OSError, UnicodeError, json.JSONDecodeError):
         return False
-    return isinstance(payload, dict) and payload.get("status") == "ready"
+    return desktop_capabilities_ready(payload)
+
+
+def desktop_capabilities_ready(payload: object) -> bool:
+    """Require login plus both Workers, while allowing zero initial courses."""
+
+    if type(payload) is not dict:
+        return False
+    capabilities = payload.get("capabilities")
+    if type(capabilities) is not dict:
+        return False
+    return all(
+        capabilities.get(name) == "ready"
+        for name in (
+            "web_auth",
+            "learning_outbox",
+            "knowledge_ingestion",
+        )
+    )
 
 
 def _port_8000_is_available() -> bool:

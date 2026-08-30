@@ -11,6 +11,7 @@ from course_insight.desktop.supervisor import (
     DesktopSupervisorError,
     ServiceFailure,
     ServiceSupervisor,
+    desktop_capabilities_ready,
     wait_until_ready,
 )
 
@@ -184,6 +185,23 @@ def test_readiness_waits_for_ready_instead_of_accepting_degraded() -> None:
     )
 
     assert sleeps == [0.05, 0.05]
+
+
+def test_desktop_readiness_accepts_login_and_workers_without_a_course() -> None:
+    payload = {
+        "status": "degraded",
+        "capabilities": {
+            "web_auth": "ready",
+            "course_runtime": "not_ready",
+            "student_read": "not_ready",
+            "learning_outbox": "ready",
+            "knowledge_ingestion": "ready",
+        },
+    }
+
+    assert desktop_capabilities_ready(payload) is True
+    payload["capabilities"]["knowledge_ingestion"] = "not_ready"
+    assert desktop_capabilities_ready(payload) is False
 
 
 def test_readiness_stops_waiting_when_a_child_exits() -> None:
