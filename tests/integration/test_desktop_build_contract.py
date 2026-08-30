@@ -38,6 +38,12 @@ def test_windows_builder_exposes_a_safe_onedir_distribution_contract() -> None:
         "executable": "KeYeZhiXi.exe",
         "mode": "onedir",
         "mutableDataIncluded": False,
+        "nativeRuntimeLibraries": [
+            "ffi.dll",
+            "sqlite3.dll",
+            "tcl86t.dll",
+            "tk86t.dll",
+        ],
         "resources": [
             "config/app.example.json",
             "config/state.json",

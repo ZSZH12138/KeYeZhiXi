@@ -8,7 +8,7 @@ version = "0.1.0"
 description = "面向课程、班级、测评与可溯源答疑的模块化教学辅助平台"
 requires-python = ">=3.11"
 dependencies = [
-    "Django>=5.2,<5.3",
+    "Django>=5.2.17,<5.3",
     "pydantic>=2.10,<3",
     "pydantic-settings>=2.10,<3",
     "psycopg[binary,pool]>=3.2,<4",
@@ -17,6 +17,7 @@ dependencies = [
     "python-pptx>=1,<2",
     "numpy>=2.0,<3",
     "scipy>=1.13,<2",
+    "sqlparse>=0.6,<0.7",
     "cryptography>=45,<47; platform_system != 'Windows'",
 ]
 
@@ -53,3 +54,6 @@ where = ["src"]
 DJANGO_SETTINGS_MODULE = "course_insight.web_project.settings"
 testpaths = ["tests"]
 norecursedirs = ["runtime", ".tmp_*", "tmp_*", ".git", "build", "dist"]
+markers = [
+    "e2e: packaged or browser-level end-to-end tests",
+]

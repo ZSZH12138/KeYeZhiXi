@@ -39,6 +39,7 @@ $contract = [ordered]@{
     executable = "$($manifest.appName).exe"
     mode = $manifest.mode
     mutableDataIncluded = $false
+    nativeRuntimeLibraries = @($manifest.nativeRuntimeLibraries)
     resources = $resourcePaths
     toolDirectory = ".build-tools/pyinstaller"
 }

@@ -6,6 +6,7 @@ import argparse
 import os
 import webbrowser
 from io import StringIO
+from typing import Any
 
 from course_insight.desktop.bootstrap import (
     configure_process_environment,
@@ -74,8 +75,20 @@ def _run_primary_desktop() -> int:
     finally:
         if controller is not None:
             controller.stop()
-        if root is not None and root.winfo_exists():
+        if root is not None:
+            _destroy_root(root)
+
+
+def _destroy_root(root: Any) -> None:
+    """Make final Tk cleanup safe after the UI already ended its mainloop."""
+
+    import tkinter as tk
+
+    try:
+        if root.winfo_exists():
             root.destroy()
+    except tk.TclError:
+        pass
 
 
 def run_diagnostics() -> int:
