@@ -90,24 +90,6 @@ def test_runtime_manifest_restores_fixed_refs_and_policy_paths(
     assert len(registry.calls) == 1
 
 
-def test_missing_runtime_manifest_represents_a_fresh_empty_platform(
-    tmp_path: Path,
-) -> None:
-    from course_insight.modules.m0_platform.django_app.runtime import (
-        restore_course_runtime_manifest,
-    )
-
-    registry = _RecordingRegistry()
-
-    restored = restore_course_runtime_manifest(
-        container=SimpleNamespace(runtime_registry=registry),
-        runtime_dir=tmp_path,
-    )
-
-    assert dict(restored) == {}
-    assert registry.calls == []
-
-
 @pytest.mark.parametrize(
     "entry_update",
     [

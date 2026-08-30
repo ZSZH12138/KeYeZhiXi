@@ -21,10 +21,6 @@ htmlcov/
 .cache/
 .superpowers/
 .worktrees/
-.build-tools/
-.e2e-tools/
-build/
-dist/
 .tmp_*/
 tmp_pytest_cache/
 docs/superpowers/

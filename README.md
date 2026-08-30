@@ -70,22 +70,6 @@
 
 以下命令从全新克隆开始，不依赖仓库作者的本地路径。
 
-### Windows 桌面版
-
-从发布包解压完整的 `KeYeZhiXi` 文件夹后，双击 `KeYeZhiXi.exe`。应用会自动初始化本地数据、启动 Web 平台与两个 Worker，并在平台就绪后打开登录页。首次启动且数据库没有任何账户时，应用会要求创建首个管理员。
-
-运行数据保存在 `%LOCALAPPDATA%\KeYeZhiXi\`，替换程序文件夹不会删除账号和课程数据。关闭“课业智析”状态窗口会一并停止平台与两个 Worker。详细说明见 [Windows 桌面版](docs/windows_desktop.md)。
-
-维护者可在项目根目录执行以下命令构建发布包；PyInstaller 会安装到被 Git 忽略的隔离工具目录，不会写入当前 Python 环境：
-
-```powershell
-.\scripts\build_windows_app.ps1 -PythonExecutable python
-```
-
-产物位于 `dist\KeYeZhiXi\KeYeZhiXi.exe` 和 `dist\KeYeZhiXi-windows-x64.zip`。
-
-### 源码运行
-
 ### 1. 创建环境
 
 ```shell
@@ -134,7 +118,7 @@ python manage.py run_ingestion_worker
 python manage.py run_outbox_worker
 ```
 
-访问 <http://127.0.0.1:8000/accounts/login/>。开发服务器只用于本地验证，不是生产 WSGI/ASGI 部署方案。
+访问 <http://127.0.0.1:8000/login/>。开发服务器只用于本地验证，不是生产 WSGI/ASGI 部署方案。
 
 ## 基本使用顺序
 
@@ -195,7 +179,6 @@ git diff --exit-code -- contracts/schemas
 ## 进一步阅读
 
 - [架构说明](docs/architecture.md)
-- [Windows 桌面版](docs/windows_desktop.md)
 - [课程、班级与学习流程](docs/course_class_learning_flow.md)
 - [部署说明](docs/deployment.md)
 - [模块接口指南](docs/interface_guide.md)
