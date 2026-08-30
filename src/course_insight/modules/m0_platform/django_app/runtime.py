@@ -12,6 +12,7 @@ from typing import Mapping, Protocol, cast
 
 from course_insight.application.factory import (
     ApplicationContainer,
+    ServiceOverrides,
     build_application,
 )
 from course_insight.application.runtime_context import (
@@ -26,6 +27,11 @@ from course_insight.infrastructure.logging import (
 )
 from course_insight.modules.m5_learner_class_state.update_policy import (
     StatePolicy,
+)
+from course_insight.modules.m7_local_model.runtime import (
+    ScopedDeepSeekM7Settings,
+    build_m7_privacy_reviewer,
+    build_scoped_deepseek_m7_adapter,
 )
 from course_insight.modules.m9_teacher_analytics.suggestions import (
     TeacherThresholdPolicy,
@@ -138,7 +144,19 @@ def get_application_container(
             return _CONTAINER
         from django.conf import settings as django_settings
 
-        container = build_application(django_settings.PLATFORM_SETTINGS)
+        platform_settings = django_settings.PLATFORM_SETTINGS
+        service_overrides = _web_service_overrides(
+            platform_settings,
+            logging_filename=logging_filename,
+        )
+        container = (
+            build_application(platform_settings)
+            if service_overrides is None
+            else build_application(
+                platform_settings,
+                services=service_overrides,
+            )
+        )
         logging_runtime: LoggingRuntime | None = None
         logging_settings = django_settings.PLATFORM_SETTINGS.logging
         if (
@@ -182,6 +200,61 @@ def get_web_runtime() -> WebRuntime:
             courses=courses,
         )
         return _WEB_RUNTIME
+
+
+def _web_service_overrides(
+    platform_settings,
+    *,
+    logging_filename: str | None,
+) -> ServiceOverrides | None:
+    """Enable scoped DeepSeek grading only in the request-serving process."""
+
+    if (
+        logging_filename is not None
+        or getattr(platform_settings, "environment", None) == "test"
+    ):
+        return None
+    runtime_dir = getattr(platform_settings, "runtime_dir", None)
+    environment = getattr(platform_settings, "environment", None)
+    if not isinstance(runtime_dir, Path) or not isinstance(environment, str):
+        return None
+    try:
+        reviewer = build_m7_privacy_reviewer(
+            environment=environment,
+            runtime_dir=runtime_dir,
+        )
+    except (KeyError, OSError, TypeError, ValueError, RuntimeError):
+        return None
+    if reviewer is None:
+        return None
+    return ServiceOverrides(
+        m7_rubric_adapter=build_scoped_deepseek_m7_adapter(
+            settings_resolver=_resolve_scoped_m7_settings,
+            privacy_reviewer=reviewer,
+            runtime_dir=runtime_dir,
+        )
+    )
+
+
+def _resolve_scoped_m7_settings(
+    course_id: str,
+    class_id: str,
+) -> ScopedDeepSeekM7Settings | None:
+    """Map the Django credential record to M7 without retaining raw secrets."""
+
+    from course_insight.modules.m0_platform.django_app.scoped_deepseek import (
+        resolve_scoped_deepseek_settings,
+    )
+
+    settings = resolve_scoped_deepseek_settings(course_id, class_id)
+    if settings is None:
+        return None
+    return ScopedDeepSeekM7Settings(
+        api_key=settings.api_key,
+        model_name=settings.model_name,
+        thinking_enabled=settings.thinking_enabled,
+        api_revision=settings.api_revision,
+    )
 
 
 def close_application_container() -> None:

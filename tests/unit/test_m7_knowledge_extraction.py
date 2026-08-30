@@ -248,6 +248,58 @@ def test_exact_quote_is_converted_to_a_locally_computed_span(monkeypatch) -> Non
     assert reference.span_end == 11
 
 
+def test_grounded_evidence_ignores_disagreeing_redundant_citation_summary(
+    monkeypatch,
+) -> None:
+    adapter, transport = _adapter(
+        monkeypatch,
+        {
+            "concepts": [_concept("拥塞控制")],
+            "citation_ids": [],
+        },
+    )
+
+    result = adapter.extract(_batch(), model_ref=_model_ref(), created_at=NOW)
+
+    assert [candidate.name for candidate in result.candidates] == ["拥塞控制"]
+    assert result.candidates[0].evidence[0].chunk_id == "chunk-1"
+    assert len(transport.calls) == 1
+
+
+def test_quote_with_layout_whitespace_maps_to_the_original_source_span(
+    monkeypatch,
+) -> None:
+    source_text = "拥塞控制采用\n慢启动算法。"
+    batch = KnowledgeExtractionBatch(
+        batch_id="batch-layout-whitespace",
+        course_id="course-1",
+        chunks=[
+            ContentChunk(
+                chunk_id="chunk-1",
+                source_id="source-version-1",
+                text=source_text,
+                locator="slide:1",
+                concept_hints=[],
+                sha256="b" * 64,
+            )
+        ],
+        max_chars=1_000,
+    )
+    adapter, transport = _adapter(
+        monkeypatch,
+        {
+            "concepts": [_concept("慢启动", "拥塞控制采用 慢启动算法。")],
+            "citation_ids": ["chunk-1"],
+        },
+    )
+
+    result = adapter.extract(batch, model_ref=_model_ref(), created_at=NOW)
+
+    reference = result.candidates[0].evidence[0]
+    assert (reference.span_start, reference.span_end) == (0, len(source_text))
+    assert len(transport.calls) == 1
+
+
 def test_empty_concept_array_is_valid(monkeypatch) -> None:
     adapter, _ = _adapter(monkeypatch, {"concepts": [], "citation_ids": []})
 

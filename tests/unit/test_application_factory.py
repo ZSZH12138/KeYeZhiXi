@@ -2159,6 +2159,20 @@ def test_falsey_repository_override_still_preserves_identity(
     assert container.m4_service._repository is repository  # noqa: SLF001
 
 
+def test_m7_rubric_adapter_override_is_shared_with_coordinator(
+    tmp_path: Path,
+) -> None:
+    adapter = _RepositorySentinel()
+
+    container = build_application(
+        _settings(tmp_path),
+        services=ServiceOverrides(m7_rubric_adapter=adapter),
+    )
+
+    assert container.m7_service._local_model_adapter is adapter  # noqa: SLF001
+    assert container.coordinator._m7 is container.m7_service  # noqa: SLF001
+
+
 def test_service_override_does_not_construct_discarded_default(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

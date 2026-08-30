@@ -188,6 +188,11 @@ def test_container_is_closed_when_initialize_fails(
     monkeypatch.setattr(runtime, "_WEB_RUNTIME", None)
     monkeypatch.setattr(
         runtime,
+        "_web_service_overrides",
+        lambda settings, logging_filename: None,
+    )
+    monkeypatch.setattr(
+        runtime,
         "build_application",
         lambda settings: container,
     )
@@ -203,6 +208,36 @@ def test_container_is_closed_when_initialize_fails(
 
     assert closed == [True]
     assert runtime._CONTAINER is None
+
+
+def test_web_process_injects_course_class_scoped_m7_adapter(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from course_insight.modules.m0_platform.django_app import runtime
+
+    reviewer = object()
+    adapter = object()
+    monkeypatch.setattr(
+        runtime,
+        "build_m7_privacy_reviewer",
+        lambda **_kwargs: reviewer,
+    )
+    monkeypatch.setattr(
+        runtime,
+        "build_scoped_deepseek_m7_adapter",
+        lambda **kwargs: adapter
+        if kwargs["privacy_reviewer"] is reviewer
+        else None,
+    )
+
+    overrides = runtime._web_service_overrides(  # noqa: SLF001
+        SimpleNamespace(environment="development", runtime_dir=tmp_path),
+        logging_filename=None,
+    )
+
+    assert overrides is not None
+    assert overrides.m7_rubric_adapter is adapter
 
 
 def test_container_can_use_a_separate_rotating_log_filename(

@@ -227,6 +227,8 @@ class RubricScoringTask(ContractModel):
     scoring_task_id: str = Field(min_length=1)
     attempt_id: str = Field(min_length=1)
     paper_id: str = Field(min_length=1)
+    course_id: str | None = Field(default=None, min_length=1)
+    class_id: str | None = Field(default=None, min_length=1)
     item_instance: ItemInstance
     student_answer: str
     question_type: Literal["fill_blank", "subjective"] = "subjective"
@@ -245,6 +247,13 @@ class RubricScoringTask(ContractModel):
     def validate_business_rules(self) -> None:
         """Bind the exact frozen item score to the exact rubric version."""
 
+        if (self.course_id is None) != (self.class_id is None):
+            raise DomainError(
+                code="SCORING_SCOPE_INCOMPLETE",
+                module="m8",
+                message="scoring task course and class scope must be supplied together",
+                details={"scoring_task_id": self.scoring_task_id},
+            )
         _require_unique(
             self.reference_answers,
             code="DUPLICATE_REFERENCE_ANSWER",

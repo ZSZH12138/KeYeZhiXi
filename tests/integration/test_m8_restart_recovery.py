@@ -51,6 +51,8 @@ def test_restart_recovers_frozen_rubric_and_scoring_scope(tmp_path) -> None:
 
     assert recovered == paper
     assert preparation.rubric_scoring_tasks[0].rubric.version == "1.0.0"
+    assert preparation.rubric_scoring_tasks[0].course_id == "course_1"
+    assert preparation.rubric_scoring_tasks[0].class_id == "class_1"
     assert repository.get_paper_record(paper.paper_id).course_id == "course_1"
 
 

@@ -112,21 +112,10 @@ class DeepSeekKnowledgeExtractionAdapter:
                 )
 
             try:
-                candidates, citation_ids = _parse_candidates(
+                candidates, _ = _parse_candidates(
                     invocation.result.structured_output,
                     batch,
                 )
-                expected_citations = list(
-                    dict.fromkeys(
-                        reference.chunk_id
-                        for candidate in candidates
-                        for reference in candidate.evidence
-                    )
-                )
-                if citation_ids != expected_citations:
-                    raise _KnowledgeOutputValidationError(
-                        "citation_ids_mismatch"
-                    )
                 return KnowledgeExtractionResult(
                     result_id=f"result_{hashlib.sha256(request.request_id.encode('utf-8')).hexdigest()}",
                     batch=batch,
@@ -220,12 +209,7 @@ def _parse_candidates(
             ):
                 raise _KnowledgeOutputValidationError("evidence_identity_invalid")
             chunk = chunks[chunk_id]
-            span_start = chunk.text.find(quote)
-            if span_start < 0:
-                raise _KnowledgeOutputValidationError(
-                    "evidence_quote_not_found"
-                )
-            span_end = span_start + len(quote)
+            span_start, span_end = _source_span(chunk.text, quote)
             evidence.append(
                 KnowledgeEvidenceRef(
                     source_id=chunk.source_id,
@@ -252,6 +236,43 @@ def _parse_candidates(
             )
         )
     return candidates, list(citation_ids)
+
+
+def _source_span(source_text: str, quote: str) -> tuple[int, int]:
+    span_start = source_text.find(quote)
+    if span_start >= 0:
+        return span_start, span_start + len(quote)
+
+    normalized_source, source_starts, source_ends = _collapse_whitespace(
+        source_text
+    )
+    normalized_quote, _, _ = _collapse_whitespace(quote)
+    normalized_start = normalized_source.find(normalized_quote)
+    if not normalized_quote or normalized_start < 0:
+        raise _KnowledgeOutputValidationError("evidence_quote_not_found")
+    normalized_end = normalized_start + len(normalized_quote)
+    return source_starts[normalized_start], source_ends[normalized_end - 1]
+
+
+def _collapse_whitespace(value: str) -> tuple[str, list[int], list[int]]:
+    characters: list[str] = []
+    starts: list[int] = []
+    ends: list[int] = []
+    index = 0
+    while index < len(value):
+        start = index
+        character = value[index]
+        if character.isspace():
+            index += 1
+            while index < len(value) and value[index].isspace():
+                index += 1
+            character = " "
+        else:
+            index += 1
+        characters.append(character)
+        starts.append(start)
+        ends.append(index)
+    return "".join(characters), starts, ends
 
 
 def _validation_code(error: Exception) -> str:

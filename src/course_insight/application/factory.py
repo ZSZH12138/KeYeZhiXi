@@ -202,6 +202,7 @@ class ServiceOverrides:
     m5: M5StateService | None = None
     m6: M6TutoringControlService | None = None
     m7: M7LocalModelService | None = None
+    m7_rubric_adapter: object | None = None
     m8: M8AssessmentService | None = None
     m9: M9TeacherAnalyticsService | None = None
 
@@ -531,86 +532,38 @@ def _assemble_application(
     )
     m7 = (
         M7LocalModelService(
-            PlaceholderRubricAdapter(),
+            (
+                PlaceholderRubricAdapter()
+                if service_overrides.m7_rubric_adapter is None
+                else service_overrides.m7_rubric_adapter
+            ),
             durable["m7"],
             _accept_model_output,
         )
         if service_overrides.m7 is None
         else service_overrides.m7
     )
-    if service_overrides.m7 is None:
+    if (
+        service_overrides.m7 is None
+        and service_overrides.m7_rubric_adapter is None
+    ):
         from course_insight.infrastructure.deepseek_secrets import (
-            inspect_m7_privacy_artifacts,
-            privacy_model_dir,
             resolve_deepseek_api_key,
-        )
-        from course_insight.modules.m7_local_model.privacy_reviewer import (
-            DenyAllPrivacyReviewer,
-            build_presidio_spacy_reviewer,
-            build_required_m7_privacy_reviewer,
         )
         from course_insight.modules.m7_local_model.runtime import (
             build_deepseek_m7_adapter,
+            build_m7_privacy_reviewer,
         )
 
         if (
             settings.environment != "test"
             and resolve_deepseek_api_key(settings.runtime_dir)
         ):
-            ready, _reason = inspect_m7_privacy_artifacts(settings.runtime_dir)
             try:
-                reviewer = None
-                if ready:
-                    reviewer = build_required_m7_privacy_reviewer(
-                        runtime_dir=settings.runtime_dir.resolve(),
-                        model_dir=privacy_model_dir(settings.runtime_dir),
-                        expected_presidio_version=os.environ.get(
-                            "COURSE_INSIGHT_M7_PRESIDIO_VERSION",
-                            "2.2.364",
-                        ),
-                        expected_spacy_version=os.environ.get(
-                            "COURSE_INSIGHT_M7_SPACY_VERSION",
-                            "3.8.13",
-                        ),
-                        expected_spacy_model_version=os.environ.get(
-                            "COURSE_INSIGHT_M7_SPACY_MODEL_VERSION",
-                            "3.8.0",
-                        ),
-                        expected_semantic_model_id=os.environ.get(
-                            "COURSE_INSIGHT_M7_PRIVACY_MODEL_ID",
-                            "m7-semantic-privacy",
-                        ),
-                        expected_semantic_model_version=os.environ.get(
-                            "COURSE_INSIGHT_M7_PRIVACY_MODEL_VERSION",
-                            "1",
-                        ),
-                        expected_semantic_model_sha256=os.environ[
-                            "COURSE_INSIGHT_M7_PRIVACY_MODEL_SHA256"
-                        ],
-                        expected_semantic_manifest_sha256=os.environ[
-                            "COURSE_INSIGHT_M7_PRIVACY_MANIFEST_SHA256"
-                        ],
-                    )
-                elif settings.environment == "development":
-                    development_reviewer = build_presidio_spacy_reviewer(
-                        expected_model_version=os.environ.get(
-                            "COURSE_INSIGHT_M7_SPACY_MODEL_VERSION",
-                            "3.8.0",
-                        ),
-                        expected_presidio_version=os.environ.get(
-                            "COURSE_INSIGHT_M7_PRESIDIO_VERSION",
-                            "2.2.364",
-                        ),
-                        expected_spacy_version=os.environ.get(
-                            "COURSE_INSIGHT_M7_SPACY_VERSION",
-                            "3.8.13",
-                        ),
-                    )
-                    if not isinstance(
-                        development_reviewer,
-                        DenyAllPrivacyReviewer,
-                    ):
-                        reviewer = development_reviewer
+                reviewer = build_m7_privacy_reviewer(
+                    environment=settings.environment,
+                    runtime_dir=settings.runtime_dir,
+                )
                 if reviewer is not None:
                     m7 = M7LocalModelService(
                         build_deepseek_m7_adapter(

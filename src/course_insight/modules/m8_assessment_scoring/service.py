@@ -282,6 +282,11 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
         )
         if frozen_record is not None and frozen_record.paper != assessment_paper:
             self._raise_answer_error("assessment paper differs from its frozen record")
+        scoring_scope = (
+            (frozen_record.course_id, frozen_record.class_id)
+            if frozen_record is not None
+            else self._paper_event_context.get(assessment_paper.paper_id)
+        )
         raw_bytes, payload = self._load_raw_answers(raw_answer_path)
         attempt_id = self._required_text(payload, "attempt_id")
         paper_id = self._required_text(payload, "paper_id")
@@ -384,6 +389,12 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
                     scoring_task_id=scoring_task_id,
                     attempt_id=attempt_id,
                     paper_id=paper_id,
+                    course_id=(
+                        None if scoring_scope is None else scoring_scope[0]
+                    ),
+                    class_id=(
+                        None if scoring_scope is None else scoring_scope[1]
+                    ),
                     item_instance=task_instance,
                     student_answer=answer,
                     question_type=question_type,

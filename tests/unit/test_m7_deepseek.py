@@ -57,6 +57,10 @@ from course_insight.modules.m7_local_model.privacy_reviewer import (
     PrivacyReviewResult,
 )
 from course_insight.modules.m7_local_model.repository import M7ModelAuditRecord
+from course_insight.modules.m7_local_model.runtime import (
+    ScopedDeepSeekM7Settings,
+    build_scoped_deepseek_m7_adapter,
+)
 from course_insight.modules.m7_local_model.service import M7LocalModelService
 from course_insight.modules.m8_assessment_scoring.service import (
     M8AssessmentService,
@@ -72,6 +76,7 @@ class _Transport:
         self.responses = list(responses)
         self.calls = 0
         self.payloads: list[dict[str, Any]] = []
+        self.authorization_headers: list[str] = []
 
     def post_json(
         self,
@@ -82,9 +87,12 @@ class _Transport:
         timeout_seconds: float,
         max_response_bytes: int,
     ) -> DeepSeekHTTPResponse:
-        del url, headers, timeout_seconds, max_response_bytes
+        del url, timeout_seconds, max_response_bytes
         self.calls += 1
         self.payloads.append(json.loads(payload.decode("utf-8")))
+        self.authorization_headers.append(
+            str(headers.get("Authorization", ""))
+        )
         return self.responses.pop(0)
 
 
@@ -337,6 +345,8 @@ def _scoring_task() -> RubricScoringTask:
         scoring_task_id="scoring_1",
         attempt_id="attempt_1",
         paper_id="paper_1",
+        course_id="course_1",
+        class_id="class_1",
         item_instance=ItemInstance(
             item_instance_id="item_instance_1",
             item_id="item_1",
@@ -353,6 +363,51 @@ def _scoring_task() -> RubricScoringTask:
         evidence_query_id="query_1",
         created_at=NOW,
     )
+
+
+def test_scoped_adapter_uses_exact_course_class_credentials() -> None:
+    transport = _Transport(_response(_valid_score_json()))
+    resolved_scopes: list[tuple[str, str]] = []
+
+    def _resolve(course_id: str, class_id: str) -> ScopedDeepSeekM7Settings:
+        resolved_scopes.append((course_id, class_id))
+        return ScopedDeepSeekM7Settings(
+            api_key="sk-scoped-class-key",
+            model_name="deepseek-v4-flash",
+            thinking_enabled=False,
+            api_revision=7,
+        )
+
+    adapter = build_scoped_deepseek_m7_adapter(
+        settings_resolver=_resolve,
+        privacy_reviewer=_ALLOW_PRIVACY_REVIEWER,
+        transport=transport,
+        sleep=lambda _: None,
+        monotonic=lambda: 1.0,
+        clock=lambda: NOW,
+    )
+
+    outcome = adapter.score_governed(_scoring_task(), _evidence())
+
+    assert outcome.result.total_score == 2.0
+    assert resolved_scopes == [("course_1", "class_1")]
+    assert transport.authorization_headers == ["Bearer sk-scoped-class-key"]
+
+
+def test_scoped_adapter_fails_closed_when_task_scope_is_missing() -> None:
+    adapter = build_scoped_deepseek_m7_adapter(
+        settings_resolver=lambda _course_id, _class_id: None,
+        privacy_reviewer=_ALLOW_PRIVACY_REVIEWER,
+    )
+    task = _scoring_task().model_copy(
+        update={"course_id": None, "class_id": None},
+        deep=True,
+    )
+
+    with pytest.raises(DomainError) as captured:
+        adapter.score_governed(task, _evidence())
+
+    assert captured.value.code == "MODEL_ADAPTER_UNCONFIGURED"
 
 
 def _feedback_task() -> FeedbackGenerationTask:

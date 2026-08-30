@@ -214,12 +214,38 @@
       "title": "Attempt Id",
       "type": "string"
     },
+    "class_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Class Id"
+    },
     "concept_names": {
       "items": {
         "type": "string"
       },
       "title": "Concept Names",
       "type": "array"
+    },
+    "course_id": {
+      "anyOf": [
+        {
+          "minLength": 1,
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Course Id"
     },
     "created_at": {
       "format": "date-time",
