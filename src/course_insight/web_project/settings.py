@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from pathlib import Path
 from urllib.parse import parse_qs, unquote, urlsplit
 
@@ -12,7 +13,32 @@ from course_insight.infrastructure.config import (
 )
 
 
-_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+_SOURCE_PROJECT_ROOT = Path(__file__).resolve().parents[3]
+
+
+def _resolve_project_root(
+    environment: Mapping[str, str],
+    *,
+    default: Path,
+) -> Path:
+    """Select an explicit absolute desktop root without weakening boundaries."""
+
+    configured = environment.get("DJANGO_COURSE_INSIGHT_PROJECT_ROOT")
+    if not configured:
+        return default.resolve()
+    candidate = Path(configured).expanduser()
+    if not candidate.is_absolute():
+        raise RuntimeError("desktop project root must be absolute")
+    resolved = candidate.resolve()
+    if resolved == Path(resolved.anchor):
+        raise RuntimeError("desktop project root is unsafe")
+    return resolved
+
+
+_PROJECT_ROOT = _resolve_project_root(
+    os.environ,
+    default=_SOURCE_PROJECT_ROOT,
+)
 
 
 def _load_settings() -> PlatformSettings:
