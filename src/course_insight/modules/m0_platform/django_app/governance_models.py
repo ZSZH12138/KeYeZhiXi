@@ -74,7 +74,7 @@ class ClassMembership(models.Model):
 
 
 class AccountLifecycleEvent(models.Model):
-    """Identity-minimised audit evidence for administrator account actions."""
+    """Audit evidence retained only while the target account still exists."""
 
     class Action(models.TextChoices):
         CREATED = "created", "Created"
@@ -83,7 +83,11 @@ class AccountLifecycleEvent(models.Model):
         DELETE_FAILED = "delete_failed", "Deletion failed"
 
     action = models.CharField(max_length=32, choices=Action.choices)
-    target_digest = models.CharField(max_length=64, db_index=True)
+    target_user = models.ForeignKey(
+        "m0_platform_web.User",
+        on_delete=models.CASCADE,
+        related_name="account_lifecycle_target_events",
+    )
     target_account_type = models.CharField(max_length=16)
     administrator = models.ForeignKey(
         "m0_platform_web.User",
@@ -105,13 +109,6 @@ class AccountLifecycleEvent(models.Model):
         ]
 
 
-class DeletedActorFingerprint(models.Model):
-    """A one-way marker preventing accidental reuse after physical deletion."""
-
-    target_digest = models.CharField(primary_key=True, max_length=64)
-    deleted_at = models.DateTimeField(default=timezone.now)
-
-
 class AuthenticatedSession(models.Model):
     """Maps active Django sessions to users so deletion can revoke them."""
 
@@ -122,3 +119,32 @@ class AuthenticatedSession(models.Model):
         related_name="authenticated_sessions",
     )
     created_at = models.DateTimeField(auto_now_add=True)
+
+
+class ErasureFileCleanup(models.Model):
+    """One opaque file key awaiting physical account-erasure cleanup."""
+
+    class Kind(models.TextChoices):
+        KNOWLEDGE_UPLOAD = "knowledge_upload", "Knowledge upload"
+        FROZEN_SUBMISSION = "frozen_submission", "Frozen submission"
+
+    kind = models.CharField(max_length=32, choices=Kind.choices)
+    opaque_key = models.CharField(max_length=128)
+    attempt_count = models.PositiveIntegerField(default=0)
+    last_error_code = models.CharField(max_length=64, blank=True, default="")
+    queued_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [
+            models.UniqueConstraint(
+                fields=("kind", "opaque_key"),
+                name="m0_erasure_file_cleanup_unique_key",
+            )
+        ]
+        indexes = [
+            models.Index(
+                fields=("kind", "queued_at"),
+                name="m0_erase_file_queue_idx",
+            )
+        ]

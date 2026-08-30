@@ -11,10 +11,10 @@
   </div>
   <section class="card">
     <h2>教师账户（{{ teachers|length }}）</h2>
-    <ul>{% for account in teachers %}<li>{{ account.actor_id }} · <a href="{% url 'account-admin-delete-teacher' actor_id=account.actor_id %}">注销教师账户</a></li>{% empty %}<li>暂无教师账户</li>{% endfor %}</ul>
+    <ul>{% for account in teachers %}<li>{{ account.username }} · <a href="{% url 'account-admin-delete-teacher' user_id=account.pk %}">注销教师账户</a></li>{% empty %}<li>暂无教师账户</li>{% endfor %}</ul>
   </section>
   <section class="card">
     <h2>学生账户（{{ students|length }}）</h2>
-    <ul>{% for account in students %}<li>{{ account.actor_id }} · <a href="{% url 'account-admin-delete-student' actor_id=account.actor_id %}">注销学生账户</a></li>{% empty %}<li>暂无学生账户</li>{% endfor %}</ul>
+    <ul>{% for account in students %}<li>{{ account.username }} · <a href="{% url 'account-admin-delete-student' user_id=account.pk %}">注销学生账户</a></li>{% empty %}<li>暂无学生账户</li>{% endfor %}</ul>
   </section>
 {% endblock %}

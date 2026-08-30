@@ -4,7 +4,7 @@
   <p class="breadcrumb"><a href="{% url 'account-admin-home' %}">账户管理</a> / 注销账户</p>
   <h1 class="page-title">物理注销账户</h1>
   <section class="card">
-    <p>账户名：{{ preview.actor_id }}</p>
+    <p>账户名：{{ preview.account_name }}</p>
     <p>当前所在班级：{{ preview.active_membership_count }} 个；名下班级：{{ preview.owned_workspace_count }} 个。</p>
     <p class="errorlist">确认后将物理删除账户及个人学习记录，操作不可恢复。</p>
     <form method="post">

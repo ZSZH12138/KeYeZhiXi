@@ -2,7 +2,7 @@
 
 ## 当前实现状态
 
-截至 `2026-07-25`，`src/course_insight/modules/m0_platform/outbox_worker.py` 已经提供独立 Worker 实现，且共享代码中已出现公开命令入口：
+`src/course_insight/modules/m0_platform/outbox_worker.py` 提供独立 Worker 实现，共享代码中的公开命令入口为：
 
 ```shell
 python manage.py run_outbox_worker --once
@@ -107,7 +107,7 @@ Web 与 Worker 分别写 stdout，再由容器/服务管理平台集中收集和
 
 ## 当前文档不能声称的内容
 
-截至 `2026-07-25`，本仓库可以明确写：
+当前仓库可以明确写：
 - Worker 类已实现
 - 组合根可自动构造 Worker 实例
 - 公开 `run_outbox_worker` 命令已进入共享代码

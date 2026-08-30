@@ -36,7 +36,20 @@ def _database_configuration(
         return {
             "ENGINE": "django.db.backends.sqlite3",
             "NAME": platform.database.sqlite_path,
-            "OPTIONS": {"timeout": platform.database.connect_timeout_seconds},
+            "OPTIONS": {
+                # A deferred transaction can read first and then fail
+                # immediately while upgrading to a writer under concurrent
+                # workers. IMMEDIATE reserves the single SQLite writer before
+                # account/governance code reads mutable state.
+                "timeout": max(
+                    30.0,
+                    platform.database.connect_timeout_seconds,
+                ),
+                "transaction_mode": "IMMEDIATE",
+                "init_command": (
+                    "PRAGMA journal_mode=WAL;PRAGMA busy_timeout=30000"
+                ),
+            },
         }
     if platform.database.url is None:
         raise RuntimeError("validated PostgreSQL configuration is unavailable")
@@ -149,32 +162,10 @@ DATABASES = {"default": _database_configuration(PLATFORM_SETTINGS)}
 AUTH_USER_MODEL = "m0_platform_web.User"
 DEFAULT_AUTO_FIELD = "django.db.models.BigAutoField"
 
-AUTH_PASSWORD_VALIDATORS = [
-    {
-        "NAME": (
-            "django.contrib.auth.password_validation."
-            "UserAttributeSimilarityValidator"
-        )
-    },
-    {
-        "NAME": (
-            "django.contrib.auth.password_validation."
-            "MinimumLengthValidator"
-        )
-    },
-    {
-        "NAME": (
-            "django.contrib.auth.password_validation."
-            "CommonPasswordValidator"
-        )
-    },
-    {
-        "NAME": (
-            "django.contrib.auth.password_validation."
-            "NumericPasswordValidator"
-        )
-    },
-]
+# Teachers and students receive credentials only from an administrator.  The
+# account form performs the sole business rule: both values must contain at
+# least one non-whitespace character.  Password hashing remains Django-owned.
+AUTH_PASSWORD_VALIDATORS: list[dict[str, str]] = []
 
 LANGUAGE_CODE = "zh-hans"
 TIME_ZONE = "Asia/Shanghai"

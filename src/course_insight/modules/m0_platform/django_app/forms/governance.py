@@ -3,41 +3,43 @@
 from __future__ import annotations
 
 from django import forms
-from django.contrib.auth.password_validation import validate_password
-from django.core.exceptions import ValidationError
-from django.core.validators import RegexValidator
-
-from course_insight.modules.m0_platform.django_app.models import (
-    PSEUDONYMOUS_ACTOR_PATTERN,
-)
 
 
 class ManagedAccountCreationForm(forms.Form):
-    actor_id = forms.CharField(
+    account_name = forms.CharField(
         label="账户名",
-        min_length=12,
-        max_length=128,
-        validators=[RegexValidator(PSEUDONYMOUS_ACTOR_PATTERN, "账户名格式无效")],
+        strip=False,
     )
-    password1 = forms.CharField(label="密码", widget=forms.PasswordInput)
-    password2 = forms.CharField(label="再次输入密码", widget=forms.PasswordInput)
+    password1 = forms.CharField(
+        label="密码",
+        strip=False,
+        widget=forms.PasswordInput,
+    )
+    password2 = forms.CharField(
+        label="再次输入密码",
+        strip=False,
+        widget=forms.PasswordInput,
+    )
 
     def clean(self) -> dict[str, object]:
         cleaned = super().clean()
+        account_name = cleaned.get("account_name")
         password1 = cleaned.get("password1")
         password2 = cleaned.get("password2")
+        if isinstance(account_name, str) and not account_name.strip():
+            self.add_error("account_name", "账户名不能为空或全为空白")
+        if isinstance(password1, str) and not password1.strip():
+            self.add_error("password1", "密码不能为空或全为空白")
         if password1 and password2 and password1 != password2:
             self.add_error("password2", "两次输入的密码不一致")
-        if password1:
-            try:
-                validate_password(str(password1))
-            except ValidationError as error:
-                self.add_error("password1", error)
         return cleaned
 
 
 class AccountDeletionConfirmationForm(forms.Form):
-    confirmed_actor_id = forms.CharField(label="再次输入要注销的账户名", max_length=128)
+    confirmed_account_name = forms.CharField(
+        label="再次输入要注销的账户名",
+        strip=False,
+    )
 
 
 class OpenClassForm(forms.Form):
@@ -49,6 +51,11 @@ class OpenClassForm(forms.Form):
 class ClassMemberForm(forms.Form):
     student_account = forms.CharField(
         label="学生账户名",
-        max_length=128,
-        validators=[RegexValidator(PSEUDONYMOUS_ACTOR_PATTERN, "学生账户名格式无效")],
+        strip=False,
     )
+
+    def clean_student_account(self) -> str:
+        account_name = self.cleaned_data["student_account"]
+        if not account_name.strip():
+            raise forms.ValidationError("学生账户名不能为空或全为空白")
+        return account_name

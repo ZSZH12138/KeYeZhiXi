@@ -31,12 +31,12 @@ urlpatterns = [
         name="account-admin-create-student",
     ),
     path(
-        "account-admin/accounts/teachers/<str:actor_id>/delete/",
+        "account-admin/accounts/teachers/<int:user_id>/delete/",
         account_admin.delete_teacher,
         name="account-admin-delete-teacher",
     ),
     path(
-        "account-admin/accounts/students/<str:actor_id>/delete/",
+        "account-admin/accounts/students/<int:user_id>/delete/",
         account_admin.delete_student,
         name="account-admin-delete-student",
     ),
@@ -60,9 +60,9 @@ urlpatterns = [
         name="student-course-file-download",
     ),
     path(
-        "student/start/",
-        student.select_scope,
-        name="student-select-scope",
+        "student/select-workspace/",
+        student.select_workspace,
+        name="student-select-workspace",
     ),
     path(
         (
@@ -130,7 +130,7 @@ urlpatterns = [
     path(
         (
             "teacher/courses/<str:course_id>/classes/<str:class_id>/"
-            "students/<str:actor_id>/remove/"
+            "students/<int:student_id>/remove/"
         ),
         teacher.remove_class_student,
         name="teacher-class-remove-student",

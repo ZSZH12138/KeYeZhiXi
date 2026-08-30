@@ -91,6 +91,7 @@ from course_insight.modules.m0_platform.django_app.models import (
     SuggestedTeacherReviewItem,
     TeacherItemReviewNote,
     User,
+    account_name_digest,
 )
 from course_insight.modules.m0_platform.django_app.scoped_deepseek import (
     ScopedDeepSeekSettings,
@@ -109,6 +110,10 @@ from course_insight.modules.m0_platform.django_app.forms.review import (
 from course_insight.modules.m0_platform.django_app.forms.start import (
     ReviewLookupForm,
     ScopeSelectionForm,
+)
+from course_insight.modules.m0_platform.django_app.workspace_labels import (
+    ScopeDisplay,
+    scope_display,
 )
 from course_insight.modules.m0_platform.django_app.views.viewmodels import (
     analytics_view,
@@ -182,11 +187,42 @@ def home(request: HttpRequest) -> HttpResponse:
             status=CourseClassWorkspace.Status.ACTIVE,
         ).order_by("course_display_name", "class_display_name", "course_id")
     )
-    knowledge_scopes = sorted(
-        {
-            *grant_scopes,
-            *((item.course_id, item.class_id) for item in owned_workspaces),
-        }
+    scope_ids = {
+        *grant_scopes,
+        *((item.course_id, item.class_id) for item in owned_workspaces),
+    }
+    workspace_by_scope = {
+        (workspace.course_id, workspace.class_id): workspace
+        for workspace in _workspaces_for_scopes(scope_ids)
+    }
+    knowledge_scopes = tuple(
+        sorted(
+            (
+                scope_display(
+                    course_id=course_id,
+                    class_id=class_id,
+                    course_display_name=(
+                        workspace_by_scope[(course_id, class_id)]
+                        .course_display_name
+                        if (course_id, class_id) in workspace_by_scope
+                        else ""
+                    ),
+                    class_display_name=(
+                        workspace_by_scope[(course_id, class_id)]
+                        .class_display_name
+                        if (course_id, class_id) in workspace_by_scope
+                        else ""
+                    ),
+                )
+                for course_id, class_id in scope_ids
+            ),
+            key=lambda item: (
+                item.course_name,
+                item.class_name,
+                item.course_id,
+                item.class_id,
+            ),
+        )
     )
     return render(
         request,
@@ -201,12 +237,9 @@ def home(request: HttpRequest) -> HttpResponse:
             "can_configure_deepseek": request.user.has_perm(
                 "m0_platform_web.configure_deepseek"
             ),
-            "knowledge_scopes": tuple(
-                {"course_id": course_id, "class_id": class_id}
-                for course_id, class_id in knowledge_scopes
-            ),
+            "knowledge_scopes": knowledge_scopes,
             "knowledge_courses": sorted(
-                {course_id for course_id, _ in knowledge_scopes}
+                {scope.course_id for scope in knowledge_scopes}
             ),
             "can_manage_course_knowledge": request.user.has_perm(
                 "m0_platform_web.manage_course_knowledge"
@@ -280,10 +313,13 @@ def add_class_student(
     ):
         return HttpResponse("学生账户名无效", status=400)
     try:
+        student = _active_student_account_by_name(
+            str(form.cleaned_data["student_account"])
+        )
         add_student(
             workspace=workspace,
             teacher=request.user,
-            actor_id=str(form.cleaned_data["student_account"]),
+            actor_id=student.actor_id,
         )
     except ValidationError as error:
         return HttpResponse(str(error.message), status=400)
@@ -296,7 +332,7 @@ def remove_class_student(
     request: HttpRequest,
     course_id: str,
     class_id: str,
-    actor_id: str,
+    student_id: int,
 ) -> HttpResponse:
     _authorize_teacher_account(request, "manage_class_members")
     if not _has_exact_post_fields(request, set()):
@@ -307,10 +343,11 @@ def remove_class_student(
         class_id=class_id,
     )
     try:
+        student = _active_student_account_by_id(student_id)
         remove_student(
             workspace=workspace,
             teacher=request.user,
-            actor_id=actor_id,
+            actor_id=student.actor_id,
         )
     except ValidationError as error:
         return HttpResponse(str(error.message), status=400)
@@ -338,6 +375,66 @@ def _has_exact_post_fields(
     )
 
 
+def _workspaces_for_scopes(
+    scopes: set[tuple[str, str]],
+) -> tuple[CourseClassWorkspace, ...]:
+    """Load only the workspace rows needed to label exact scope links."""
+
+    if not scopes:
+        return ()
+    scope_query = Q()
+    for course_id, class_id in scopes:
+        scope_query |= Q(course_id=course_id, class_id=class_id)
+    return tuple(
+        CourseClassWorkspace.objects.filter(
+            scope_query,
+            status=CourseClassWorkspace.Status.ACTIVE,
+        )
+    )
+
+
+def _scope_display(*, course_id: str, class_id: str) -> ScopeDisplay:
+    """Build names for a teacher page while IDs remain route-only values."""
+
+    workspace = CourseClassWorkspace.objects.filter(
+        course_id=course_id,
+        class_id=class_id,
+        status=CourseClassWorkspace.Status.ACTIVE,
+    ).first()
+    return scope_display(
+        course_id=course_id,
+        class_id=class_id,
+        course_display_name=(
+            "" if workspace is None else workspace.course_display_name
+        ),
+        class_display_name=(
+            "" if workspace is None else workspace.class_display_name
+        ),
+    )
+
+
+def _active_student_account_by_name(account_name: str) -> User:
+    student = User.objects.filter(
+        username_digest=account_name_digest(account_name),
+        account_type=AccountType.STUDENT,
+        is_active=True,
+    ).first()
+    if student is None or student.username != account_name:
+        raise ValidationError("学生账户不存在或已停用")
+    return student
+
+
+def _active_student_account_by_id(student_id: int) -> User:
+    student = User.objects.filter(
+        pk=student_id,
+        account_type=AccountType.STUDENT,
+        is_active=True,
+    ).first()
+    if student is None:
+        raise ValidationError("学生账户不存在或已停用")
+    return student
+
+
 @login_required
 @require_http_methods(["GET", "POST"])
 def deepseek_settings(
@@ -346,6 +443,7 @@ def deepseek_settings(
     class_id: str | None = None,
 ) -> HttpResponse:
     scoped = course_id is not None and class_id is not None
+    scope: ScopeDisplay | None = None
     if scoped:
         authorize_scope(
             request.user,
@@ -354,6 +452,7 @@ def deepseek_settings(
             class_id=class_id,
         )
         status = scoped_deepseek_status(course_id, class_id)
+        scope = _scope_display(course_id=course_id, class_id=class_id)
         runtime_dir = None
     else:
         authorize_deepseek_config(request.user)
@@ -418,6 +517,7 @@ def deepseek_settings(
             "course_id": course_id,
             "class_id": class_id,
             "scoped": scoped,
+            "scope": scope,
         },
     )
 
@@ -435,18 +535,28 @@ def lookup(request: HttpRequest) -> HttpResponse:
         )
     course_id = str(form.cleaned_data["course_id"])
     class_id = str(form.cleaned_data["class_id"])
-    learner_id = str(form.cleaned_data["learner_account"])
     _authorize_teacher(
         request,
         "view_student_report",
         course_id=course_id,
         class_id=class_id,
     )
+    try:
+        learner = _active_student_account_by_name(
+            str(form.cleaned_data["learner_account"])
+        )
+    except ValidationError as error:
+        raise Http404("student account is unavailable") from error
+    _require_active_student(
+        course_id=course_id,
+        class_id=class_id,
+        learner_id=learner.actor_id,
+    )
     return redirect(
         "teacher-learner-review-list",
         course_id=course_id,
         class_id=class_id,
-        learner_id=learner_id,
+        learner_id=learner.actor_id,
     )
 
 
@@ -710,7 +820,7 @@ def _render_class_context(
             removed_at__isnull=True,
         )
         .select_related("student")
-        .order_by("student__actor_id")
+        .order_by("student__username")
         if can_manage_roster
         else ClassMembership.objects.none()
     )
@@ -729,6 +839,16 @@ def _render_class_context(
             "course_id": course_id,
             "class_id": class_id,
             "workspace": workspace,
+            "scope": scope_display(
+                course_id=course_id,
+                class_id=class_id,
+                course_display_name=(
+                    "" if workspace is None else workspace.course_display_name
+                ),
+                class_display_name=(
+                    "" if workspace is None else workspace.class_display_name
+                ),
+            ),
             "can_manage_roster": can_manage_roster,
             "active_memberships": memberships,
             "active_student_count": memberships.count(),

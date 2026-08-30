@@ -5,7 +5,11 @@ from django.contrib.auth.models import Group, Permission
 from django.test import Client
 from django.urls import reverse
 
-from course_insight.modules.m0_platform.django_app.models import ActorGrant, User
+from course_insight.modules.m0_platform.django_app.models import (
+    ActorGrant,
+    CourseClassWorkspace,
+    User,
+)
 from course_insight.modules.m0_platform.django_app.scoped_deepseek import (
     resolve_scoped_deepseek_settings,
     save_scoped_deepseek_settings,
@@ -116,3 +120,46 @@ def test_teacher_page_saves_key_for_the_exact_authorized_class(client: Client) -
         "course_1", "class_1"
     ).api_key == "sk-page-private-key"
     assert resolve_scoped_deepseek_settings("course_1", "class_2") is None
+
+
+def test_scoped_deepseek_page_displays_workspace_names_not_scope_ids(
+    client: Client,
+) -> None:
+    teacher = _teacher()
+    group = Group.objects.create(name="scoped-key-named-workspace")
+    group.permissions.add(
+        Permission.objects.get(
+            content_type__app_label="m0_platform_web",
+            codename="configure_deepseek",
+        )
+    )
+    teacher.groups.add(group)
+    workspace = CourseClassWorkspace.objects.create(
+        course_id="course_opaque_deepseek",
+        class_id="class_opaque_deepseek",
+        course_display_name="软件工程",
+        class_display_name="三班",
+    )
+    ActorGrant.objects.create(
+        user=teacher,
+        role="teacher",
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
+        source_checksum="c" * 64,
+    )
+    client.force_login(teacher)
+
+    response = client.get(
+        reverse(
+            "teacher-deepseek-settings",
+            kwargs={
+                "course_id": workspace.course_id,
+                "class_id": workspace.class_id,
+            },
+        )
+    )
+
+    body = response.content.decode()
+    assert response.status_code == 200
+    assert "软件工程 / 三班" in body
+    assert "course_opaque_deepseek / class_opaque_deepseek" not in body

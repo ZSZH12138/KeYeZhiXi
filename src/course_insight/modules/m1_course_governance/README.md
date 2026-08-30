@@ -74,6 +74,6 @@ $env:COURSE_INSIGHT_OCR__LANGUAGE = "chi_sim+eng"
 `backend=disabled`，未配置 OCR 时不会悄悄调用外部进程；OCR 结果仍受页数、
 单页和总文本字节上限约束。
 
-## 2026-08-25 长文本分块
+## 长文本分块
 
 所有解析正文在规范化后进入 `split_parsed_blocks`。默认上限为 6,000 个非空白 Unicode 字符；先按段落组合，单段超限时依次尝试句末、较弱标点/空白，最后按字符硬切。每个子块保留原文件 locator 并获得稳定 chunk ID，供 M7 抽取和 M3 来源追踪。文件数量为 `0..N`，单文件失败不得影响同批其他文件。

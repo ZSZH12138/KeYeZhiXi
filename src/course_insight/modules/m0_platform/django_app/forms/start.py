@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Iterable
+
 from django import forms
 from django.core.validators import RegexValidator
 
@@ -79,12 +81,48 @@ class ScopeSelectionForm(forms.Form):
         return cleaned
 
 
+class StudentWorkspaceSelectionForm(forms.Form):
+    """Let students choose an invited class by its display label.
+
+    The submitted value is an opaque workspace primary key, not a course or
+    class name.  The view independently verifies the active membership before
+    resolving it to the exact authorization scope.
+    """
+
+    workspace_id = forms.ChoiceField(label="课程和班级")
+
+    def __init__(
+        self,
+        *args: object,
+        workspace_choices: Iterable[tuple[str, str]],
+        **kwargs: object,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self.fields["workspace_id"].choices = tuple(workspace_choices)
+
+    def clean(self) -> dict[str, object]:
+        cleaned = super().clean()
+        if self.is_bound:
+            if set(self.data) - set(self.fields):
+                raise forms.ValidationError("Unexpected form field.")
+            getlist = getattr(self.data, "getlist", None)
+            if callable(getlist) and len(getlist("workspace_id")) != 1:
+                self.add_error(
+                    "workspace_id",
+                    "Submit each field exactly once.",
+                )
+        return cleaned
+
+
 class ReviewLookupForm(ScopeSelectionForm):
     """Validate teacher-owned scope plus one student account identity."""
 
     learner_account = forms.CharField(
-        min_length=1,
-        max_length=128,
-        strip=True,
-        validators=[_scope_validator],
+        strip=False,
     )
+
+    def clean_learner_account(self) -> str:
+        account_name = self.cleaned_data["learner_account"]
+        if not account_name.strip():
+            raise forms.ValidationError("学生账户名不能为空或全为空白")
+        return account_name

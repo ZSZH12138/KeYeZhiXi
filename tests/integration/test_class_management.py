@@ -11,6 +11,9 @@ from django.test import Client
 from django.urls import reverse
 
 from course_insight.modules.m0_platform.django_app import runtime
+from course_insight.modules.m0_platform.django_app.authz import (
+    ROLE_PERMISSIONS,
+)
 from course_insight.modules.m0_platform.django_app.class_management import (
     add_student,
 )
@@ -18,6 +21,7 @@ from course_insight.modules.m0_platform.django_app.models import (
     AccountType,
     ClassMembership,
     CourseClassWorkspace,
+    RoleName,
     User,
 )
 from course_insight.modules.m5_learner_class_state.class_snapshot import (
@@ -49,6 +53,26 @@ def _teacher(actor_id: str) -> User:
         *Permission.objects.filter(
             content_type__app_label="m0_platform_web",
             codename__in=codenames,
+        )
+    )
+    user.groups.add(group)
+    return user
+
+
+def _canonical_teacher(actor_id: str) -> User:
+    """Create a legacy teacher whose group is built from the canonical map."""
+
+    user = User.objects.create_user(
+        username=actor_id,
+        actor_id=actor_id,
+        account_type=AccountType.TEACHER,
+        password="Strong-password-123!",
+    )
+    group, _ = Group.objects.get_or_create(name=RoleName.TEACHER)
+    group.permissions.set(
+        Permission.objects.filter(
+            content_type__app_label="m0_platform_web",
+            codename__in=ROLE_PERMISSIONS[RoleName.TEACHER],
         )
     )
     user.groups.add(group)
@@ -123,7 +147,7 @@ def test_teacher_creates_class_and_manages_student_roster(
                 "class_id": workspace.class_id,
             },
         ),
-        {"student_account": student.actor_id},
+        {"student_account": student.username},
     )
     assert added.status_code == 302
     assert ClassMembership.objects.filter(
@@ -145,7 +169,7 @@ def test_teacher_creates_class_and_manages_student_roster(
     body = page.content.decode()
     assert page.status_code == 200, body
     assert "当前学生：1 人" in body
-    assert student.actor_id in body
+    assert student.username in body
     snapshot = ensure_current_class_learning_snapshot(
         course_id=workspace.course_id,
         class_id=workspace.class_id,
@@ -159,7 +183,7 @@ def test_teacher_creates_class_and_manages_student_roster(
             kwargs={
                 "course_id": workspace.course_id,
                 "class_id": workspace.class_id,
-                "actor_id": student.actor_id,
+                "student_id": student.pk,
             },
         )
     )
@@ -175,6 +199,49 @@ def test_teacher_creates_class_and_manages_student_roster(
     )
     assert repaired is not None
     assert repaired.active_student_count == 0
+
+
+def test_canonical_teacher_group_can_open_and_manage_own_class() -> None:
+    """Role-sync-created teacher accounts must not lose new class controls."""
+
+    teacher = _canonical_teacher("pseudonym_teacher_canonical_group")
+    student = _student("pseudonym_student_canonical_group")
+    client = Client()
+    client.force_login(teacher)
+
+    opened = client.post(
+        reverse("teacher-open-class"),
+        {
+            "course_name": "数据结构",
+            "class_name": "一班",
+            "request_token": "open-class-canonical-group-001",
+        },
+    )
+
+    assert opened.status_code == 302
+    workspace = CourseClassWorkspace.objects.get(owner_teacher=teacher)
+    added = client.post(
+        reverse(
+            "teacher-class-add-student",
+            kwargs={
+                "course_id": workspace.course_id,
+                "class_id": workspace.class_id,
+            },
+        ),
+        {"student_account": student.username},
+    )
+    assert added.status_code == 302
+    removed = client.post(
+        reverse(
+            "teacher-class-remove-student",
+            kwargs={
+                "course_id": workspace.course_id,
+                "class_id": workspace.class_id,
+                "student_id": student.pk,
+            },
+        ),
+    )
+    assert removed.status_code == 302
 
 
 def test_teacher_cannot_manage_another_teachers_class() -> None:
@@ -252,3 +319,122 @@ def test_class_governance_rejects_extra_post_fields() -> None:
         workspace=workspace,
         student=student,
     ).exists()
+
+
+def test_teacher_home_uses_workspace_names_for_knowledge_and_deepseek_links() -> None:
+    """Opaque scope identifiers must never become the teacher-facing labels."""
+
+    teacher = _teacher("pseudonym_teacher_named_workspace_links")
+    CourseClassWorkspace.objects.create(
+        course_id="course_opaque_link",
+        class_id="class_opaque_link",
+        course_display_name="数据结构",
+        class_display_name="一班",
+        owner_teacher=teacher,
+    )
+    client = Client()
+    client.force_login(teacher)
+
+    response = client.get(reverse("teacher-home"))
+
+    body = response.content.decode()
+    assert response.status_code == 200
+    assert "数据结构 / 一班" in body
+    assert "管理 数据结构 / 一班" in body
+    assert "配置 数据结构 / 一班" in body
+    assert "管理 course_opaque_link / class_opaque_link" not in body
+    assert "配置 course_opaque_link / class_opaque_link" not in body
+
+
+def test_teacher_home_gives_legacy_workspace_a_readable_label() -> None:
+    """A migrated workspace without old display fields must not render as '/'."""
+
+    teacher = _teacher("pseudonym_teacher_legacy_workspace_label")
+    CourseClassWorkspace.objects.create(
+        course_id="course_network",
+        class_id="class_01",
+        owner_teacher=teacher,
+    )
+    client = Client()
+    client.force_login(teacher)
+
+    response = client.get(reverse("teacher-home"))
+
+    body = response.content.decode()
+    assert response.status_code == 200
+    assert "计算机网络核心原理与故障诊断 / 01班" in body
+
+
+def test_student_selects_an_invited_workspace_by_its_display_names() -> None:
+    """Students choose a class label, while the server keeps opaque IDs internal."""
+
+    teacher = _teacher("pseudonym_teacher_student_workspace_picker")
+    student = _student("pseudonym_student_workspace_picker")
+    group, _ = Group.objects.get_or_create(name="student-workspace-picker")
+    group.permissions.add(
+        Permission.objects.get(
+            content_type__app_label="m0_platform_web",
+            codename="start_assessment",
+        )
+    )
+    student.groups.add(group)
+    workspace = CourseClassWorkspace.objects.create(
+        course_id="course_opaque_student",
+        class_id="class_opaque_student",
+        course_display_name="操作系统",
+        class_display_name="二班",
+        owner_teacher=teacher,
+    )
+    ClassMembership.objects.create(workspace=workspace, student=student)
+    client = Client()
+    client.force_login(student)
+
+    home = client.get(reverse("student-home"))
+    selection = client.get(
+        reverse("student-select-workspace"),
+        {"workspace_id": str(workspace.pk)},
+    )
+
+    body = home.content.decode()
+    assert home.status_code == 200
+    assert "操作系统 / 二班" in body
+    assert "course_opaque_student / class_opaque_student" not in body
+    assert selection.status_code == 302
+    assert selection.url == reverse(
+        "student-start",
+        kwargs={
+            "course_id": workspace.course_id,
+            "class_id": workspace.class_id,
+        },
+    )
+
+
+def test_student_workspace_selection_rejects_a_class_without_membership() -> None:
+    """A posted workspace ID cannot bypass the student's class membership."""
+
+    teacher = _teacher("pseudonym_teacher_workspace_picker_denied")
+    student = _student("pseudonym_student_workspace_picker_denied")
+    group, _ = Group.objects.get_or_create(name="student-workspace-picker-denied")
+    group.permissions.add(
+        Permission.objects.get(
+            content_type__app_label="m0_platform_web",
+            codename="start_assessment",
+        )
+    )
+    student.groups.add(group)
+    workspace = CourseClassWorkspace.objects.create(
+        course_id="course_opaque_denied",
+        class_id="class_opaque_denied",
+        course_display_name="数据库",
+        class_display_name="三班",
+        owner_teacher=teacher,
+    )
+    client = Client()
+    client.force_login(student)
+
+    response = client.get(
+        reverse("student-select-workspace"),
+        {"workspace_id": str(workspace.pk)},
+    )
+
+    assert response.status_code == 400

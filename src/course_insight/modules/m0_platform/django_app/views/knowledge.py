@@ -33,10 +33,14 @@ from course_insight.modules.m0_platform.django_app.forms.knowledge_files import 
     QuestionTextEditForm,
 )
 from course_insight.modules.m0_platform.django_app.models import (
+    CourseClassWorkspace,
     CourseSource,
     CourseSourceVersion,
     KnowledgeChangeOperation,
     KnowledgeIngestionJob,
+)
+from course_insight.modules.m0_platform.django_app.workspace_labels import (
+    scope_display,
 )
 
 
@@ -48,6 +52,11 @@ def page(
     class_id: str | None = None,
 ) -> HttpResponse:
     class_id = _authorized_class(request, course_id, class_id)
+    workspace = CourseClassWorkspace.objects.filter(
+        course_id=course_id,
+        class_id=class_id,
+        status=CourseClassWorkspace.Status.ACTIVE,
+    ).first()
     sources = list(
         CourseSource.objects.filter(
             course_id=course_id,
@@ -75,6 +84,16 @@ def page(
         {
             "course_id": course_id,
             "class_id": class_id,
+            "scope": scope_display(
+                course_id=course_id,
+                class_id=class_id,
+                course_display_name=(
+                    "" if workspace is None else workspace.course_display_name
+                ),
+                class_display_name=(
+                    "" if workspace is None else workspace.class_display_name
+                ),
+            ),
             "rows": rows,
             "upload_form": KnowledgeUploadForm(),
             "confirm_form": KnowledgeConfirmForm(),

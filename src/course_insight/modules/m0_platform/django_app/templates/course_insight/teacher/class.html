@@ -2,7 +2,7 @@
 {% block title %}班级入口 · 课业智析{% endblock %}
 {% block content %}
   <h1>班级入口</h1>
-  <p>课程：{% if workspace.course_display_name %}{{ workspace.course_display_name }}{% else %}{{ course_id }}{% endif %}；班级：{% if workspace.class_display_name %}{{ workspace.class_display_name }}{% else %}{{ class_id }}{% endif %}</p>
+  <p>课程：{{ scope.course_name }}；班级：{{ scope.class_name }}</p>
   {% if can_manage_roster %}
   <section class="card" id="class-roster">
     <h2>学生名单</h2>
@@ -15,8 +15,8 @@
     <ul>
       {% for membership in active_memberships %}
         <li>
-          {{ membership.student.actor_id }}
-          <form method="post" action="{% url 'teacher-class-remove-student' course_id=course_id class_id=class_id actor_id=membership.student.actor_id %}" style="display:inline">
+          {{ membership.student.username }}
+          <form method="post" action="{% url 'teacher-class-remove-student' course_id=course_id class_id=class_id student_id=membership.student.pk %}" style="display:inline">
             {% csrf_token %}<button type="submit">移出班级</button>
           </form>
         </li>

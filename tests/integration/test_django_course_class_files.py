@@ -276,3 +276,36 @@ def test_teacher_home_links_each_exact_class_workspace(client: Client) -> None:
         "teacher-course-knowledge",
         kwargs={"course_id": "course_1", "class_id": "class_2"},
     ) in body
+
+
+def test_knowledge_page_displays_workspace_names_not_scope_ids(client: Client) -> None:
+    teacher = _user("teacher", class_id="class_named")
+    workspace = CourseClassWorkspace.objects.create(
+        course_id="course_opaque_knowledge",
+        class_id="class_opaque_knowledge",
+        course_display_name="算法设计",
+        class_display_name="四班",
+    )
+    ActorGrant.objects.create(
+        user=teacher,
+        role="teacher",
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
+        source_checksum="d" * 64,
+    )
+    client.force_login(teacher)
+
+    response = client.get(
+        reverse(
+            "teacher-course-knowledge",
+            kwargs={
+                "course_id": workspace.course_id,
+                "class_id": workspace.class_id,
+            },
+        )
+    )
+
+    body = response.content.decode()
+    assert response.status_code == 200
+    assert "算法设计 / 四班" in body
+    assert "course_opaque_knowledge / class_opaque_knowledge" not in body

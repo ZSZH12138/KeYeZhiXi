@@ -75,6 +75,8 @@ def test_rules_adapter_matches_existing_baseline_and_cannot_escape_candidates() 
     assert decision.candidate_ids == ("guided", "hint")
     assert decision.prediction is None
 
+    with pytest.raises(ValueError, match="at least one candidate"):
+        RulesPolicyAdapter().select(context, ())
     with pytest.raises(ValueError, match="baseline action"):
         RulesPolicyAdapter().select(context, (_candidate("hint", "S2"),))
 

@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from pathlib import Path
 from types import SimpleNamespace
+from uuid import uuid4
 
 import django
 import pytest
 from django.apps import apps
+from django.conf import settings
 from django.contrib.auth.models import Group, Permission
 from django.contrib.sessions.models import Session
-from django.db import IntegrityError, transaction
-from django.test import Client
+from django.db import IntegrityError, OperationalError, connection, transaction
+from django.test import Client, override_settings
 from django.urls import reverse
 
 
@@ -24,11 +27,26 @@ from course_insight.modules.m0_platform.django_app import (  # noqa: E402
 from course_insight.modules.m0_platform.django_app import (  # noqa: E402
     assessment_evidence,
 )
+from course_insight.modules.m0_platform.django_app.views import (  # noqa: E402
+    account_admin,
+)
+from course_insight.modules.m0_platform.django_app.authz import (  # noqa: E402
+    is_login_allowed,
+    register_login_failure,
+)
 from course_insight.modules.m0_platform.django_app.models import (  # noqa: E402
+    AccountLifecycleEvent,
     AccountType,
+    ActorGrant,
+    ClassLearningSnapshot,
     ClassMembership,
     CourseClassWorkspace,
-    DeletedActorFingerprint,
+    CourseKnowledgeRelease,
+    CourseSource,
+    CourseSourceVersion,
+    ErasureFileCleanup,
+    KnowledgeIngestionJob,
+    RoleName,
     ScopedDeepSeekConfiguration,
     User,
 )
@@ -99,17 +117,64 @@ def test_account_admin_creates_teacher_with_hashed_password() -> None:
     response = client.post(
         reverse("account-admin-create-teacher"),
         {
-            "actor_id": "pseudonym_teacher_created",
-            "password1": "Strong-password-123!",
-            "password2": "Strong-password-123!",
+            "account_name": "teacher / created?",
+            "password1": "!",
+            "password2": "!",
         },
     )
 
-    created = User.objects.get(actor_id="pseudonym_teacher_created")
+    created = User.objects.get(username="teacher / created?")
     assert response.status_code == 302
     assert response.url == reverse("account-admin-home")
     assert created.account_type == AccountType.TEACHER
-    assert created.check_password("Strong-password-123!")
+    assert created.actor_id != created.username
+    assert created.check_password("!")
+
+
+def test_sqlite_uses_wal_safe_immediate_transactions_for_account_writes() -> None:
+    options = settings.DATABASES["default"]["OPTIONS"]
+
+    assert options["transaction_mode"] == "IMMEDIATE"
+    assert options["timeout"] >= 30.0
+    assert "journal_mode=WAL" in options["init_command"]
+    assert "busy_timeout=30000" in options["init_command"]
+
+
+def test_account_creation_hides_exhausted_sqlite_lock_from_administrator(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    administrator = _user(
+        "pseudonym_admin_account_create_lock",
+        AccountType.ADMINISTRATOR,
+    )
+    _permission(administrator, "manage_accounts")
+
+    def fail_with_sqlite_lock(**kwargs: object) -> User:
+        del kwargs
+        raise OperationalError("database is locked")
+
+    monkeypatch.setattr(
+        account_admin,
+        "create_managed_account",
+        fail_with_sqlite_lock,
+    )
+    client = Client()
+    client.force_login(administrator)
+    client.raise_request_exception = False
+
+    response = client.post(
+        reverse("account-admin-create-teacher"),
+        {
+            "account_name": "teacher under lock",
+            "password1": "password",
+            "password2": "password",
+        },
+    )
+
+    body = response.content.decode("utf-8")
+    assert response.status_code == 503
+    assert "账户创建暂时繁忙，请稍后重试。" in body
+    assert "database is locked" not in body
 
 
 @pytest.mark.parametrize(
@@ -214,7 +279,6 @@ def test_student_deletion_physically_removes_account_and_roster(
         "pseudonym_student_delete_target",
         AccountType.STUDENT,
     )
-    actor_id = student.actor_id
     student_pk = student.pk
     student_client = Client()
     student_client.force_login(student)
@@ -240,22 +304,79 @@ def test_student_deletion_physically_removes_account_and_roster(
     response = client.post(
         reverse(
             "account-admin-delete-student",
-            kwargs={"actor_id": actor_id},
+            kwargs={"user_id": student.pk},
         ),
-        {"confirmed_actor_id": actor_id},
+        {"confirmed_account_name": student.username},
     )
 
     assert response.status_code == 302
     assert not User.objects.filter(pk=student_pk).exists()
     assert not ClassMembership.objects.filter(student_id=student_pk).exists()
     assert not Session.objects.filter(session_key=student_session_key).exists()
-    assert DeletedActorFingerprint.objects.filter(
-        target_digest=account_governance.actor_fingerprint(actor_id)
+    assert not AccountLifecycleEvent.objects.filter(
+        target_user_id=student_pk
     ).exists()
 
 
-def test_teacher_deletion_archives_owned_class(
+def test_deleted_account_name_can_be_reused_without_inheriting_login_lock(
     monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    administrator = _user(
+        "pseudonym_admin_reuse_deleted_name",
+        AccountType.ADMINISTRATOR,
+    )
+    _permission(administrator, "manage_accounts")
+    account_name = "reusable deleted student"
+    student = account_governance.create_managed_account(
+        account_name=account_name,
+        account_type=AccountType.STUDENT,
+        raw_password="first password",
+        administrator=administrator,
+    )
+    deleted_pk = student.pk
+    assert register_login_failure(
+        actor_hint=account_name,
+        client_ip="192.0.2.242",
+        secret="test-secret-that-is-never-persisted",
+        limit=1,
+        window_seconds=60,
+    ) is False
+    assert not is_login_allowed(
+        actor_hint=account_name,
+        client_ip="192.0.2.242",
+        secret="test-secret-that-is-never-persisted",
+    )
+    monkeypatch.setattr(
+        account_governance,
+        "_purge_runtime_actor",
+        lambda actor_id: ActorErasureResult(module_counts=(("m0", 1),)),
+    )
+
+    account_governance.erase_managed_account(
+        user_id=student.pk,
+        expected_type=AccountType.STUDENT,
+        confirmed_account_name=account_name,
+        administrator=administrator,
+    )
+    replacement = account_governance.create_managed_account(
+        account_name=account_name,
+        account_type=AccountType.STUDENT,
+        raw_password="replacement password",
+        administrator=administrator,
+    )
+
+    assert replacement.pk != deleted_pk
+    assert replacement.username == account_name
+    assert is_login_allowed(
+        actor_hint=account_name,
+        client_ip="192.0.2.243",
+        secret="test-secret-that-is-never-persisted",
+    )
+
+
+def test_teacher_deletion_physically_removes_owned_class_and_assets(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     administrator = _user(
         "pseudonym_admin_delete_teacher",
@@ -266,7 +387,14 @@ def test_teacher_deletion_archives_owned_class(
         "pseudonym_teacher_delete_target",
         AccountType.TEACHER,
     )
-    actor_id = teacher.actor_id
+    student = _user(
+        "pseudonym_student_delete_teacher_class",
+        AccountType.STUDENT,
+    )
+    other_teacher = _user(
+        "pseudonym_teacher_delete_survivor",
+        AccountType.TEACHER,
+    )
     teacher_pk = teacher.pk
     workspace = CourseClassWorkspace.objects.create(
         course_id="course_delete_teacher",
@@ -277,6 +405,71 @@ def test_teacher_deletion_archives_owned_class(
         workspace=workspace,
         updated_by=teacher,
     )
+    ClassMembership.objects.create(
+        workspace=workspace,
+        student=student,
+        added_by_teacher=teacher,
+    )
+    ActorGrant.objects.create(
+        user=student,
+        role=RoleName.STUDENT,
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
+        source_checksum="a" * 64,
+    )
+    source = CourseSource.objects.create(
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
+        display_name="知识文件",
+        source_type=CourseSource.SourceType.KNOWLEDGE,
+        created_by=teacher,
+    )
+    storage_key = f"{'f' * 32}/{uuid4()}"
+    storage_root = tmp_path / "knowledge_uploads"
+    storage_path = storage_root / storage_key
+    storage_path.parent.mkdir(parents=True)
+    storage_path.write_bytes(b"course material")
+    source_version = CourseSourceVersion.objects.create(
+        source=source,
+        version_number=1,
+        storage_key=storage_key,
+        sha256="b" * 64,
+        media_type="text/plain",
+        size_bytes=15,
+    )
+    job = KnowledgeIngestionJob.objects.create(
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
+        requested_by=teacher,
+        change_set_checksum="c" * 64,
+    )
+    release = CourseKnowledgeRelease.objects.create(
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
+        version_number=1,
+        status=CourseKnowledgeRelease.Status.ACTIVE,
+        job=job,
+        content_checksum="d" * 64,
+    )
+    workspace.active_release = release
+    workspace.save(update_fields=("active_release",))
+    ClassLearningSnapshot.objects.create(
+        workspace=workspace,
+        release=release,
+        input_checksum="e" * 64,
+        roster_checksum="f" * 64,
+        reason="erasure_fixture",
+    )
+    surviving_workspace = CourseClassWorkspace.objects.create(
+        course_id="course_survives_teacher_delete",
+        class_id="class_survives_teacher_delete",
+        owner_teacher=other_teacher,
+    )
+    ClassMembership.objects.create(
+        workspace=surviving_workspace,
+        student=student,
+        added_by_teacher=other_teacher,
+    )
     monkeypatch.setattr(
         account_governance,
         "_purge_runtime_actor",
@@ -285,25 +478,120 @@ def test_teacher_deletion_archives_owned_class(
     client = Client()
     client.force_login(administrator)
 
-    response = client.post(
-        reverse(
-            "account-admin-delete-teacher",
-            kwargs={"actor_id": actor_id},
-        ),
-        {"confirmed_actor_id": actor_id},
-    )
+    with override_settings(COURSE_INSIGHT_KNOWLEDGE_STORAGE_DIR=storage_root):
+        response = client.post(
+            reverse(
+                "account-admin-delete-teacher",
+                kwargs={"user_id": teacher.pk},
+            ),
+            {"confirmed_account_name": teacher.username},
+        )
 
     assert response.status_code == 302
-    workspace.refresh_from_db()
     assert not User.objects.filter(pk=teacher_pk).exists()
-    assert workspace.owner_teacher_id is None
-    assert workspace.status == CourseClassWorkspace.Status.ARCHIVED
+    assert User.objects.filter(pk=student.pk).exists()
+    assert not CourseClassWorkspace.objects.filter(pk=workspace.pk).exists()
+    assert CourseClassWorkspace.objects.filter(pk=surviving_workspace.pk).exists()
+    assert not ClassMembership.objects.filter(workspace_id=workspace.pk).exists()
+    assert ClassMembership.objects.filter(
+        workspace=surviving_workspace,
+        student=student,
+    ).exists()
+    assert not ActorGrant.objects.filter(
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
+    ).exists()
+    assert not CourseSource.objects.filter(pk=source.pk).exists()
+    assert not CourseSourceVersion.objects.filter(pk=source_version.pk).exists()
+    assert not KnowledgeIngestionJob.objects.filter(pk=job.pk).exists()
+    assert not CourseKnowledgeRelease.objects.filter(pk=release.pk).exists()
+    assert not ClassLearningSnapshot.objects.filter(workspace_id=workspace.pk).exists()
     assert not ScopedDeepSeekConfiguration.objects.filter(
-        workspace=workspace
+        workspace_id=workspace.pk
+    ).exists()
+    assert not storage_path.exists()
+    assert not ErasureFileCleanup.objects.filter(
+        kind=ErasureFileCleanup.Kind.KNOWLEDGE_UPLOAD,
+        opaque_key=storage_key,
     ).exists()
 
 
-def test_failed_runtime_erasure_freezes_account_and_returns_safe_error(
+def test_student_deletion_physically_removes_own_frozen_submission(
+    tmp_path: Path,
+) -> None:
+    administrator = _user(
+        "pseudonym_admin_delete_frozen_submission",
+        AccountType.ADMINISTRATOR,
+    )
+    _permission(administrator, "manage_accounts")
+    student = _user(
+        "pseudonym_student_delete_frozen_submission",
+        AccountType.STUDENT,
+    )
+    survivor = _user(
+        "pseudonym_student_keep_frozen_submission",
+        AccountType.STUDENT,
+    )
+    attempt_id = "attempt_delete_frozen_submission"
+    survivor_attempt_id = "attempt_keep_frozen_submission"
+    runtime_root = tmp_path / "runtime"
+    frozen_root = runtime_root / "frozen_submissions"
+    frozen_root.mkdir(parents=True)
+    target_file = frozen_root / f"{attempt_id}.json"
+    target_file.write_text("{}", encoding="utf-8")
+    raw_connection = connection.connection
+    assert raw_connection is not None
+    raw_connection.execute(
+        """
+        CREATE TABLE m0_assessment_runs (
+            course_id TEXT NOT NULL,
+            class_id TEXT NOT NULL,
+            learner_id TEXT NOT NULL,
+            attempt_id TEXT
+        )
+        """
+    )
+    raw_connection.executemany(
+        """
+        INSERT INTO m0_assessment_runs(
+            course_id, class_id, learner_id, attempt_id
+        ) VALUES (?, ?, ?, ?)
+        """,
+        (
+            ("course_frozen", "class_frozen", student.actor_id, attempt_id),
+            (
+                "course_survivor",
+                "class_survivor",
+                survivor.actor_id,
+                survivor_attempt_id,
+            ),
+        ),
+    )
+    client = Client()
+    client.force_login(administrator)
+
+    try:
+        with override_settings(COURSE_INSIGHT_RUNTIME_DIR=runtime_root):
+            response = client.post(
+                reverse(
+                    "account-admin-delete-student",
+                    kwargs={"user_id": student.pk},
+                ),
+                {"confirmed_account_name": student.username},
+            )
+    finally:
+        raw_connection.execute("DROP TABLE m0_assessment_runs")
+
+    assert response.status_code == 302
+    assert not User.objects.filter(pk=student.pk).exists()
+    assert target_file.exists() is False
+    assert not ErasureFileCleanup.objects.filter(
+        kind=ErasureFileCleanup.Kind.FROZEN_SUBMISSION,
+        opaque_key=attempt_id,
+    ).exists()
+
+
+def test_failed_runtime_erasure_keeps_account_available_for_a_safe_retry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     administrator = _user(
@@ -327,12 +615,13 @@ def test_failed_runtime_erasure_freezes_account_and_returns_safe_error(
     response = client.post(
         reverse(
             "account-admin-delete-student",
-            kwargs={"actor_id": student.actor_id},
+            kwargs={"user_id": student.pk},
         ),
-        {"confirmed_actor_id": student.actor_id},
+        {"confirmed_account_name": student.username},
     )
 
     student.refresh_from_db()
     assert response.status_code == 400
-    assert "注销未完成，目标账户已冻结" in response.content.decode()
-    assert student.is_active is False
+    assert "注销未完成" in response.content.decode()
+    assert "已冻结" not in response.content.decode()
+    assert student.is_active is True

@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
-from django.contrib.auth.models import AbstractUser
+import hashlib
+
+from django.contrib.auth.models import AbstractUser, UserManager
 from django.core.exceptions import ValidationError
 from django.core.validators import RegexValidator
 from django.db import models
@@ -33,6 +35,31 @@ _checksum_validator = RegexValidator(
 )
 
 
+def account_name_digest(account_name: str) -> str:
+    """Return a fixed-width lookup key for an exact external account name.
+
+    The public account name is deliberately unconstrained apart from being
+    non-blank.  Keeping its lookup key fixed-width lets authentication retain
+    a database uniqueness guarantee without forcing arbitrary length or
+    character restrictions onto the account name itself.
+    """
+
+    if not isinstance(account_name, str):
+        raise TypeError("account name must be text")
+    return hashlib.sha256(
+        b"course-insight-account-name\0" + account_name.encode("utf-8")
+    ).hexdigest()
+
+
+class AccountUserManager(UserManager):
+    """Authenticate with the external name while M0 keeps an internal ID."""
+
+    def get_by_natural_key(self, username: str):  # type: ignore[override]
+        if not isinstance(username, str):
+            raise self.model.DoesNotExist
+        return self.get(username_digest=account_name_digest(username))
+
+
 class RoleName(models.TextChoices):
     STUDENT = "student", "Student"
     TEACHER = "teacher", "Teacher"
@@ -49,7 +76,19 @@ class AccountType(models.TextChoices):
 
 
 class User(AbstractUser):
-    """Django account keyed to a non-identifying stable actor ID."""
+    """An external login name paired with an internal pseudonymous actor ID."""
+
+    # Django requires USERNAME_FIELD itself to be unique.  The digest satisfies
+    # that framework invariant while the external ``username`` stays free of
+    # business length and character restrictions.
+    USERNAME_FIELD = "username_digest"
+
+    username = models.TextField()
+    username_digest = models.CharField(
+        max_length=64,
+        unique=True,
+        editable=False,
+    )
 
     actor_id = models.CharField(
         max_length=128,
@@ -61,6 +100,8 @@ class User(AbstractUser):
         choices=AccountType.choices,
         default=AccountType.STUDENT,
     )
+
+    objects = AccountUserManager()
 
     class Meta(AbstractUser.Meta):
         constraints = [
@@ -74,8 +115,7 @@ class User(AbstractUser):
             ),
             models.CheckConstraint(
                 condition=(
-                    Q(username=models.F("actor_id"))
-                    & Q(email="")
+                    Q(email="")
                     & Q(first_name="")
                     & Q(last_name="")
                 ),
@@ -84,17 +124,38 @@ class User(AbstractUser):
         ]
 
     def clean(self) -> None:
-        """Reject mutable aliases and real-world identity fields."""
+        """Keep the account name nonblank and identity fields empty.
 
-        super().clean()
+        ``AbstractUser.clean()`` normalizes usernames with NFKC.  Do not call
+        it here: an administrator-created account name must be stored and
+        authenticated exactly as supplied, including leading/trailing spaces.
+        """
+
         errors: dict[str, str] = {}
-        if self.username != self.actor_id:
-            errors["username"] = "username must equal actor_id"
+        if not isinstance(self.username, str) or not self.username.strip():
+            errors["username"] = "账户名不能为空或全为空白"
         for field_name in ("email", "first_name", "last_name"):
             if getattr(self, field_name):
                 errors[field_name] = "real-world identity is not stored"
         if errors:
             raise ValidationError(errors)
+
+    def full_clean(self, *args: object, **kwargs: object) -> None:
+        self._sync_username_digest()
+        super().full_clean(*args, **kwargs)
+
+    def save(self, *args: object, **kwargs: object) -> None:
+        self._sync_username_digest()
+        super().save(*args, **kwargs)
+
+    def _sync_username_digest(self) -> None:
+        if isinstance(self.username, str):
+            self.username_digest = account_name_digest(self.username)
+
+    def get_username(self) -> str:
+        """Expose the administrator-issued account name to UI callers."""
+
+        return self.username
 
     def __str__(self) -> str:
         """Avoid rendering mutable or real-world identity fields."""
@@ -273,6 +334,13 @@ class LoginFailureBucket(models.Model):
     failure_count = models.PositiveIntegerField()
     locked_until = models.DateTimeField(null=True, blank=True)
     updated_at = models.DateTimeField(auto_now=True)
+    account_user = models.ForeignKey(
+        User,
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name="login_failure_buckets",
+    )
 
     class Meta:
         constraints = [
@@ -334,5 +402,5 @@ from course_insight.modules.m0_platform.django_app.governance_models import (  #
     AccountLifecycleEvent,
     AuthenticatedSession,
     ClassMembership,
-    DeletedActorFingerprint,
+    ErasureFileCleanup,
 )

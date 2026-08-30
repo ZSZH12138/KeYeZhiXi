@@ -12,7 +12,7 @@ M6 以 S0—S5 状态机和 `SafetyEnvelope` 作为唯一动作安全边界，�
 
 当前代码还实现了 M6 私有的 `rules`/`shadow`/`active` 策略运行时、JSON-only
 LinUCB 制品、奖励、去标识离线数据、OPE 和 SQLite/PostgreSQL 持久化。默认配置
-仍是 `rules`、`rollout_percentage=0.0`、`exploration_rate=0.0`；本阶段没有真实
+仍是 `rules`、`rollout_percentage=0.0`、`exploration_rate=0.0`；当前发布没有真实
 教学训练、线上 rollout 或 live PostgreSQL migration，不能声称 active 已可生产
 启用，也不能声称学习策略优于确定性 baseline。
 

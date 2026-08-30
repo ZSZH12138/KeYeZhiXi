@@ -283,7 +283,7 @@ OPE 是依赖 logging propensity、direct estimate 和数据覆盖假设的离�
 - 当前 bundled PostgreSQL schema version 为 22、SQLite platform schema version 为 21，SQLite→PostgreSQL
   allowlist 同时包含 M4 intent、M6 policy、M0 freeze 和 M5/M8 新历史表。
 
-仓库的 live PostgreSQL tests 需要受保护的临时数据库。本阶段没有执行真实教学或
+仓库的 live PostgreSQL tests 需要受保护的临时数据库。当前发布没有执行真实教学或
 线上 rollout；live PostgreSQL migration 只能以当次未跳过的 CI/验收结果记录为通过。
 
 ## M9 非集成边界

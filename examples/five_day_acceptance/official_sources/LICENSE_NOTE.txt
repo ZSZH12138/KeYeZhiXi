@@ -1,2 +1,0 @@
-RFC 文件仅以 RFC Editor 发布的完整原文形式下载和分发，不作修改。
-使用说明：https://www.rfc-editor.org/series/rfc-use/

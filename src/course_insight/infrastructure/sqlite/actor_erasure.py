@@ -26,6 +26,17 @@ _DELETE_PRIORITY = {
     "m0_learning_events": 1,
     "m0_assessment_runs": 2,
 }
+_RUNTIME_TABLES_BY_MODULE = {
+    # ``m0_platform_web_*`` is Django's application label, not a runtime
+    # module namespace.  Listing M0's three owned runtime tables explicitly
+    # prevents this low-level cleaner from bypassing Django's relation
+    # collector and deleting an account identity behind its foreign keys.
+    "m0": (
+        "m0_assessment_runs",
+        "m0_learning_events",
+        "m0_event_outbox",
+    ),
+}
 
 
 def purge_sqlite_actor(
@@ -39,21 +50,15 @@ def purge_sqlite_actor(
     if module not in _MODULES or not isinstance(actor_id, str) or not _ACTOR.fullmatch(actor_id):
         raise ValueError("actor erasure scope is invalid")
     connection = connect_sqlite(database_path)
-    before = connection.total_changes
     try:
         connection.execute("BEGIN IMMEDIATE")
-        tables = _module_tables(connection, module)
-        if module == "m9":
-            _purge_m9_dependants(connection, actor_id, tables)
-        if module == "m8":
-            _purge_m8_audits(connection, actor_id, tables)
-        for table in sorted(
-            tables,
-            key=lambda name: (_DELETE_PRIORITY.get(name, 1), name),
-        ):
-            _delete_actor_rows(connection, table, actor_id)
+        deleted = purge_sqlite_actor_connection(
+            connection,
+            module=module,
+            actor_id=actor_id,
+        )
         connection.execute("COMMIT")
-        return connection.total_changes - before
+        return deleted
     except Exception:
         if connection.in_transaction:
             connection.execute("ROLLBACK")
@@ -62,7 +67,45 @@ def purge_sqlite_actor(
         connection.close()
 
 
+def purge_sqlite_actor_connection(
+    connection: sqlite3.Connection,
+    *,
+    module: str,
+    actor_id: str,
+) -> int:
+    """Purge one actor through an already-owned SQLite transaction.
+
+    Account erasure uses this form so all runtime rows and Django-owned
+    identity rows commit or roll back together.  The caller owns transaction
+    boundaries; this helper deliberately never starts or commits one.
+    """
+
+    if module not in _MODULES or not isinstance(actor_id, str) or not _ACTOR.fullmatch(actor_id):
+        raise ValueError("actor erasure scope is invalid")
+    before = connection.total_changes
+    tables = _module_tables(connection, module)
+    if module == "m9":
+        _purge_m9_dependants(connection, actor_id, tables)
+    if module == "m8":
+        _purge_m8_audits(connection, actor_id, tables)
+    for table in sorted(
+        tables,
+        key=lambda name: (_DELETE_PRIORITY.get(name, 1), name),
+    ):
+        _delete_actor_rows(connection, table, actor_id)
+    return connection.total_changes - before
+
+
 def _module_tables(connection: sqlite3.Connection, module: str) -> tuple[str, ...]:
+    explicit_tables = _RUNTIME_TABLES_BY_MODULE.get(module)
+    if explicit_tables is not None:
+        existing = {
+            str(row[0])
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        return tuple(table for table in explicit_tables if table in existing)
     prefix = f"{module}\\_%"
     return tuple(
         str(row[0])
@@ -161,4 +204,4 @@ def _purge_m8_audits(
         )
 
 
-__all__ = ["purge_sqlite_actor"]
+__all__ = ["purge_sqlite_actor", "purge_sqlite_actor_connection"]

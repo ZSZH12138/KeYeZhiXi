@@ -5,7 +5,7 @@
   <p class="muted">这里只显示会影响学生画像和班级画像、且 AI 置信度低于 0.5 或评分生成失败的记录。同一次作答中的多道待复核题合并为一条。</p>
   {% for row in rows %}
     <article class="card">
-      <p>做题人账户名：{{ row.case.learner.actor_id }}</p>
+      <p>做题人账户名：{{ row.case.learner.username }}</p>
       <p>试卷 ID：{{ row.case.paper_id }}</p>
       <p>题目 ID：{{ row.question_ids|join:"、" }}</p>
       <p>做题时间：{{ row.case.attempted_at }}</p>

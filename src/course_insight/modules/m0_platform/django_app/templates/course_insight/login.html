@@ -2,7 +2,7 @@
 {% block title %}登录 · 课业智析{% endblock %}
 {% block content %}
   <h1>登录</h1>
-  <p class="muted">请使用管理员分配的伪匿名账号。</p>
+  <p class="muted">请使用管理员分配的账户名和密码登录。</p>
   <form method="post" action="{% url 'login' %}">
     {% csrf_token %}
     {{ form.as_p }}

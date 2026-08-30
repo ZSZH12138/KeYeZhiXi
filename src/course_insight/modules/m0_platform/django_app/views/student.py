@@ -61,6 +61,7 @@ from course_insight.modules.m0_platform.django_app.suggested_review import (
 )
 from course_insight.modules.m0_platform.django_app.models import (
     AccountType,
+    ClassMembership,
     CourseClassWorkspace,
     CourseKnowledgeRelease,
     LearnerConceptMastery,
@@ -80,7 +81,11 @@ from course_insight.modules.m0_platform.django_app.forms.assessment import (
 )
 from course_insight.modules.m0_platform.django_app.forms.start import (
     AssessmentStartForm,
-    ScopeSelectionForm,
+    StudentWorkspaceSelectionForm,
+)
+from course_insight.modules.m0_platform.django_app.workspace_labels import (
+    ScopeDisplay,
+    scope_display,
 )
 from course_insight.modules.m0_platform.django_app.views.viewmodels import (
     blueprint_section_purposes,
@@ -106,43 +111,58 @@ logger = logging.getLogger(__name__)
 @login_required
 @require_GET
 def home(request: HttpRequest) -> HttpResponse:
-    if (
-        resolve_account_type(request.user) != AccountType.STUDENT
-        or not request.user.has_perm(
-        "m0_platform_web.start_assessment"
-        )
-    ):
-        raise PermissionDenied
+    _authorize_student_entry(request)
     return render(
         request,
         "course_insight/student/home.html",
-        {"scope_form": ScopeSelectionForm()},
+        _student_home_context(request),
     )
 
 
 @login_required
 @require_GET
-def select_scope(request: HttpRequest) -> HttpResponse:
-    form = ScopeSelectionForm(data=request.GET)
+def select_workspace(request: HttpRequest) -> HttpResponse:
+    """Resolve one invited workspace selected by its human-readable label."""
+
+    _authorize_student_entry(request)
+    workspaces = _active_student_workspaces(request)
+    form = StudentWorkspaceSelectionForm(
+        data=request.GET,
+        workspace_choices=_workspace_choices(workspaces),
+    )
     if not form.is_valid():
         return render(
             request,
             "course_insight/student/home.html",
-            {"scope_form": form},
+            _student_home_context(request, workspace_form=form),
             status=400,
         )
-    course_id = str(form.cleaned_data["course_id"])
-    class_id = str(form.cleaned_data["class_id"])
+    selected_id = str(form.cleaned_data["workspace_id"])
+    workspace = next(
+        (
+            item
+            for item in workspaces
+            if str(item.workspace_id) == selected_id
+        ),
+        None,
+    )
+    if workspace is None:
+        return render(
+            request,
+            "course_insight/student/home.html",
+            _student_home_context(request, workspace_form=form),
+            status=400,
+        )
     _authorize_student(
         request,
         "start_assessment",
-        course_id=course_id,
-        class_id=class_id,
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
     )
     return redirect(
         "student-start",
-        course_id=course_id,
-        class_id=class_id,
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
     )
 
 
@@ -1342,6 +1362,84 @@ def _authorize_student(
         class_id=class_id,
         learner_id=request.user.actor_id,
     )
+
+
+def _authorize_student_entry(request: HttpRequest) -> None:
+    """Authorize the student landing page before a scope has been selected."""
+
+    if (
+        resolve_account_type(request.user) != AccountType.STUDENT
+        or not request.user.has_perm("m0_platform_web.start_assessment")
+    ):
+        raise PermissionDenied
+
+
+def _active_student_workspaces(
+    request: HttpRequest,
+) -> tuple[CourseClassWorkspace, ...]:
+    """Return only the requester's currently active class memberships."""
+
+    return tuple(
+        CourseClassWorkspace.objects.filter(
+            status=CourseClassWorkspace.Status.ACTIVE,
+            memberships__student=request.user,
+            memberships__status=ClassMembership.Status.ACTIVE,
+            memberships__removed_at__isnull=True,
+        )
+        .distinct()
+        .order_by(
+            "course_display_name",
+            "class_display_name",
+            "course_id",
+            "class_id",
+        )
+    )
+
+
+def _workspace_choices(
+    workspaces: tuple[CourseClassWorkspace, ...],
+) -> tuple[tuple[str, str], ...]:
+    return tuple(
+        (
+            str(workspace.workspace_id),
+            scope_display(
+                course_id=workspace.course_id,
+                class_id=workspace.class_id,
+                course_display_name=workspace.course_display_name,
+                class_display_name=workspace.class_display_name,
+            ).label,
+        )
+        for workspace in workspaces
+    )
+
+
+def _student_home_context(
+    request: HttpRequest,
+    *,
+    workspace_form: StudentWorkspaceSelectionForm | None = None,
+) -> dict[str, object]:
+    """Render names to students while retaining opaque IDs server-side only."""
+
+    workspaces = _active_student_workspaces(request)
+    displays: tuple[ScopeDisplay, ...] = tuple(
+        scope_display(
+            course_id=workspace.course_id,
+            class_id=workspace.class_id,
+            course_display_name=workspace.course_display_name,
+            class_display_name=workspace.class_display_name,
+        )
+        for workspace in workspaces
+    )
+    return {
+        "workspace_form": (
+            workspace_form
+            if workspace_form is not None
+            else StudentWorkspaceSelectionForm(
+                workspace_choices=_workspace_choices(workspaces)
+            )
+        ),
+        "available_workspaces": displays,
+    }
 
 
 def _verify(

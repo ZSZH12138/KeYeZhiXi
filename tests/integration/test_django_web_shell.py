@@ -7,7 +7,7 @@ import pytest
 from django.apps import apps
 from django.contrib.auth.models import Group, Permission
 from django.test import Client
-from django.urls import reverse
+from django.urls import NoReverseMatch, reverse
 
 
 os.environ.setdefault(
@@ -19,6 +19,8 @@ if not apps.ready:
 
 from course_insight.modules.m0_platform.django_app.models import (  # noqa: E402
     ActorGrant,
+    ClassMembership,
+    CourseClassWorkspace,
     RoleName,
     User,
 )
@@ -74,14 +76,13 @@ def test_student_home_renders_for_authorized_student(
     client: Client,
 ) -> None:
     user = _user("pseudonym_student_web_001")
-    ActorGrant.objects.create(
-        user=user,
-        role=RoleName.STUDENT,
+    workspace = CourseClassWorkspace.objects.create(
         course_id="course_demo",
         class_id="class_01",
-        is_active=True,
-        source_checksum="a" * 64,
+        course_display_name="课程演示",
+        class_display_name="01班",
     )
+    ClassMembership.objects.create(workspace=workspace, student=user)
     _grant_permission(
         user,
         role=RoleName.STUDENT,
@@ -98,9 +99,13 @@ def test_student_home_renders_for_authorized_student(
         if template.name
     )
     page = response.content.decode("utf-8")
-    assert "course_id" in page
-    assert "class_id" in page
-    assert "继续" in page
+    assert "课程演示 / 01班" in page
+    assert "workspace_id" in page
+    assert "使用课程和班级编号" not in page
+    assert "course_id" not in page
+    assert "class_id" not in page
+    with pytest.raises(NoReverseMatch):
+        reverse("student-select-scope")
 
 
 def test_teacher_home_renders_for_authorized_teacher(

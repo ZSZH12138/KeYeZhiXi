@@ -110,13 +110,22 @@ def test_user_requires_a_pseudonymous_actor_id_without_real_identity() -> None:
     with pytest.raises(ValidationError):
         real_identity.full_clean()
 
-    mismatched_login = User(
-        username="pseudonym_login_alias",
+    external_account = User(
+        username="  学生 / 特殊账户? ",
         actor_id="pseudonym_student_003",
     )
-    mismatched_login.set_unusable_password()
+    external_account.set_unusable_password()
+    external_account.full_clean()
+    assert external_account.username == "  学生 / 特殊账户? "
+    assert external_account.username_digest
+
+    blank_account = User(
+        username=" \t\n ",
+        actor_id="pseudonym_student_004",
+    )
+    blank_account.set_unusable_password()
     with pytest.raises(ValidationError):
-        mismatched_login.full_clean()
+        blank_account.full_clean()
 
 
 def test_teacher_scope_uses_an_exact_course_class_pair() -> None:

@@ -846,7 +846,10 @@ def test_worker_stop_waits_for_in_flight_append_and_keeps_heartbeat_alive(
         repository=repository,  # type: ignore[arg-type]
         sink=sink,
         settings=_settings(
-            lease_seconds=0.2,
+            # Keep the lease comfortably beyond Windows scheduler and status
+            # file jitter. The behavior under test is heartbeat continuity
+            # after stop, not expiry of an artificially tiny lease.
+            lease_seconds=5.0,
             heartbeat_interval_seconds=0.02,
         ),
         status_path=tmp_path / "status.json",
@@ -867,13 +870,13 @@ def test_worker_stop_waits_for_in_flight_append_and_keeps_heartbeat_alive(
             # that a fresh heartbeat cycle began after the stop request.
             renewals_continued_after_stop = repository.wait_for_renew_count(
                 renewals_after_stop + 2,
-                timeout=1,
+                timeout=5,
             )
             still_running_while_blocked = not future.done()
             assert not sink.completed.is_set()
         finally:
             sink.release.set()
-        snapshot = future.result(timeout=1)
+        snapshot = future.result(timeout=5)
 
     assert renewals_continued_after_stop
     assert still_running_while_blocked

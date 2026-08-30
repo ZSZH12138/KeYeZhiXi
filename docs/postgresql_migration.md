@@ -2,7 +2,7 @@
 
 ## 结论先行
 
-截至 `2026-08-29`：
+当前实现状态：
 
 - PostgreSQL 仓储、schema migration、SQLite→PostgreSQL 导入器已在代码中实现。
 - 本文档不声称这些能力已经在真实 PostgreSQL 环境中完成联调或验收。
@@ -199,7 +199,7 @@ PostgreSQL core migration 与 Django migration 分离：
 - `tests/integration/test_postgres_foundation_live.py`
 - 多个 PostgreSQL repository / import 集成测试
 
-这些测试覆盖 0010/0011 ledger/DDL、fake-PostgreSQL 仓储语义和导入校验；本阶段
+这些测试覆盖 0010/0011 ledger/DDL、fake-PostgreSQL 仓储语义和导入校验；当前发布
 未执行真实 PostgreSQL v10→v11 migration。没有受保护 live 数据库时，不能把
 单元/fake parity 结果写成真实 PostgreSQL migration 已通过。
 

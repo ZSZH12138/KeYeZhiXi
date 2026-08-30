@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "course-insight"
 version = "0.1.0"
-description = "课业智析无 HTTP 模块化单体框架"
+description = "面向课程、班级、测评与可溯源答疑的模块化教学辅助平台"
 requires-python = ">=3.11"
 dependencies = [
     "Django>=5.2,<5.3",

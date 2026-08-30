@@ -102,6 +102,15 @@ def test_apply_bootstraps_only_account_administrator(
     assert administrator.has_perm("m0_platform_web.manage_accounts")
     assert not administrator.has_perm("m0_platform_web.view_class_analytics")
     assert not administrator.has_perm("m0_platform_web.start_assessment")
+    assert not administrator.has_perm("m0_platform_web.open_class")
+    assert not administrator.has_perm("m0_platform_web.manage_class_members")
+    teacher_permissions = set(
+        Group.objects.get(name="teacher").permissions.values_list(
+            "codename",
+            flat=True,
+        )
+    )
+    assert {"open_class", "manage_class_members"} <= teacher_permissions
     state = RoleSyncState.objects.get(pk="roles")
     assert len(state.source_checksum) == 64
     assert state.grant_count == 1

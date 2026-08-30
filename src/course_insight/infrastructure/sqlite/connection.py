@@ -6,7 +6,7 @@ import sqlite3
 from pathlib import Path
 
 
-_BUSY_TIMEOUT_MILLISECONDS = 5_000
+_BUSY_TIMEOUT_MILLISECONDS = 30_000
 
 
 def connect_sqlite(path: str | Path) -> sqlite3.Connection:
@@ -20,6 +20,8 @@ def connect_sqlite(path: str | Path) -> sqlite3.Connection:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         connection.execute(f"PRAGMA busy_timeout = {_BUSY_TIMEOUT_MILLISECONDS}")
+        if database != ":memory:":
+            connection.execute("PRAGMA journal_mode = WAL")
         if connection.execute("PRAGMA foreign_keys").fetchone()[0] != 1:
             raise RuntimeError("SQLite foreign-key enforcement is unavailable")
     except Exception:

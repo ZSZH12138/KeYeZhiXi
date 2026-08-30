@@ -1,7 +1,7 @@
 {% extends "course_insight/base.html" %}
 {% block title %}课程知识文件 · 课业智析{% endblock %}
 {% block content %}
-  <p class="breadcrumb"><a href="{% url 'teacher-home' %}">教师端</a> / {{ course_id }} / {{ class_id }} / 知识文件</p>
+  <p class="breadcrumb"><a href="{% url 'teacher-home' %}">教师端</a> / {{ scope.course_name }} / {{ scope.class_name }} / 知识文件</p>
   <h1 class="page-title">课程知识文件</h1>
   <p class="muted">上传任意数量的指定格式文件。只有点击“确认处理”后，系统才会重新解析知识点、更新题目标注并生成新的学生可用版本。</p>
 

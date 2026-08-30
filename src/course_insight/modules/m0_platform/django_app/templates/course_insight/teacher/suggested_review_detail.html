@@ -2,7 +2,7 @@
 {% block title %}建议复核详情 · 课业智析{% endblock %}
 {% block content %}
   <h1>建议复核详情</h1>
-  <p>做题人账户名：{{ case.learner.actor_id }}；试卷 ID：{{ case.paper_id }}；做题时间：{{ case.attempted_at }}</p>
+  <p>做题人账户名：{{ case.learner.username }}；试卷 ID：{{ case.paper_id }}；做题时间：{{ case.attempted_at }}</p>
   {% if review_complete %}
     <p class="status">本试卷的建议复核已经完成。</p>
   {% endif %}

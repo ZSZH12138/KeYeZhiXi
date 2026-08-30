@@ -44,4 +44,4 @@ M3 把 M1 解析出的来源块和 M7 返回的知识候选整理成不可变课
 
 ## 旧实现
 
-`TeacherReviewWorkflow`、`build_knowledge_bundle_after_approval` 和旧审核表仅为历史兼容保留，不再连接教师 Web 或新知识发布流程。历史说明见 [`docs/legacy_architecture_snapshot_2026-08-25.md`](../../../../docs/legacy_architecture_snapshot_2026-08-25.md)。
+`TeacherReviewWorkflow`、`build_knowledge_bundle_after_approval` 和旧审核表仅为受测迁移兼容保留，不再连接教师 Web 或当前知识发布流程。新功能不得重新接入旧审核状态机。

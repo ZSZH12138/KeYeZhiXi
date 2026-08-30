@@ -10,6 +10,11 @@ from django.db import models
 from django.db.models import Q
 from django.utils import timezone
 
+from course_insight.modules.m0_platform.django_app.workspace_labels import (
+    class_label,
+    course_label,
+)
+
 
 _scope_validator = RegexValidator(
     regex=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
@@ -91,6 +96,18 @@ class CourseClassWorkspace(models.Model):
             and self.owner_teacher_id is not None
             and self.owner_teacher_id == getattr(user, "pk", None)
         )
+
+    @property
+    def course_display_label(self) -> str:
+        """Return the course name safe for teacher/student presentation."""
+
+        return course_label(self.course_id, self.course_display_name)
+
+    @property
+    def class_display_label(self) -> str:
+        """Return the class name safe for teacher/student presentation."""
+
+        return class_label(self.class_id, self.class_display_name)
 
 
 class ScopedDeepSeekConfiguration(models.Model):

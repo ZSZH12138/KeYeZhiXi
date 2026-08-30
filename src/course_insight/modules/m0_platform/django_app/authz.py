@@ -27,6 +27,7 @@ from course_insight.modules.m0_platform.django_app.models import (
     RoleName,
     SCOPE_ID_PATTERN,
     User,
+    account_name_digest,
 )
 
 
@@ -48,6 +49,8 @@ ROLE_PERMISSIONS: Final[Mapping[str, frozenset[str]]] = {
             "review_score",
             "configure_deepseek",
             "manage_course_knowledge",
+            "open_class",
+            "manage_class_members",
         }
     ),
     RoleName.COURSE_ADMIN: frozenset(
@@ -489,6 +492,7 @@ def is_login_allowed(
 def register_login_failure(
     *,
     actor_hint: str,
+    account_name: str | None = None,
     client_ip: str,
     secret: str,
     limit: int,
@@ -515,10 +519,20 @@ def register_login_failure(
         secret=secret,
     )
     window = timedelta(seconds=window_seconds)
+    lookup_name = actor_hint if account_name is None else account_name
+    account_user_id = (
+        User.objects.filter(
+            username_digest=account_name_digest(lookup_name),
+            username=lookup_name,
+        )
+        .values_list("pk", flat=True)
+        .first()
+    )
     try:
         with transaction.atomic():
             locked_untils: list[datetime | None] = []
-            for bucket_key in bucket_keys:
+            for position, bucket_key in enumerate(bucket_keys):
+                account_scoped = position < 2
                 bucket, created = (
                     LoginFailureBucket.objects.select_for_update().get_or_create(
                         bucket_key=bucket_key,
@@ -528,10 +542,26 @@ def register_login_failure(
                             "locked_until": (
                                 moment + window if limit == 1 else None
                             ),
+                            "account_user_id": (
+                                account_user_id if account_scoped else None
+                            ),
                         },
                     )
                 )
                 if not created:
+                    update_fields = [
+                        "window_started_at",
+                        "failure_count",
+                        "locked_until",
+                        "updated_at",
+                    ]
+                    if (
+                        account_scoped
+                        and account_user_id is not None
+                        and bucket.account_user_id != account_user_id
+                    ):
+                        bucket.account_user_id = account_user_id
+                        update_fields.append("account_user")
                     window_ended = bucket.window_started_at + window
                     if moment >= window_ended:
                         bucket.window_started_at = moment
@@ -544,12 +574,7 @@ def register_login_failure(
                         if bucket.failure_count >= limit:
                             bucket.locked_until = window_ended
                     bucket.save(
-                        update_fields=(
-                            "window_started_at",
-                            "failure_count",
-                            "locked_until",
-                            "updated_at",
-                        )
+                        update_fields=tuple(update_fields)
                     )
                 locked_untils.append(bucket.locked_until)
     except DatabaseError:

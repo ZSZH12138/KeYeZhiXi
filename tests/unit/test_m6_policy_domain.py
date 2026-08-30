@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import FrozenInstanceError
 import math
+from types import SimpleNamespace
 
 import pytest
 
@@ -326,6 +327,35 @@ def test_feature_builder_emits_the_fixed_versioned_finite_vector() -> None:
         4.0,
     )
     assert all(math.isfinite(value) for value in vector)
+
+
+def test_feature_builder_rejects_a_nonfinite_defensive_input() -> None:
+    context = _context("S4")
+    nonfinite_context = SimpleNamespace(
+        current_state=context.current_state,
+        task_type=context.task_type,
+        turn_count=context.turn_count,
+        score_ratio=math.inf,
+        target_concept_count=context.target_concept_count,
+        signals=context.signals,
+        learner_evidence_count=context.learner_evidence_count,
+    )
+
+    with pytest.raises(ValueError, match="finite"):
+        FeatureBuilder().build(nonfinite_context)  # type: ignore[arg-type]
+
+
+def test_safety_envelope_exposes_the_complete_stable_action_space() -> None:
+    assert SafetyEnvelope.all_candidate_ids() == (
+        "m6.transition.s0_to_s1.v1",
+        "m6.transition.s1_to_s2.v1",
+        "m6.transition.s1_to_s3.v1",
+        "m6.transition.s2_to_s3.v1",
+        "m6.transition.s3_to_s4.v1",
+        "m6.transition.s4_to_s2.v1",
+        "m6.transition.s4_to_s3.v1",
+        "m6.transition.s4_to_s5.v1",
+    )
 
 
 def test_policy_evaluation_record_canonically_freezes_complete_ope_evidence() -> None:
