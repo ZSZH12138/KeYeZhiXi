@@ -114,11 +114,16 @@ def ready(request: HttpRequest) -> HttpResponse:
         pass
     core_ready = all(
         components[name] == "ok"
-        for name in ("config", "database", "migrations", "runtime", "logging")
+        for name in ("config", "database", "migrations", "logging")
     )
     optional_ready = all(
         components[name] == "ok"
-        for name in ("outbox", "ingestion", "legacy_capabilities")
+        for name in (
+            "runtime",
+            "outbox",
+            "ingestion",
+            "legacy_capabilities",
+        )
     )
     if not core_ready:
         status = "not_ready"

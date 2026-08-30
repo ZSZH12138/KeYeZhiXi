@@ -290,6 +290,8 @@ def restore_course_runtime_manifest(
     manifest_path = (runtime_root / _MANIFEST_RELATIVE_PATH).resolve()
     if not manifest_path.is_relative_to(runtime_root):
         _invalid_manifest("unsafe_manifest")
+    if not manifest_path.exists():
+        return MappingProxyType({})
     try:
         if (
             not manifest_path.is_file()

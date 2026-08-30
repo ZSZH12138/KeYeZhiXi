@@ -64,6 +64,48 @@ def test_fresh_both_workers_make_all_capabilities_ready(tmp_path, monkeypatch) -
     assert response.json()["status"] == "ready"
 
 
+def test_fresh_empty_platform_is_login_ready_before_a_course_exists(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    web_runtime = FakeWebRuntime(
+        coordinator=FakeCoordinator("pseudonym_fresh_source_health"),
+        runtime_dir=tmp_path,
+    )
+    web_runtime.courses = {}
+    monkeypatch.setattr(runtime, "get_web_runtime", lambda: web_runtime)
+    now = datetime.now(timezone.utc).isoformat()
+    write_json(
+        tmp_path / "outbox_worker" / "worker.status.json",
+        {
+            "worker_id": "worker-1",
+            "state": "running",
+            "last_heartbeat_at": now,
+            "last_success_at": None,
+            "last_error_code": None,
+            "claimed_count": 0,
+            "delivered_count": 0,
+            "dead_count": 0,
+        },
+    )
+    ingestion_dir = tmp_path / "ingestion_worker"
+    ingestion_dir.mkdir()
+    (ingestion_dir / "worker.lock").write_text(
+        '{"pid":1234,"heartbeat_at":"' + now + '"}',
+        encoding="utf-8",
+    )
+
+    response = Client().get(reverse("health-ready"))
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["status"] == "degraded"
+    assert payload["capabilities"]["web_auth"] == "ready"
+    assert payload["capabilities"]["course_runtime"] == "not_ready"
+    assert payload["capabilities"]["learning_outbox"] == "ready"
+    assert payload["capabilities"]["knowledge_ingestion"] == "ready"
+
+
 def test_core_logging_failure_remains_not_ready(tmp_path, monkeypatch) -> None:
     web_runtime = FakeWebRuntime(
         coordinator=FakeCoordinator("pseudonym_student_health_core"),
