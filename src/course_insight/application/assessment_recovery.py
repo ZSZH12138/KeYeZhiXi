@@ -326,6 +326,31 @@ class AssessmentRecovery:
             previous_class_state_version=None,
         )
 
+    def rebase_review_state_inputs(
+        self,
+        run: AssessmentRun,
+        *,
+        learner: LearnerStateSnapshot | None,
+        class_state: ClassStateSnapshot | None,
+    ) -> AssessmentRun:
+        """Persist the current baseline when retrying an unapplied failed review."""
+
+        return self._m0.rebase_review_state_inputs(
+            run.operation_id,
+            expected_version=run.version,
+            worker_id=_owner(run),
+            now=self._now(),
+            previous_learner_snapshot_id=(
+                None if learner is None else learner.snapshot_id
+            ),
+            previous_learner_state_version=(
+                None if learner is None else learner.state_version
+            ),
+            previous_class_snapshot_id=(
+                None if class_state is None else class_state.snapshot_id
+            ),
+        )
+
     def load_state_inputs(
         self,
         run: AssessmentRun,

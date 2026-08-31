@@ -186,39 +186,36 @@ def feedback_message(
 ) -> str:
     """Build one deterministic, network-free message for an M6 action."""
 
-    targets = ", ".join(concept_ids) if concept_ids else "the cited course rule"
+    del concept_ids
     messages = {
         "diagnostic_probe": (
-            f"Review the cited passage for {targets}. Which condition is most "
-            "important here, and what in the passage supports your choice?"
+            "请结合下方课程原文，先找出当前题目最关键的条件，"
+            "并说明原文中的哪一处支持你的判断。"
         ),
         "minimal_hint": (
-            f"Focus on one condition in the cited passage for {targets}. "
-            "Which part of your reasoning should you check against it?"
+            "请聚焦下方课程原文中的一个关键条件，"
+            "检查自己的推理在哪一步需要调整。"
         ),
         "evidence_hint": (
-            f"Focus on one condition in the cited passage for {targets}. "
-            "Which part of your reasoning should you check against it?"
+            "请聚焦下方课程原文中的一个关键条件，"
+            "检查自己的推理在哪一步需要调整。"
         ),
         "guided_question": (
-            f"Compare the cited passage for {targets} with your reasoning. "
-            "Which condition applies first, and what should you reconsider next?"
+            "请把自己的解题过程与下方课程原文进行对照："
+            "先判断哪个条件应优先应用，再说明下一步需要修改什么。"
         ),
         "self_explanation_prompt": (
-            f"Using the cited passage for {targets}, explain the relevant "
-            "condition in your own words and identify one part to revise."
+            "请结合下方课程原文，用自己的话说明相关条件，"
+            "并指出自己的作答中需要修改的一处。"
         ),
         "summary_and_transfer": (
-            f"Summarize the cited rule for {targets} in your own words. Then "
-            "describe how you would recognize the same condition in a new case."
+            "请用自己的话概括下方课程原文中的规则，"
+            "再说明如何在新的题目情境中识别同类条件。"
         ),
     }
     return messages.get(
         action_type,
-        (
-            f"Review the cited passage for {targets}. Identify one relevant "
-            "condition and explain what you should check next."
-        ),
+        "请结合下方课程原文找出一个相关条件，并说明下一步应检查什么。",
     )
 
 

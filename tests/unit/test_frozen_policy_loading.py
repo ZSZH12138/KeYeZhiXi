@@ -121,6 +121,37 @@ def test_m5_frozen_policy_uses_dynamic_roster_size_instead_of_legacy_json(
     assert result.class_state_snapshot.assessed_count == 1
 
 
+def test_m5_frozen_policy_uses_authoritative_dynamic_class_scope(
+    tmp_path: Path,
+) -> None:
+    policy_path = _m5_policy(
+        tmp_path,
+        class_id="class_legacy_template",
+        name="state-policy-dynamic-class",
+    )
+    expected_checksum = hashlib.sha256(policy_path.read_bytes()).hexdigest()
+    arguments = _m5_arguments(policy_path)
+    arguments["scoring_result_bundle"] = _m5_scoring_bundle(
+        attempt_id="attempt_frozen_policy",
+        course_id="course_1",
+        class_id="class_runtime_387",
+        latest_audit_version=1,
+    )
+
+    result = M5StateService(
+        object(),
+        object(),
+        object(),
+    ).update_state_with_frozen_policy(
+        **arguments,
+        expected_policy_checksum=expected_checksum,
+        authoritative_class_id="class_runtime_387",
+    )
+
+    assert result.learner_state_snapshot.class_id == "class_runtime_387"
+    assert result.class_state_snapshot.class_id == "class_runtime_387"
+
+
 def test_m5_frozen_policy_checksum_error_does_not_disclose_the_path(
     tmp_path: Path,
 ) -> None:

@@ -4,6 +4,8 @@ config/app.json
 runtime/
 outputs/
 tmp/
+build/
+dist/
 config/correction_records.json
 *.db
 *.sqlite*

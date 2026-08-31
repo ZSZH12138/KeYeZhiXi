@@ -59,6 +59,36 @@ from course_insight.modules.m8_assessment_scoring.selection_policy import (
 )
 
 
+def _same_review_outcome(decision: Any, requested: TeacherReviewSubmission) -> bool:
+    """Compare the immutable scoring outcome while allowing a retried UI note."""
+
+    decision_overrides = sorted(
+        (
+            override.criterion_id,
+            override.previous_score,
+            override.new_score,
+        )
+        for override in decision.criterion_overrides
+    )
+    requested_overrides = sorted(
+        (
+            override.criterion_id,
+            override.previous_score,
+            override.new_score,
+        )
+        for override in requested.criterion_overrides
+    )
+    return (
+        decision.audit_id == requested.audit_id
+        and decision.expected_audit_version == requested.expected_audit_version
+        and decision.expected_audit_checksum == requested.expected_audit_checksum
+        and decision.reviewer_id == requested.reviewer_id
+        and decision.decision == requested.decision
+        and decision.final_total_score == requested.final_total_score
+        and decision_overrides == requested_overrides
+    )
+
+
 class AssessmentWorkflow:
     """Coordinate module-owned results through payload-free M0 metadata."""
 
@@ -441,6 +471,7 @@ class AssessmentWorkflow:
                         expected_policy_checksum=(
                             expected_state_policy_checksum
                         ),
+                        authoritative_class_id=run.class_id,
                         class_roster_size=(
                             frozen_dependencies.class_roster_size
                         ),
@@ -665,6 +696,10 @@ class AssessmentWorkflow:
                 frozen_course_package_id=frozen_task.course_package_id,
             )
         ensure_start_dependencies(start, dependencies)
+        review_submission = self._recoverable_failed_review_submission(
+            paper_id,
+            review_submission,
+        )
         operation_id = f"review:{review_submission.submission_id}"
         run = self._record(
             operation_id=operation_id,
@@ -698,6 +733,7 @@ class AssessmentWorkflow:
                 run,
                 review_submission.submission_id,
             )
+        retrying_failed = run.status == "failed"
         run = self._claim(run, request_id)
         try:
             frozen_dependencies = dependencies_from_run(run)
@@ -793,23 +829,12 @@ class AssessmentWorkflow:
                 f"{decision.audit_id}:{decision.expected_audit_version + 1}"
             )
             if run.checkpoint == "events_appended":
-                if submit.status in WAITING_WORKFLOW_STATUSES:
-                    previous_learner, previous_class = (
-                        self._recovery.load_state_inputs(submit)
-                    )
-                    run = self._recovery.freeze_state_inputs(
-                        run,
-                        learner=previous_learner,
-                        class_state=previous_class,
-                    )
-                else:
-                    previous_state = self._results.exact_state(base_run)
-                    require_results(previous_state)
-                    run = self._recovery.freeze_state_inputs(
-                        run,
-                        learner=previous_state.learner_state_snapshot,
-                        class_state=previous_state.class_state_snapshot,
-                    )
+                previous_learner, previous_class = self._latest_state_inputs(run)
+                run = self._recovery.freeze_state_inputs(
+                    run,
+                    learner=previous_learner,
+                    class_state=previous_class,
+                )
             if review_rejected and state is None:
                 if submit.status in WAITING_WORKFLOW_STATUSES:
                     missing("rejected score is waiting for rescore")
@@ -824,13 +849,16 @@ class AssessmentWorkflow:
             ):
                 if run.checkpoint != "state_inputs_frozen":
                     missing("review state result is unavailable")
+                if retrying_failed:
+                    latest_learner, latest_class = self._latest_state_inputs(run)
+                    run = self._recovery.rebase_review_state_inputs(
+                        run,
+                        learner=latest_learner,
+                        class_state=latest_class,
+                    )
                 previous_learner, previous_class = (
                     self._recovery.load_state_inputs(run)
                 )
-                if submit.status in WAITING_WORKFLOW_STATUSES:
-                    previous_learner, previous_class = (
-                        self._latest_state_inputs(run)
-                    )
                 verify_policy_dependencies(
                     frozen_dependencies,
                     state_policy_path=state_policy_path,
@@ -847,6 +875,7 @@ class AssessmentWorkflow:
                         expected_policy_checksum=(
                             expected_state_policy_checksum
                         ),
+                        authoritative_class_id=run.class_id,
                         class_roster_size=(
                             frozen_dependencies.class_roster_size
                         ),
@@ -964,6 +993,46 @@ class AssessmentWorkflow:
                 run.course_id,
                 run.class_id,
             ),
+        )
+
+    def _recoverable_failed_review_submission(
+        self,
+        paper_id: str,
+        requested: TeacherReviewSubmission,
+    ) -> TeacherReviewSubmission:
+        """Resume an equivalent partial review even when the UI issued a new flow."""
+
+        failed = self._m0.get_assessment_run_by_paper(
+            paper_id,
+            operation="review",
+            status="failed",
+        )
+        if (
+            failed is None
+            or failed.checkpoint != "state_inputs_frozen"
+            or failed.target_audit_id != requested.audit_id
+            or failed.target_audit_version != requested.expected_audit_version
+            or not failed.operation_id.startswith("review:")
+        ):
+            return requested
+        decision_id = failed.operation_id.removeprefix("review:")
+        decision = self._m9.get_review_decision(decision_id)
+        if decision is None or not _same_review_outcome(decision, requested):
+            return requested
+        return TeacherReviewSubmission(
+            submission_id=decision.decision_id,
+            audit_id=decision.audit_id,
+            expected_audit_version=decision.expected_audit_version,
+            expected_audit_checksum=decision.expected_audit_checksum,
+            reviewer_id=decision.reviewer_id,
+            decision=decision.decision,
+            final_total_score=decision.final_total_score,
+            criterion_overrides=[
+                override.model_copy(deep=True)
+                for override in decision.criterion_overrides
+            ],
+            teacher_comment=decision.teacher_comment,
+            submitted_at=decision.reviewed_at,
         )
 
     def rescore(
@@ -1196,6 +1265,10 @@ class AssessmentWorkflow:
                 module="application",
                 message="workflow request identity is required",
             )
+        dependencies = self._reuse_frozen_roster_capture(
+            operation_id,
+            dependencies,
+        )
         now = self._now()
         return self._m0.record_assessment_run(
             AssessmentRun(
@@ -1226,6 +1299,28 @@ class AssessmentWorkflow:
             )
         )
 
+    def _reuse_frozen_roster_capture(
+        self,
+        operation_id: str,
+        dependencies: AssessmentDependencies,
+    ) -> AssessmentDependencies:
+        """Keep a retry bound to the first identical roster snapshot."""
+
+        current = self._m0.get_assessment_run(operation_id)
+        if (
+            current is None
+            or current.class_roster_captured_at is None
+            or dependencies.class_roster_captured_at is None
+            or current.class_roster_size != dependencies.class_roster_size
+            or current.class_roster_checksum
+            != dependencies.class_roster_checksum
+        ):
+            return dependencies
+        return replace(
+            dependencies,
+            class_roster_captured_at=current.class_roster_captured_at,
+        )
+
     def _build_observation_batch(
         self,
         scoring: ScoringResultBundle,
@@ -1253,19 +1348,13 @@ class AssessmentWorkflow:
         )
 
     def purge_transient_assessment(self, *, paper_id: str, attempt_id: str) -> None:
-        """Remove raw answers and M8 evidence for one non-profile result."""
+        """Retain the durable artifacts required by a repeatable result page."""
 
-        self._m8.purge_assessment_attempt(
-            paper_id=paper_id,
-            attempt_id=attempt_id,
-        )
-        runtime_dir = getattr(self._m0, "_runtime_dir", None)
-        if runtime_dir is None:
-            return
-        submission_path = (
-            Path(runtime_dir) / "frozen_submissions" / f"{attempt_id}.json"
-        )
-        submission_path.unlink(missing_ok=True)
+        # Practice and correction do not update learner/class profiles, but their
+        # result pages still display the submitted answers.  Keep both the M8
+        # result and its checksum-bound submission; retention/erasure policies
+        # remove them through the normal account-governance path.
+        del paper_id, attempt_id
 
     def _persist_frozen_submission(
         self,

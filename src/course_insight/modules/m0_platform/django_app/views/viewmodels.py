@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import re
+from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +29,9 @@ _PURPOSE_LABELS = {
     "remediation": "补救",
 }
 _FOUR_PURPOSES = ("anchor", "uncertainty", "misconception", "remediation")
+_INTERNAL_STUDENT_REFERENCE = re.compile(
+    r"\b(?:concept|item|criterion|practice_concept)_[A-Za-z0-9_-]+\b"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -92,11 +96,11 @@ class CitationView:
 
 @dataclass(frozen=True, slots=True)
 class FeedbackView:
-    message: str
+    message: str | None
     rubric_feedback: tuple[RubricFeedbackView, ...]
-    missing_concept_ids: tuple[str, ...]
+    missing_concept_names: tuple[str, ...]
     citations: tuple[CitationView, ...]
-    next_practice_item_ids: tuple[str, ...]
+    next_practice_labels: tuple[str, ...]
     correction_note: str
     item_notes: tuple["ItemCorrectionNoteView", ...]
 
@@ -168,6 +172,7 @@ class StudentResultView:
 @dataclass(frozen=True, slots=True)
 class IndividualReportView:
     learner_id: str
+    learner_account: str
     overall_mastery: float
     recent_score: float
     weak_concept_ids: tuple[str, ...]
@@ -309,11 +314,17 @@ def audit_view(audit: ScoreAuditRecord) -> AuditView:
 def feedback_view(
     feedback: StudentFeedbackPackage,
     *,
+    knowledge_bundle: KnowledgeBundle | None = None,
     correction_note: str = "尚未订正",
     item_notes: Sequence[ItemCorrectionNoteView] = (),
 ) -> FeedbackView:
+    concept_names_by_id = _readable_concept_names(knowledge_bundle)
+    concept_names = _unique_values(
+        concept_names_by_id.get(concept_id)
+        for concept_id in feedback.missing_concept_ids
+    )
     return FeedbackView(
-        message=feedback.message,
+        message=_student_feedback_message(feedback.message, concept_names),
         rubric_feedback=tuple(
             RubricFeedbackView(
                 criterion_id=item.criterion_id,
@@ -324,7 +335,7 @@ def feedback_view(
             )
             for item in feedback.rubric_feedback
         ),
-        missing_concept_ids=tuple(feedback.missing_concept_ids),
+        missing_concept_names=concept_names,
         citations=tuple(
             CitationView(
                 label=citation.label(),
@@ -332,7 +343,11 @@ def feedback_view(
             )
             for citation in feedback.evidence_citations
         ),
-        next_practice_item_ids=tuple(feedback.next_practice_item_ids),
+        next_practice_labels=_practice_labels(
+            feedback.next_practice_item_ids,
+            knowledge_bundle=knowledge_bundle,
+            concept_names_by_id=concept_names_by_id,
+        ),
         correction_note=correction_note,
         item_notes=tuple(item_notes),
     )
@@ -342,6 +357,8 @@ def student_result_view(
     paper: AssessmentPaper,
     scoring: ScoringResultBundle,
     feedback: StudentFeedbackPackage,
+    *,
+    knowledge_bundle: KnowledgeBundle | None = None,
 ) -> StudentResultView:
     hidden = scoring.requires_teacher_review() or scoring.has_rejected_score()
     lost_points = scoring.total_score < scoring.max_score
@@ -353,10 +370,86 @@ def student_result_view(
         audits=() if hidden else tuple(
             audit_view(item) for item in _current_audits(scoring)
         ),
-        feedback=None if hidden else feedback_view(feedback),
+        feedback=(
+            None
+            if hidden
+            else feedback_view(feedback, knowledge_bundle=knowledge_bundle)
+        ),
         score_pending_rescore=hidden,
         correction_available=not hidden and lost_points,
     )
+
+
+def _readable_concept_names(
+    knowledge_bundle: KnowledgeBundle | None,
+) -> dict[str, str]:
+    if knowledge_bundle is None:
+        return {}
+    return {
+        concept.concept_id: name
+        for concept in knowledge_bundle.concepts
+        if (name := _readable_label(concept.name)) is not None
+    }
+
+
+def _readable_label(value: str) -> str | None:
+    label = value.strip()
+    if not label or _INTERNAL_STUDENT_REFERENCE.fullmatch(label):
+        return None
+    return label
+
+
+def _unique_values(values: Iterable[str | None]) -> tuple[str, ...]:
+    unique: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if value is None or value in seen:
+            continue
+        seen.add(value)
+        unique.append(value)
+    return tuple(unique)
+
+
+def _student_feedback_message(
+    message: str,
+    concept_names: tuple[str, ...],
+) -> str | None:
+    if not _INTERNAL_STUDENT_REFERENCE.search(message):
+        return message
+    if not concept_names:
+        return None
+    return (
+        f"请结合下方课程原文，重点复习：{'、'.join(concept_names)}。"
+        "先确认题目条件，再检查自己的推理过程和需要修改的步骤。"
+    )
+
+
+def _practice_labels(
+    practice_item_ids: Sequence[str],
+    *,
+    knowledge_bundle: KnowledgeBundle | None,
+    concept_names_by_id: Mapping[str, str],
+) -> tuple[str, ...]:
+    item_names_by_id = (
+        {
+            item.item_id: label
+            for item in knowledge_bundle.items
+            if (label := _readable_label(item.stem)) is not None
+        }
+        if knowledge_bundle is not None
+        else {}
+    )
+    labels: list[str | None] = []
+    for item_id in practice_item_ids:
+        if item_id in item_names_by_id:
+            labels.append(f"练习：{item_names_by_id[item_id]}")
+            continue
+        concept_id = item_id.removeprefix("practice_")
+        concept_name = concept_names_by_id.get(concept_id)
+        labels.append(
+            None if concept_name is None else f"“{concept_name}”专项练习"
+        )
+    return _unique_values(labels)
 
 
 def analytics_view(
@@ -366,6 +459,7 @@ def analytics_view(
     learner_states: Sequence[LearnerStateSnapshot] = (),
     records: Mapping[str, Any] | None = None,
     course_id: str | None = None,
+    learner_account_by_id: Mapping[str, str] | None = None,
 ) -> AnalyticsView:
     report = analytics.class_report
     states_by_learner = {
@@ -450,6 +544,14 @@ def analytics_view(
         individual_reports=tuple(
             IndividualReportView(
                 learner_id=item.learner_id,
+                learner_account=(
+                    learner_account_by_id.get(
+                        item.learner_id,
+                        "账号已不可用",
+                    )
+                    if learner_account_by_id is not None
+                    else "账号已不可用"
+                ),
                 overall_mastery=item.overall_mastery,
                 recent_score=item.recent_score,
                 weak_concept_ids=tuple(item.weak_concept_ids),

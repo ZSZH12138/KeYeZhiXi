@@ -868,27 +868,49 @@ def _http_error_code(status_code: int) -> str:
 
 
 def _retryable_completion_response(response: DeepSeekHTTPResponse) -> bool:
-    """Recognize only the provider's documented transient 200 responses."""
+    """Retry bounded malformed 200 responses before exposing a safe failure."""
 
     try:
         document = _loads_without_duplicate_keys(
             response.body.decode("utf-8").strip()
         )
+        if type(document) is not dict:
+            return True
         choices = document["choices"]
         if type(choices) is not list or len(choices) != 1:
-            return False
+            return True
         choice = choices[0]
         if type(choice) is not dict:
-            return False
-        if choice.get("finish_reason") == "insufficient_system_resource":
             return True
+        finish_reason = choice.get("finish_reason")
+        if finish_reason == "content_filter":
+            return False
+        if finish_reason == "insufficient_system_resource":
+            return True
+        if finish_reason != "stop":
+            return False
         message = choice.get("message")
-        return (
-            choice.get("finish_reason") == "stop"
-            and type(message) is dict
-            and type(message.get("content")) is str
-            and not message["content"].strip()
-        )
+        if type(message) is not dict or type(message.get("content")) is not str:
+            return True
+        content = message["content"].strip()
+        if not content:
+            return True
+        structured = _loads_without_duplicate_keys(content)
+        if type(structured) is not dict:
+            return True
+        citation_ids = structured.get("citation_ids")
+        if (
+            type(citation_ids) is not list
+            or any(type(item) is not str or not item for item in citation_ids)
+            or len(citation_ids) != len(set(citation_ids))
+        ):
+            return True
+        usage = document.get("usage", {})
+        if type(usage) is not dict:
+            return True
+        _nonnegative_int(usage.get("prompt_tokens", 0))
+        _nonnegative_int(usage.get("completion_tokens", 0))
+        return False
     except (
         KeyError,
         TypeError,
@@ -897,7 +919,7 @@ def _retryable_completion_response(response: DeepSeekHTTPResponse) -> bool:
         RecursionError,
         json.JSONDecodeError,
     ):
-        return False
+        return True
 
 
 def _loads_without_duplicate_keys(value: str) -> Any:

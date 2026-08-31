@@ -2,7 +2,7 @@
 {% block title %}诊断卷蓝图 · 课业智析{% endblock %}
 {% block content %}
   <h1>四段诊断卷</h1>
-  <p class="muted">课程 {{ course_id }}；班级 {{ class_id }}。先定四段用途、题量和分数，再预览组卷。保存后不会改已审核知识包，只作用在本课运行配置上。</p>
+  <p class="muted">课程 {{ scope.course_name }}；班级 {{ scope.class_name }}。先定四段用途、题量和分数，再预览组卷。保存后不会改已审核知识包，只作用在本课运行配置上。</p>
   <form method="post">
     {% csrf_token %}
     <input type="hidden" name="blueprint_id" value="{{ blueprint_id }}">

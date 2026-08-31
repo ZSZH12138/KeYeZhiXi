@@ -37,6 +37,12 @@ _ANSWER_MARKERS = (
     "参考答案",
     "参考解答",
 )
+_CONTROLLED_TRANSIENT_FEEDBACK_MESSAGES = frozenset(
+    {
+        "本次练习已完成；结果仅供即时反馈，不计入学习画像。",
+        "本次订正已完成；结果只更新待订正状态，不计入学习画像。",
+    }
+)
 
 # Frozen v1 requires a non-empty quote even though the current learner UI does
 # not display course excerpts.  M7 persists this controlled value instead of
@@ -469,11 +475,25 @@ class StudentFeedbackPackage(ContractModel):
             ),
             *self.next_practice_item_ids,
         )
+        controlled_transient = (
+            self.feedback_id == f"feedback_transient_{self.task_id}"
+            and self.message in _CONTROLLED_TRANSIENT_FEEDBACK_MESSAGES
+            and not self.rubric_feedback
+            and not self.missing_concept_ids
+            and not self.evidence_citations
+            and not self.next_practice_item_ids
+            and math.isclose(self.confidence, 1.0, rel_tol=0.0, abs_tol=1e-9)
+        )
         return (
-            self.has_citations()
-            and all(
-                citation.safe_for_student()
-                for citation in self.evidence_citations
+            (
+                controlled_transient
+                or (
+                    self.has_citations()
+                    and all(
+                        citation.safe_for_student()
+                        for citation in self.evidence_citations
+                    )
+                )
             )
             and not any(
                 marker in value.casefold()

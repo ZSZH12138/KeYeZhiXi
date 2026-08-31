@@ -379,6 +379,7 @@ class M5StateService:
         previous_class_state_snapshot: ClassStateSnapshot | None,
         state_policy_path: Path,
         expected_policy_checksum: str,
+        authoritative_class_id: str | None = None,
         class_roster_size: int | None = None,
         learning_observation_batch: LearningObservationBatch | None = None,
         learning_model_run: LearningModelRun | None = None,
@@ -389,6 +390,19 @@ class M5StateService:
             state_policy_path,
             expected_policy_checksum,
         )
+        if authoritative_class_id is not None:
+            if (
+                type(authoritative_class_id) is not str
+                or not authoritative_class_id
+                or authoritative_class_id != authoritative_class_id.strip()
+            ):
+                raise DomainError(
+                    code="STATE_SCOPE_MISMATCH",
+                    module="m5",
+                    message="authoritative class scope is invalid",
+                    recoverable=True,
+                )
+            policy = replace(policy, class_id=authoritative_class_id)
         if class_roster_size is not None:
             if type(class_roster_size) is not int or class_roster_size < 1:
                 raise DomainError(

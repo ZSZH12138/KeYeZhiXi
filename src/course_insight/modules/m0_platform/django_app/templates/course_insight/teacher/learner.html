@@ -1,8 +1,8 @@
 {% extends "course_insight/base.html" %}
 {% block title %}学生掌握与订正 · 课业智析{% endblock %}
 {% block content %}
-  <h1>学生 {{ review.learner_id }}</h1>
-  <p class="muted">课程 {{ course_id }}；班级 {{ class_id }}。这里只看该生已确认测评后的掌握、错因和本题订正状态。</p>
+  <h1>学生 {{ learner_account }}</h1>
+  <p class="muted">课程 {{ scope.course_name }}；班级 {{ scope.class_name }}。这里只看该生已确认测评后的掌握、错因和本题订正状态。</p>
   <section class="card">
     <h2>掌握画像</h2>
     {% if not review.profile.ready %}

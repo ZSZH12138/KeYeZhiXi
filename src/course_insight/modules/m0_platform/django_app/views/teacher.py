@@ -10,7 +10,7 @@ from decimal import Decimal
 
 from django.contrib.auth.decorators import login_required
 from django.core.exceptions import PermissionDenied, ValidationError
-from django.db.models import Q
+from django.db.models import Count, Q
 from django.http import Http404, HttpRequest, HttpResponse, QueryDict
 from django.shortcuts import get_object_or_404, redirect, render
 from django.utils import timezone
@@ -116,6 +116,7 @@ from course_insight.modules.m0_platform.django_app.workspace_labels import (
     scope_display,
 )
 from course_insight.modules.m0_platform.django_app.views.viewmodels import (
+    AnalyticsView,
     analytics_view,
     blueprint_section_purposes,
     criterion_caps,
@@ -224,12 +225,13 @@ def home(request: HttpRequest) -> HttpResponse:
             ),
         )
     )
+    scope_choices = _scope_form_choices(knowledge_scopes)
     return render(
         request,
         "course_insight/teacher/home.html",
         {
-            "lookup_form": ReviewLookupForm(),
-            "class_form": ScopeSelectionForm(),
+            "lookup_form": ReviewLookupForm(scope_choices=scope_choices),
+            "class_form": ScopeSelectionForm(scope_choices=scope_choices),
             "open_class_form": OpenClassForm(
                 initial={"request_token": secrets.token_urlsafe(32)}
             ),
@@ -413,6 +415,68 @@ def _scope_display(*, course_id: str, class_id: str) -> ScopeDisplay:
     )
 
 
+def _scope_form_choices(
+    scopes: tuple[ScopeDisplay, ...],
+) -> tuple[tuple[str, str, str, str], ...]:
+    """Pair opaque submitted values with names shown in teacher forms."""
+
+    return tuple(
+        (
+            scope.course_id,
+            scope.course_name,
+            scope.class_id,
+            scope.class_name,
+        )
+        for scope in scopes
+    )
+
+
+def _active_student_accounts(
+    *,
+    course_id: str,
+    class_id: str,
+) -> tuple[User, ...]:
+    """Resolve readable accounts only from the current authorized roster."""
+
+    workspace = CourseClassWorkspace.objects.filter(
+        course_id=course_id,
+        class_id=class_id,
+        status=CourseClassWorkspace.Status.ACTIVE,
+    ).first()
+    if workspace is not None and workspace.owner_teacher_id is not None:
+        return tuple(
+            User.objects.filter(
+                class_memberships__workspace=workspace,
+                class_memberships__status=ClassMembership.Status.ACTIVE,
+                class_memberships__removed_at__isnull=True,
+                account_type=AccountType.STUDENT,
+                is_active=True,
+            )
+            .distinct()
+            .order_by("username", "pk")
+        )
+
+    now = timezone.now()
+    return tuple(
+        User.objects.filter(
+            actor_grants__role=RoleName.STUDENT,
+            actor_grants__course_id=course_id,
+            actor_grants__class_id=class_id,
+            actor_grants__is_active=True,
+            actor_grants__revoked_at__isnull=True,
+            actor_grants__valid_from__lte=now,
+            account_type=AccountType.STUDENT,
+            is_active=True,
+        )
+        .filter(
+            Q(actor_grants__valid_until__isnull=True)
+            | Q(actor_grants__valid_until__gt=now)
+        )
+        .distinct()
+        .order_by("username", "pk")
+    )
+
+
 def _active_student_account_by_name(account_name: str) -> User:
     student = User.objects.filter(
         username_digest=account_name_digest(account_name),
@@ -533,8 +597,11 @@ def lookup(request: HttpRequest) -> HttpResponse:
             {"lookup_form": form, "class_form": ScopeSelectionForm()},
             status=400,
         )
-    course_id = str(form.cleaned_data["course_id"])
-    class_id = str(form.cleaned_data["class_id"])
+    course_id, class_id = _resolve_owned_workspace_scope(
+        request.user,
+        course_value=str(form.cleaned_data["course_id"]),
+        class_value=str(form.cleaned_data["class_id"]),
+    )
     _authorize_teacher(
         request,
         "view_student_report",
@@ -614,6 +681,7 @@ def review_list(
         {
             "course_id": course_id,
             "class_id": class_id,
+            "scope": _scope_display(course_id=course_id, class_id=class_id),
             "learner": learner,
             "assessment_history": review_entries,
         },
@@ -634,8 +702,11 @@ def class_lookup(request: HttpRequest) -> HttpResponse:
             },
             status=400,
         )
-    course_id = str(form.cleaned_data["course_id"])
-    class_id = str(form.cleaned_data["class_id"])
+    course_id, class_id = _resolve_owned_workspace_scope(
+        request.user,
+        course_value=str(form.cleaned_data["course_id"]),
+        class_value=str(form.cleaned_data["class_id"]),
+    )
     _authorize_teacher(
         request,
         "view_class_analytics",
@@ -784,12 +855,26 @@ def _render_class_context(
         course_id=course_id,
         class_id=class_id,
     )
+    student_accounts = _active_student_accounts(
+        course_id=course_id,
+        class_id=class_id,
+    )
+    learner_account_by_id = {
+        student.actor_id: student.username for student in student_accounts
+    }
     analytics = None
     m9 = getattr(web_runtime.container, "m9_service", None)
     getter = getattr(m9, "get_latest_analytics", None) if m9 is not None else None
     if callable(getter):
         raw = getter(course_id=course_id, class_id=class_id)
         if raw is not None and bundle is not None:
+            raw = _analytics_for_active_students(
+                getter=getter,
+                latest=raw,
+                course_id=course_id,
+                class_id=class_id,
+                students=student_accounts,
+            )
             learner_states = _list_learner_states(
                 web_runtime,
                 course_id=course_id,
@@ -804,6 +889,12 @@ def _render_class_context(
                     class_id=class_id,
                 ),
                 course_id=course_id,
+                learner_account_by_id=learner_account_by_id,
+            )
+            analytics = _analytics_with_current_review_counts(
+                analytics,
+                course_id=course_id,
+                class_id=class_id,
             )
     advice_status = scoped_deepseek_status(course_id, class_id)
     workspace = CourseClassWorkspace.objects.filter(
@@ -888,7 +979,12 @@ def _render_class_context(
                 initial={
                     "course_id": course_id,
                     "class_id": class_id,
-                }
+                },
+                hide_scope=True,
+                learner_choices=tuple(
+                    (student.username, student.username)
+                    for student in student_accounts
+                ),
             ),
         },
     )
@@ -929,6 +1025,13 @@ def review_context(
     course = web_runtime.require_course(course_id)
     paper = _contract(response, "assessment_paper", AssessmentPaper)
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
+    learner_account_by_id = {
+        student.actor_id: student.username
+        for student in _active_student_accounts(
+            course_id=course_id,
+            class_id=class_id,
+        )
+    }
     task_value = response.get("task_plan")
     waiting_status = response.get("waiting_status")
     analytics = None
@@ -990,7 +1093,19 @@ def review_context(
             "course_id": course_id,
             "class_id": class_id,
             "paper": paper_view(paper),
-            "analytics": None if analytics is None else analytics_view(analytics),
+            "analytics": (
+                None
+                if analytics is None
+                else analytics_view(
+                    analytics,
+                    learner_account_by_id=learner_account_by_id,
+                )
+            ),
+            "scope": _scope_display(course_id=course_id, class_id=class_id),
+            "learner_account": learner_account_by_id.get(
+                paper.learner_id,
+                "账号已不可用",
+            ),
             "class_snapshot": class_snapshot,
             "question_reviews": question_reviews,
             "review_links": review_links,
@@ -1060,7 +1175,12 @@ def suggested_review_list(
     return render(
         request,
         "course_insight/teacher/suggested_review_list.html",
-        {"course_id": course_id, "class_id": class_id, "rows": rows},
+        {
+            "course_id": course_id,
+            "class_id": class_id,
+            "scope": _scope_display(course_id=course_id, class_id=class_id),
+            "rows": rows,
+        },
     )
 
 
@@ -1145,6 +1265,7 @@ def suggested_review_detail(
         {
             "course_id": course_id,
             "class_id": class_id,
+            "scope": _scope_display(course_id=course_id, class_id=class_id),
             "case": case,
             "question_reviews": question_reviews,
             "review_complete": not open_ids,
@@ -1615,6 +1736,7 @@ def objective_answers(
         {
             "course_id": course_id,
             "class_id": class_id,
+            "scope": _scope_display(course_id=course_id, class_id=class_id),
             "items": rows,
         },
     )
@@ -1722,6 +1844,7 @@ def blueprint(
         {
             "course_id": course_id,
             "class_id": class_id,
+            "scope": _scope_display(course_id=course_id, class_id=class_id),
             "blueprint_id": overlay.get("blueprint_id") or "",
             "sections": overlay.get("sections") or [],
             "preview": (
@@ -1739,6 +1862,72 @@ def blueprint(
     )
 
 
+def _analytics_for_active_students(
+    *,
+    getter,
+    latest: TeacherAnalyticsBundle,
+    course_id: str,
+    class_id: str,
+    students: tuple[User, ...],
+) -> TeacherAnalyticsBundle:
+    """Combine each active student's latest scoped M9 individual report."""
+
+    reports = []
+    for student in students:
+        scoped = getter(
+            course_id=course_id,
+            class_id=class_id,
+            learner_id=student.actor_id,
+        )
+        if scoped is None:
+            continue
+        report = next(
+            (
+                item
+                for item in scoped.individual_reports
+                if item.learner_id == student.actor_id
+            ),
+            None,
+        )
+        if report is not None:
+            reports.append(report.model_copy(deep=True))
+    return latest.model_copy(
+        update={"individual_reports": reports},
+        deep=True,
+    )
+
+
+def _analytics_with_current_review_counts(
+    analytics: AnalyticsView,
+    *,
+    course_id: str,
+    class_id: str,
+) -> AnalyticsView:
+    """Use the live review queue instead of stale M9 snapshot counters."""
+
+    counts = {
+        row["case__learner__actor_id"]: row["total"]
+        for row in SuggestedTeacherReviewItem.objects.filter(
+            case__workspace__course_id=course_id,
+            case__workspace__class_id=class_id,
+            case__status=SuggestedTeacherReviewCase.Status.OPEN,
+            status=SuggestedTeacherReviewItem.Status.OPEN,
+        )
+        .values("case__learner__actor_id")
+        .annotate(total=Count("id"))
+    }
+    return replace(
+        analytics,
+        individual_reports=tuple(
+            replace(
+                report,
+                review_required_count=counts.get(report.learner_id, 0),
+            )
+            for report in analytics.individual_reports
+        ),
+    )
+
+
 @login_required
 @require_GET
 def learner(
@@ -1752,6 +1941,11 @@ def learner(
         "view_class_analytics",
         course_id=course_id,
         class_id=class_id,
+    )
+    learner_account = _require_active_student(
+        course_id=course_id,
+        class_id=class_id,
+        learner_id=learner_id,
     )
     web_runtime = runtime.get_web_runtime()
     course = web_runtime.require_course(course_id)
@@ -1808,6 +2002,8 @@ def learner(
         {
             "course_id": course_id,
             "class_id": class_id,
+            "scope": _scope_display(course_id=course_id, class_id=class_id),
+            "learner_account": learner_account.username,
             "review": view,
         },
     )
@@ -2073,6 +2269,28 @@ def _require_active_student(
 ) -> User:
     """Resolve an account only through the current exact student roster."""
 
+    workspace = CourseClassWorkspace.objects.filter(
+        course_id=course_id,
+        class_id=class_id,
+        status=CourseClassWorkspace.Status.ACTIVE,
+    ).first()
+    if workspace is not None and workspace.owner_teacher_id is not None:
+        membership = (
+            ClassMembership.objects.select_related("student")
+            .filter(
+                workspace=workspace,
+                student__actor_id=learner_id,
+                student__account_type=AccountType.STUDENT,
+                student__is_active=True,
+                status=ClassMembership.Status.ACTIVE,
+                removed_at__isnull=True,
+            )
+            .first()
+        )
+        if membership is None:
+            raise Http404("student account is not active in this class")
+        return membership.student
+
     now = timezone.now()
     grant = (
         ActorGrant.objects.select_related("user")
@@ -2091,6 +2309,38 @@ def _require_active_student(
     if grant is None:
         raise Http404("student account is not active in this class")
     return grant.user
+
+
+def _resolve_owned_workspace_scope(
+    user: User,
+    *,
+    course_value: str,
+    class_value: str,
+) -> tuple[str, str]:
+    """Resolve one owned display-name pair without weakening scope checks."""
+
+    exact_owned = CourseClassWorkspace.objects.filter(
+        owner_teacher=user,
+        course_id=course_value,
+        class_id=class_value,
+        status=CourseClassWorkspace.Status.ACTIVE,
+    ).first()
+    if exact_owned is not None:
+        return exact_owned.course_id, exact_owned.class_id
+
+    display_matches = tuple(
+        CourseClassWorkspace.objects.filter(
+            owner_teacher=user,
+            course_display_name=course_value,
+            class_display_name=class_value,
+            status=CourseClassWorkspace.Status.ACTIVE,
+        )
+        .order_by("pk")
+        .values_list("course_id", "class_id")[:2]
+    )
+    if len(display_matches) == 1:
+        return display_matches[0]
+    return course_value, class_value
 
 
 def _verify_review(

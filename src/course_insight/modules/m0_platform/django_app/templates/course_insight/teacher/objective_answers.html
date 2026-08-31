@@ -2,7 +2,7 @@
 {% block title %}客观题标准答案 · 课业智析{% endblock %}
 {% block content %}
   <h1>客观题标准答案</h1>
-  <p class="muted">课程 {{ course_id }}；班级 {{ class_id }}。每行一条可接受字符串，只去掉首尾空白，大小写和内部空格保持原样。不会改已审核知识包。</p>
+  <p class="muted">课程 {{ scope.course_name }}；班级 {{ scope.class_name }}。每行一条可接受字符串，只去掉首尾空白，大小写和内部空格保持原样。不会改已审核知识包。</p>
   {% if not items %}
     <p>当前课包没有客观题。</p>
   {% else %}

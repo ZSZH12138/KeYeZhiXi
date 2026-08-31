@@ -10,6 +10,7 @@ import pytest
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
+from django.utils.html import strip_tags
 
 from course_insight.modules.m0_platform.django_app.models import (
     ActorGrant,
@@ -23,6 +24,8 @@ from course_insight.modules.m0_platform.django_app.models import (
     LearningProfileProjectionEvent,
     ReleaseConcept,
     ReleaseConceptSource,
+    SuggestedTeacherReviewCase,
+    SuggestedTeacherReviewItem,
     User,
 )
 from course_insight.modules.m0_platform.django_app.learning_projection import (
@@ -260,11 +263,49 @@ def test_teacher_class_map_uses_named_m5_snapshot_and_has_no_paper_preview(
         role="teacher",
         permissions=("view_class_analytics",),
     )
-    learner = _student("pseudonym_snapshot_page_student")
+    learner = User.objects.create_user(
+        username="student_demo1",
+        actor_id="pseudonym_snapshot_page_student",
+    )
+    ActorGrant.objects.create(
+        user=learner,
+        role="student",
+        course_id="course_1",
+        class_id="class_1",
+        source_checksum="a" * 64,
+    )
+    second_learner = User.objects.create_user(
+        username="student_demo2",
+        actor_id="pseudonym_snapshot_page_student_2",
+    )
+    ActorGrant.objects.create(
+        user=second_learner,
+        role="student",
+        course_id="course_1",
+        class_id="class_1",
+        source_checksum="b" * 64,
+    )
     workspace = _workspace(teacher)
     _mastery(workspace, learner, concept_id="tcp", mastery="0.000")
     synchronize_class_learning_snapshot(workspace=workspace, reason="test")
-    coordinator = FakeCoordinator(teacher.actor_id)
+    review_case = SuggestedTeacherReviewCase.objects.create(
+        workspace=workspace,
+        learner=second_learner,
+        attempt_id="attempt-student-demo2-review",
+        paper_id="paper-student-demo2-review",
+        task_type="diagnostic",
+        scoring_checksum="e" * 64,
+        attempted_at=timezone.now(),
+    )
+    SuggestedTeacherReviewItem.objects.create(
+        case=review_case,
+        item_instance_id="item-student-demo2-review",
+        audit_id="audit-student-demo2-review",
+        audit_version=1,
+        confidence=Decimal("0.500"),
+        review_reasons=["low_confidence"],
+    )
+    coordinator = FakeCoordinator(learner.actor_id)
     coordinator.analytics = coordinator.analytics.model_copy(
         update={
             "individual_reports": [
@@ -284,8 +325,26 @@ def test_teacher_class_map_uses_named_m5_snapshot_and_has_no_paper_preview(
         coordinator=coordinator,
         runtime_dir=tmp_path,
     )
+    second_analytics = FakeCoordinator(second_learner.actor_id).analytics.model_copy(
+        update={
+            "individual_reports": [
+                FakeCoordinator(second_learner.actor_id)
+                .analytics.individual_reports[0]
+                .model_copy(update={"review_required_count": 0})
+            ]
+        },
+        deep=True,
+    )
+
+    def latest_analytics(*, learner_id=None, **_):
+        if learner_id is None or learner_id == learner.actor_id:
+            return coordinator.analytics.model_copy(deep=True)
+        if learner_id == second_learner.actor_id:
+            return second_analytics.model_copy(deep=True)
+        return None
+
     web_runtime.container.m9_service = SimpleNamespace(
-        get_latest_analytics=lambda **_: coordinator.analytics.model_copy(deep=True)
+        get_latest_analytics=latest_analytics
     )
     monkeypatch.setattr(runtime, "get_web_runtime", lambda: web_runtime)
     client = Client()
@@ -299,6 +358,7 @@ def test_teacher_class_map_uses_named_m5_snapshot_and_has_no_paper_preview(
     )
 
     content = response.content.decode("utf-8")
+    visible_text = strip_tags(content)
     assert response.status_code == 200, content
     assert "传输控制协议" in content
     assert "未做 1 人" in content
@@ -309,6 +369,14 @@ def test_teacher_class_map_uses_named_m5_snapshot_and_has_no_paper_preview(
     assert "薄弱：concept_should_not_appear" not in content
     assert "误区：misconception_should_not_appear" not in content
     assert "查看该生掌握、错因、订正" in content
+    assert "student_demo1：掌握度" in visible_text
+    assert "student_demo2：掌握度" in visible_text
+    assert re.search(
+        r"<summary>student_demo2：掌握度 [^<]*待复核 1</summary>",
+        content,
+    )
+    assert learner.actor_id not in visible_text
+    assert second_learner.actor_id not in visible_text
     assert "<h2>教学建议</h2>" not in content
 
 

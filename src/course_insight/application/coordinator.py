@@ -264,7 +264,7 @@ class AppCoordinator:
         return self._assessment_workflow.frozen_submission(attempt_id)
 
     def purge_transient_assessment(self, *, paper_id: str, attempt_id: str) -> None:
-        """Remove raw storage for one completed non-profile assessment."""
+        """Finalize one non-profile assessment without breaking result reloads."""
 
         self._assessment_workflow.purge_transient_assessment(
             paper_id=paper_id,

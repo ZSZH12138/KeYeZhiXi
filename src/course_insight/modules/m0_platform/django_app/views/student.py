@@ -550,7 +550,22 @@ def result(
         )
     feedback = _contract(response, "feedback", StudentFeedbackPackage)
     course = web_runtime.require_course(course_id)
-    result = student_result_view(paper, scoring, feedback)
+    knowledge_bundle = (
+        _bundle_for_task(
+            task_value,
+            course_id=course_id,
+            class_id=class_id,
+            legacy_course=course,
+        )
+        if type(task_value) is TaskPlan
+        else None
+    )
+    result = student_result_view(
+        paper,
+        scoring,
+        feedback,
+        knowledge_bundle=knowledge_bundle,
+    )
     question_details = (
         ()
         if result.score_pending_rescore
@@ -685,7 +700,17 @@ def feedback(
         )
     scoring = _contract(response, "scoring_result", ScoringResultBundle)
     web_runtime = runtime.get_web_runtime()
-    web_runtime.require_course(course_id)
+    course = web_runtime.require_course(course_id)
+    knowledge_bundle = (
+        _bundle_for_task(
+            task_value,
+            course_id=course_id,
+            class_id=class_id,
+            legacy_course=course,
+        )
+        if type(task_value) is TaskPlan
+        else None
+    )
     records = _correction_records_for_paper(
         course_id=course_id,
         class_id=class_id,
@@ -708,6 +733,7 @@ def feedback(
         {
             "feedback": feedback_view(
                 package,
+                knowledge_bundle=knowledge_bundle,
                 correction_note=_correction_note(notes),
                 item_notes=notes,
             ),

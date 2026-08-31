@@ -408,7 +408,9 @@ class M8AssessmentService(M8ModelRuntimeMixin, M8HistoricalRecoveryMixin):
                         knowledge_bundle.get_concept(concept_id).name
                         for concept_id in instance.concept_ids
                     ],
-                    review_confidence_threshold=0.5,
+                    review_confidence_threshold=(
+                        rubric.review_policy.low_confidence_threshold
+                    ),
                     rubric=rubric,
                     evidence_query_id=evidence_query_id,
                     created_at=prepared_at,

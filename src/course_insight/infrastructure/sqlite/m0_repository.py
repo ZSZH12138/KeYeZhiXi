@@ -24,6 +24,7 @@ from course_insight.modules.m0_platform.workflow import (
     AssessmentRun,
     advance_run,
     assert_assessment_run_replay,
+    rebase_review_state_inputs,
     reconcile_legacy_assessment_run,
 )
 
@@ -543,6 +544,56 @@ class SQLiteM0Repository(SQLiteM0OutboxRepositoryMixin):
                 error_code=error_code,
                 locked_by=None if completing else current.locked_by,
                 lease_until=None if completing else current.lease_until,
+            )
+            _update_workflow_row(connection, expected=current, updated=updated)
+            connection.execute("COMMIT")
+            return updated
+        except Exception:
+            if connection.in_transaction:
+                connection.execute("ROLLBACK")
+            raise
+        finally:
+            connection.close()
+
+    def rebase_review_state_inputs(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        now: datetime,
+        previous_learner_snapshot_id: str | None,
+        previous_learner_state_version: int | None,
+        previous_class_snapshot_id: str | None,
+    ) -> AssessmentRun:
+        """CAS-rebase one claimed failed review before its M5 write."""
+
+        connection = connect_sqlite(self._database_path)
+        try:
+            connection.execute("BEGIN IMMEDIATE")
+            row = _workflow_row(connection, operation_id)
+            if row is None:
+                raise DomainError(
+                    code="WORKFLOW_NOT_FOUND",
+                    module="m0",
+                    message="assessment workflow row does not exist",
+                    recoverable=True,
+                )
+            current = _run_from_row(row)
+            if current.version != expected_version or current.locked_by != worker_id:
+                raise DomainError(
+                    code="WORKFLOW_VERSION_CONFLICT",
+                    module="m0",
+                    message="assessment workflow row is stale or not owned",
+                    recoverable=True,
+                )
+            _require_live_lease(current, now=now)
+            updated = rebase_review_state_inputs(
+                current,
+                now=now,
+                previous_learner_snapshot_id=previous_learner_snapshot_id,
+                previous_learner_state_version=previous_learner_state_version,
+                previous_class_snapshot_id=previous_class_snapshot_id,
             )
             _update_workflow_row(connection, expected=current, updated=updated)
             connection.execute("COMMIT")

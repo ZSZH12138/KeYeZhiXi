@@ -71,6 +71,31 @@ def test_constructed_response_mismatch_routes_to_deepseek_task() -> None:
     assert task.review_confidence_threshold == 0.5
 
 
+def test_constructed_response_uses_frozen_rubric_review_threshold() -> None:
+    service = make_m8_test_service()
+    paper = make_paper(subjective=True)
+    knowledge = _constructed_response_bundle(item_type="short_answer")
+    rubric = knowledge.rubrics[0]
+    rubric = rubric.model_copy(
+        update={
+            "review_policy": rubric.review_policy.model_copy(
+                update={"low_confidence_threshold": 0.7},
+                deep=True,
+            )
+        },
+        deep=True,
+    )
+    knowledge = knowledge.model_copy(update={"rubrics": [rubric]}, deep=True)
+
+    prepared = service.prepare_scoring(
+        paper,
+        _submission(paper, "意思接近但字符串不同"),
+        knowledge,
+    )
+
+    assert prepared.rubric_scoring_tasks[0].review_confidence_threshold == 0.7
+
+
 def test_fill_blank_mismatch_gets_a_synthetic_deepseek_rubric() -> None:
     service = make_m8_test_service()
     paper = make_paper(subjective=False)

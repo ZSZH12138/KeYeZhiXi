@@ -19,6 +19,7 @@ from course_insight.modules.m0_platform.workflow import (
     AssessmentRun,
     advance_run,
     assert_assessment_run_replay,
+    rebase_review_state_inputs,
     reconcile_legacy_assessment_run,
 )
 
@@ -512,6 +513,41 @@ class PostgresM0Repository(PostgresM0OutboxRepositoryMixin):
                 error_code=error_code,
                 locked_by=None if completing else current.locked_by,
                 lease_until=None if completing else current.lease_until,
+            )
+            _update_workflow_row(
+                connection,
+                expected=current,
+                updated=updated,
+            )
+            return updated
+
+    def rebase_review_state_inputs(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        now: datetime,
+        previous_learner_snapshot_id: str | None,
+        previous_learner_state_version: int | None,
+        previous_class_snapshot_id: str | None,
+    ) -> AssessmentRun:
+        """CAS-rebase one claimed failed review before its M5 write."""
+
+        with m0_transaction(self._pool) as connection:
+            current = _required_locked_run(connection, operation_id)
+            _require_owner_version(
+                current,
+                expected_version=expected_version,
+                worker_id=worker_id,
+            )
+            _require_live_lease(current, now=now)
+            updated = rebase_review_state_inputs(
+                current,
+                now=now,
+                previous_learner_snapshot_id=previous_learner_snapshot_id,
+                previous_learner_state_version=previous_learner_state_version,
+                previous_class_snapshot_id=previous_class_snapshot_id,
             )
             _update_workflow_row(
                 connection,

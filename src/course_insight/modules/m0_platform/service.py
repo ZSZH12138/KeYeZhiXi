@@ -277,6 +277,27 @@ class M0PlatformService:
             gate_policy_version=gate_policy_version,
         )
 
+    def rebase_review_state_inputs(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        now: datetime,
+        previous_learner_snapshot_id: str | None,
+        previous_learner_state_version: int | None,
+        previous_class_snapshot_id: str | None,
+    ) -> AssessmentRun:
+        return self._repository.rebase_review_state_inputs(
+            operation_id,
+            expected_version=expected_version,
+            worker_id=worker_id,
+            now=now,
+            previous_learner_snapshot_id=previous_learner_snapshot_id,
+            previous_learner_state_version=previous_learner_state_version,
+            previous_class_snapshot_id=previous_class_snapshot_id,
+        )
+
     def reclaim_assessment_run(
         self,
         operation_id: str,

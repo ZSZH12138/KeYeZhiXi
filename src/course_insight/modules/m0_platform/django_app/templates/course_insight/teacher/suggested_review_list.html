@@ -2,6 +2,7 @@
 {% block title %}建议教师复核 · 课业智析{% endblock %}
 {% block content %}
   <h1>建议教师复核</h1>
+  <p>课程：{{ scope.course_name }}；班级：{{ scope.class_name }}</p>
   <p class="muted">这里只显示会影响学生画像和班级画像、且 AI 置信度低于 0.5 或评分生成失败的记录。同一次作答中的多道待复核题合并为一条。</p>
   {% for row in rows %}
     <article class="card">

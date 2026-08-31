@@ -9,6 +9,8 @@ from django.contrib.auth.models import Group, Permission
 from django.core.exceptions import PermissionDenied
 from django.test import Client
 from django.urls import reverse
+from django.utils import timezone
+from django.utils.html import strip_tags
 
 from course_insight.modules.m0_platform.django_app import runtime
 from course_insight.modules.m0_platform.django_app.authz import (
@@ -19,6 +21,7 @@ from course_insight.modules.m0_platform.django_app.class_management import (
 )
 from course_insight.modules.m0_platform.django_app.models import (
     AccountType,
+    ActorGrant,
     ClassMembership,
     CourseClassWorkspace,
     RoleName,
@@ -116,6 +119,161 @@ def test_teacher_home_adds_open_class_without_removing_existing_features() -> No
         "DeepSeek 接口",
     ):
         assert label in page
+
+
+def test_teacher_opens_owned_class_lookup_with_display_names() -> None:
+    teacher = _teacher("pseudonym_teacher_display_scope_lookup")
+    workspace = CourseClassWorkspace.objects.create(
+        course_id="course_opaque_scope_lookup",
+        class_id="class_opaque_scope_lookup",
+        course_display_name="computer_network",
+        class_display_name="class1",
+        owner_teacher=teacher,
+    )
+    client = Client()
+    client.force_login(teacher)
+
+    response = client.get(
+        reverse("teacher-class-lookup"),
+        {"course_id": "computer_network", "class_id": "class1"},
+    )
+
+    assert response.status_code == 302
+    assert response.url == reverse(
+        "teacher-class",
+        kwargs={
+            "course_id": workspace.course_id,
+            "class_id": workspace.class_id,
+        },
+    )
+
+
+def test_teacher_pages_render_readable_scope_and_student_inputs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Opaque scope and actor IDs stay out of teacher-visible labels."""
+
+    teacher = _teacher("pseudonym_teacher_readable_inputs")
+    student = User.objects.create_user(
+        username="student_demo1",
+        actor_id="pseudonym_student_readable_inputs",
+        account_type=AccountType.STUDENT,
+    )
+    workspace = CourseClassWorkspace.objects.create(
+        course_id="course_opaque_readable_inputs",
+        class_id="class_opaque_readable_inputs",
+        course_display_name="computer_network",
+        class_display_name="class1",
+        owner_teacher=teacher,
+    )
+    ClassMembership.objects.create(
+        workspace=workspace,
+        student=student,
+        added_by_teacher=teacher,
+    )
+    monkeypatch.setattr(runtime, "get_web_runtime", lambda: _DynamicRuntime())
+    client = Client()
+    client.force_login(teacher)
+
+    home = client.get(reverse("teacher-home"))
+    class_page = client.get(
+        reverse(
+            "teacher-class",
+            kwargs={
+                "course_id": workspace.course_id,
+                "class_id": workspace.class_id,
+            },
+        )
+    )
+
+    assert home.status_code == 200
+    home_text = strip_tags(home.content.decode())
+    assert "computer_network" in home_text
+    assert "class1" in home_text
+    assert "Course id" not in home_text
+    assert "Class id" not in home_text
+    assert class_page.status_code == 200
+    class_text = strip_tags(class_page.content.decode())
+    assert "课程：computer_network；班级：class1" in class_text
+    assert "student_demo1" in class_text
+    assert "Course id" not in class_text
+    assert "Class id" not in class_text
+    assert "Learner account" not in class_text
+    assert "pseudonym_student_readable_inputs" not in class_text
+
+
+def test_teacher_review_lookup_accepts_current_class_membership() -> None:
+    teacher = _teacher("pseudonym_teacher_membership_review_lookup")
+    student = _student("pseudonym_student_membership_review_lookup")
+    workspace = CourseClassWorkspace.objects.create(
+        course_id="course_membership_review_lookup",
+        class_id="class_membership_review_lookup",
+        owner_teacher=teacher,
+    )
+    ClassMembership.objects.create(
+        workspace=workspace,
+        student=student,
+        added_by_teacher=teacher,
+    )
+    client = Client()
+    client.force_login(teacher)
+
+    response = client.get(
+        reverse("teacher-review-lookup"),
+        {
+            "course_id": workspace.course_id,
+            "class_id": workspace.class_id,
+            "learner_account": student.username,
+        },
+    )
+
+    assert response.status_code == 302
+    assert response.url == reverse(
+        "teacher-learner-review-list",
+        kwargs={
+            "course_id": workspace.course_id,
+            "class_id": workspace.class_id,
+            "learner_id": student.actor_id,
+        },
+    )
+
+
+def test_removed_owned_class_membership_cannot_fall_back_to_legacy_grant() -> None:
+    teacher = _teacher("pseudonym_teacher_removed_membership_review")
+    student = _student("pseudonym_student_removed_membership_review")
+    workspace = CourseClassWorkspace.objects.create(
+        course_id="course_removed_membership_review",
+        class_id="class_removed_membership_review",
+        owner_teacher=teacher,
+    )
+    ClassMembership.objects.create(
+        workspace=workspace,
+        student=student,
+        added_by_teacher=teacher,
+        status=ClassMembership.Status.REMOVED,
+        removed_at=timezone.now(),
+        removed_by_teacher=teacher,
+    )
+    ActorGrant.objects.create(
+        user=student,
+        role=RoleName.STUDENT,
+        course_id=workspace.course_id,
+        class_id=workspace.class_id,
+        source_checksum="a" * 64,
+    )
+    client = Client()
+    client.force_login(teacher)
+
+    response = client.get(
+        reverse("teacher-review-lookup"),
+        {
+            "course_id": workspace.course_id,
+            "class_id": workspace.class_id,
+            "learner_account": student.username,
+        },
+    )
+
+    assert response.status_code == 404
 
 
 def test_teacher_creates_class_and_manages_student_roster(

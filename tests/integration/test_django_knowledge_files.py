@@ -356,6 +356,32 @@ def test_expired_running_job_reports_waiting_for_worker() -> None:
     }
 
 
+def test_queued_job_reports_missing_ingestion_worker(tmp_path) -> None:
+    teacher = _teacher()
+    job = KnowledgeIngestionJob.objects.create(
+        course_id="course_1",
+        requested_by=teacher,
+        change_set_checksum=hashlib.sha256(b"queued-without-worker").hexdigest(),
+    )
+    client = Client()
+    client.force_login(teacher)
+
+    with override_settings(COURSE_INSIGHT_RUNTIME_DIR=tmp_path):
+        response = client.get(
+            reverse(
+                "teacher-knowledge-job",
+                kwargs={"course_id": "course_1", "job_id": job.pk},
+            )
+        )
+
+    payload = response.json()
+    assert payload["status"] == KnowledgeIngestionJob.Status.QUEUED
+    assert payload["worker_state"] == "waiting_for_worker"
+    assert payload["status_message"] == (
+        "后台处理进程未启动，任务正在等待处理"
+    )
+
+
 def test_incomplete_response_retry_reports_text_shrink_progress() -> None:
     teacher = _teacher()
     job = KnowledgeIngestionJob.objects.create(

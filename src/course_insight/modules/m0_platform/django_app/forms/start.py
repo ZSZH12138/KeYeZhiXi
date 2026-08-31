@@ -53,17 +53,48 @@ class ScopeSelectionForm(forms.Form):
     """Validate an explicit target before exact-grant authorization."""
 
     course_id = forms.CharField(
+        label="课程",
         min_length=1,
         max_length=128,
         strip=True,
         validators=[_scope_validator],
     )
     class_id = forms.CharField(
+        label="班级",
         min_length=1,
         max_length=128,
         strip=True,
         validators=[_scope_validator],
     )
+
+    def __init__(
+        self,
+        *args: object,
+        scope_choices: Iterable[tuple[str, str, str, str]] | None = None,
+        hide_scope: bool = False,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        choices = None if scope_choices is None else tuple(scope_choices)
+        if choices is not None:
+            self.fields["course_id"].widget = forms.Select(
+                choices=_unique_choices(
+                    (course_id, course_name)
+                    for course_id, course_name, _, _ in choices
+                )
+            )
+            self.fields["class_id"].widget = forms.Select(
+                choices=_unique_choices(
+                    (
+                        class_id,
+                        f"{course_name} / {class_name}",
+                    )
+                    for _, course_name, class_id, class_name in choices
+                )
+            )
+        if hide_scope:
+            self.fields["course_id"].widget = forms.HiddenInput()
+            self.fields["class_id"].widget = forms.HiddenInput()
 
     def clean(self) -> dict[str, object]:
         cleaned = super().clean()
@@ -118,11 +149,36 @@ class ReviewLookupForm(ScopeSelectionForm):
     """Validate teacher-owned scope plus one student account identity."""
 
     learner_account = forms.CharField(
+        label="学生账号",
         strip=False,
     )
+
+    def __init__(
+        self,
+        *args: object,
+        learner_choices: Iterable[tuple[str, str]] | None = None,
+        **kwargs: object,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        if learner_choices is not None:
+            self.fields["learner_account"] = forms.ChoiceField(
+                label="学生账号",
+                choices=tuple(learner_choices),
+            )
 
     def clean_learner_account(self) -> str:
         account_name = self.cleaned_data["learner_account"]
         if not account_name.strip():
             raise forms.ValidationError("学生账户名不能为空或全为空白")
         return account_name
+
+
+def _unique_choices(
+    choices: Iterable[tuple[str, str]],
+) -> tuple[tuple[str, str], ...]:
+    """Keep the first readable label for each submitted opaque value."""
+
+    unique: dict[str, str] = {}
+    for value, label in choices:
+        unique.setdefault(value, label)
+    return tuple(unique.items())

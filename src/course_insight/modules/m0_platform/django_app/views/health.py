@@ -103,7 +103,7 @@ def ready(request: HttpRequest) -> HttpResponse:
                     container.settings.outbox.lease_seconds
                 ),
             ),
-            "ingestion": _ingestion_status(container.settings.runtime_dir),
+            "ingestion": ingestion_worker_status(container.settings.runtime_dir),
             "legacy_capabilities": (
                 "ok"
                 if capability_readiness["status"] == "ready"
@@ -152,7 +152,7 @@ def ready(request: HttpRequest) -> HttpResponse:
     return JsonResponse(payload, status=503 if status == "not_ready" else 200)
 
 
-def _ingestion_status(runtime_dir: Path) -> str:
+def ingestion_worker_status(runtime_dir: Path) -> str:
     runtime_root = Path(runtime_dir).resolve()
     status_root = (runtime_root / "ingestion_worker").resolve()
     lock_path = (status_root / "worker.lock").resolve()

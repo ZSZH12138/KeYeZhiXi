@@ -68,7 +68,7 @@ class ScopedDeepSeekM7Adapter:
     privacy_policy: M7OutboundPrivacyPolicy = DEFAULT_M7_OUTBOUND_PRIVACY_POLICY
     transport: DeepSeekTransport | None = None
     timeout_seconds: float = 30.0
-    max_attempts: int = 1
+    max_attempts: int = 3
     retry_base_seconds: float = 0.25
     max_response_bytes: int = 1024 * 1024
     sleep: Callable[[float], None] = time.sleep
@@ -195,7 +195,7 @@ def build_scoped_deepseek_m7_adapter(
     privacy_policy: M7OutboundPrivacyPolicy = DEFAULT_M7_OUTBOUND_PRIVACY_POLICY,
     transport: DeepSeekTransport | None = None,
     timeout_seconds: float = 30.0,
-    max_attempts: int = 1,
+    max_attempts: int = 3,
     retry_base_seconds: float = 0.25,
     max_response_bytes: int = 1024 * 1024,
     sleep: Callable[[float], None] = time.sleep,

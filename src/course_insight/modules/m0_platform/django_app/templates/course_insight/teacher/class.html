@@ -70,7 +70,7 @@
     <h2>学生个体</h2>
     {% for report in analytics.individual_reports %}
       <details>
-        <summary>{{ report.learner_id }}：掌握度 {{ report.overall_mastery }}，最近得分 {{ report.recent_score }}，待复核 {{ report.review_required_count }}</summary>
+        <summary>{{ report.learner_account }}：掌握度 {{ report.overall_mastery }}，最近得分 {{ report.recent_score }}，待复核 {{ report.review_required_count }}</summary>
         <p><a href="{% url 'teacher-learner' course_id=course_id class_id=class_id learner_id=report.learner_id %}">查看该生掌握、错因、订正</a></p>
       </details>
     {% empty %}<p>暂无个体报告。</p>{% endfor %}

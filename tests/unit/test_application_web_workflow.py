@@ -12,6 +12,7 @@ import pytest
 
 from course_insight.application.coordinator import AppCoordinator
 from course_insight.application.assessment_recovery import AssessmentRecovery
+from course_insight.application.class_roster import ClassRosterSnapshot
 from course_insight.contracts.analytics import TeacherReviewDecision
 from course_insight.contracts.platform import (
     AssessmentSubmission,
@@ -512,6 +513,7 @@ class _WorkflowStore:
         self.observation_batches_built: list[LearningObservationBatch] = []
         self.observation_batches_received: list[LearningObservationBatch] = []
         self.appended_events: list[Any] = []
+        self.authoritative_state_class_ids: list[str | None] = []
         self.pending_review = False
 
     def trip(self, point: str) -> None:
@@ -818,6 +820,9 @@ class _M5:
         **kwargs: Any,
     ):
         assert len(expected_policy_checksum) == 64
+        self.store.authoritative_state_class_ids.append(
+            kwargs.get("authoritative_class_id")
+        )
         return self.update_state(**kwargs)
 
 
@@ -849,8 +854,9 @@ class _BaselineM5(_M5):
         self.fail_first_update = True
 
     def install_new_latest(self) -> None:
+        next_version = self.latest.learner_state_snapshot.state_version + 1
         newer = _state_update(
-            state_version=8,
+            state_version=next_version,
             updated_at=NOW - timedelta(minutes=1),
         )
         newer = newer.model_copy(
@@ -1540,6 +1546,36 @@ def test_non_profile_assessment_finishes_without_m5_m9_or_teacher_queue(
     assert store.analytics_history == {}
 
 
+@pytest.mark.parametrize("task_type", ["practice", "correction"])
+def test_non_profile_cleanup_keeps_answers_and_result_reloadable(
+    tmp_path: Path,
+    task_type: str,
+) -> None:
+    store = _WorkflowStore()
+    store.plan = store.plan.model_copy(update={"task_type": task_type})
+    coordinator = _coordinator(tmp_path, store)
+    _, submission, arguments = _start_and_submission(coordinator, tmp_path)
+    coordinator.submit_assessment(**arguments)
+    frozen_submission = (
+        tmp_path / "runtime" / "frozen_submissions" / f"{submission.attempt_id}.json"
+    )
+    assert frozen_submission.is_file()
+
+    coordinator.purge_transient_assessment(
+        paper_id=submission.paper_id,
+        attempt_id=submission.attempt_id,
+    )
+    reloaded = coordinator.get_student_assessment(
+        paper_id=submission.paper_id,
+        learner_id=submission.learner_id,
+    )
+
+    assert frozen_submission.is_file()
+    assert coordinator.frozen_assessment_submission(submission.attempt_id) == submission
+    assert reloaded["assessment_paper"].paper_id == submission.paper_id
+    assert reloaded["scoring_result"].attempt_id == submission.attempt_id
+
+
 @pytest.mark.parametrize(
     ("failure_point", "checkpoint"),
     [
@@ -1794,6 +1830,73 @@ def test_review_recovers_after_authoritative_save(
     )
 
 
+def test_review_retry_with_new_flow_resumes_matching_failed_decision(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    m5 = _BaselineM5(store)
+    m5.fail_first_update = False
+    first = _coordinator(tmp_path, store, m5=m5)
+    knowledge, _, submit_arguments = _start_and_submission(first, tmp_path)
+    submitted = first.submit_assessment(**submit_arguments)
+    audit = submitted["scoring_result"].get_audit_record("audit_attempt_1")
+    m5.install_new_latest()
+    m5.fail_first_update = True
+    original = TeacherReviewSubmission(
+        submission_id="decision_failed_flow",
+        audit_id=audit.audit_id,
+        expected_audit_version=audit.audit_version,
+        expected_audit_checksum=audit.content_checksum(),
+        reviewer_id="teacher_1",
+        decision="confirm",
+        final_total_score=audit.total_score,
+        criterion_overrides=[],
+        teacher_comment="Original review note.",
+        submitted_at=NOW + timedelta(minutes=1),
+    )
+    arguments = {
+        "paper_id": "paper_1",
+        "request_id": "review_failed_flow_request",
+        "knowledge_bundle": knowledge,
+        "state_policy_path": tmp_path / "state.json",
+        "teacher_threshold_policy_path": tmp_path / "teacher.json",
+        "course_id": "course_1",
+        "class_id": "class_1",
+    }
+
+    with pytest.raises(DomainError) as captured:
+        first.review_assessment(
+            **arguments,
+            review_submission=original,
+        )
+    assert captured.value.code == "WORKFLOW_EXECUTION_FAILED"
+    m5.install_new_latest()
+
+    recovered = _coordinator(tmp_path, store, m5=m5).review_assessment(
+        **{
+            **arguments,
+            "request_id": "review_retry_new_flow_request",
+        },
+        review_submission=original.model_copy(
+            update={
+                "submission_id": "decision_retry_new_flow",
+                "teacher_comment": "Retry after the page returned an error.",
+                "submitted_at": NOW + timedelta(minutes=2),
+            }
+        ),
+    )
+
+    failed_run = first._m0.get_assessment_run("review:decision_failed_flow")
+    assert failed_run.status == "completed"
+    assert failed_run.previous_learner_snapshot_id == "learner_snapshot_9"
+    assert failed_run.previous_class_snapshot_id == "class_snapshot_9"
+    assert first._m0.get_assessment_run("review:decision_retry_new_flow") is None
+    assert recovered["review_decision"].decision_id == "decision_failed_flow"
+    previous_learner, previous_class = m5.update_inputs[-1]
+    assert previous_learner.snapshot_id == "learner_snapshot_9"
+    assert previous_class.snapshot_id == "class_snapshot_9"
+
+
 def test_submit_replay_uses_submission_identity_not_correlation_id(
     tmp_path: Path,
 ) -> None:
@@ -1825,6 +1928,59 @@ def test_submit_replay_uses_submission_identity_not_correlation_id(
             }
         )
     assert captured.value.code == "ASSESSMENT_SUBMISSION_CONFLICT"
+
+
+def test_submit_retry_reuses_frozen_roster_time_when_membership_is_unchanged(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    first = _coordinator(tmp_path, store)
+    _, _, arguments = _start_and_submission(first, tmp_path)
+    original_roster = ClassRosterSnapshot.capture(
+        course_id="course_1",
+        class_id="class_1",
+        learner_ids=("learner_1", "learner_2"),
+        captured_at=NOW,
+    )
+    store.fail_after = "state"
+
+    with pytest.raises(DomainError):
+        first.submit_assessment(
+            **{
+                **arguments,
+                "class_roster_snapshot": original_roster,
+            }
+        )
+
+    retry_roster = ClassRosterSnapshot.capture(
+        course_id="course_1",
+        class_id="class_1",
+        learner_ids=("learner_2", "learner_1"),
+        captured_at=NOW + timedelta(minutes=1),
+    )
+    recovered = _coordinator(tmp_path, store).submit_assessment(
+        **{
+            **arguments,
+            "class_roster_snapshot": retry_roster,
+        }
+    )
+    stored = first._m0.get_assessment_run("submit:submission_1")
+
+    assert recovered["scoring_result"].attempt_id == "attempt_1"
+    assert stored.status == "completed"
+    assert stored.class_roster_captured_at == NOW
+
+
+def test_submit_passes_the_frozen_run_class_to_state_updating(
+    tmp_path: Path,
+) -> None:
+    store = _WorkflowStore()
+    coordinator = _coordinator(tmp_path, store)
+    _, _, arguments = _start_and_submission(coordinator, tmp_path)
+
+    coordinator.submit_assessment(**arguments)
+
+    assert store.authoritative_state_class_ids == ["class_1"]
 
 
 def test_submit_adopts_pre_v9_start_and_failed_inflight_run(
@@ -2409,6 +2565,48 @@ def test_waiting_review_rebases_on_latest_profile_state_before_posting(
             submitted_at=NOW + timedelta(minutes=1),
         ),
         request_id="review_after_class_advanced",
+        knowledge_bundle=knowledge,
+        state_policy_path=tmp_path / "state.json",
+        teacher_threshold_policy_path=tmp_path / "teacher.json",
+        course_id="course_1",
+        class_id="class_1",
+    )
+
+    previous_learner, previous_class = m5.update_inputs[-1]
+    assert previous_learner.snapshot_id == "learner_snapshot_8"
+    assert previous_class.snapshot_id == "class_snapshot_8"
+    assert reviewed["recomputed_state_result"] is not None
+
+
+def test_completed_review_rebases_on_latest_profile_state_before_posting(
+    tmp_path: Path,
+) -> None:
+    """Reviewing an older paper must append to, rather than overwrite, newer state."""
+
+    store = _WorkflowStore()
+    m5 = _BaselineM5(store)
+    m5.fail_first_update = False
+    coordinator = _coordinator(tmp_path, store, m5=m5)
+    knowledge, _, arguments = _start_and_submission(coordinator, tmp_path)
+    submitted = coordinator.submit_assessment(**arguments)
+    audit = submitted["scoring_result"].get_audit_record("audit_attempt_1")
+
+    m5.install_new_latest()
+    reviewed = coordinator.review_assessment(
+        paper_id="paper_1",
+        review_submission=TeacherReviewSubmission(
+            submission_id="decision_after_later_submission",
+            audit_id=audit.audit_id,
+            expected_audit_version=audit.audit_version,
+            expected_audit_checksum=audit.content_checksum(),
+            reviewer_id="teacher_1",
+            decision="confirm",
+            final_total_score=audit.total_score,
+            criterion_overrides=[],
+            teacher_comment="Confirmed after a later assessment advanced state.",
+            submitted_at=NOW + timedelta(minutes=1),
+        ),
+        request_id="review_after_later_submission",
         knowledge_bundle=knowledge,
         state_policy_path=tmp_path / "state.json",
         teacher_threshold_policy_path=tmp_path / "teacher.json",

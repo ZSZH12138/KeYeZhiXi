@@ -585,6 +585,40 @@ def advance_run(
     )
 
 
+def rebase_review_state_inputs(
+    run: AssessmentRun,
+    *,
+    now: datetime,
+    previous_learner_snapshot_id: str | None,
+    previous_learner_state_version: int | None,
+    previous_class_snapshot_id: str | None,
+) -> AssessmentRun:
+    """Replace an unapplied failed-review baseline while retaining its checkpoint."""
+
+    if (
+        run.operation != "review"
+        or run.status != "running"
+        or run.checkpoint != "state_inputs_frozen"
+        or run.previous_state_frozen is not True
+        or run.state_version is not None
+    ):
+        raise DomainError(
+            code="WORKFLOW_TRANSITION_INVALID",
+            module="m0",
+            message="review state inputs cannot be rebased at this checkpoint",
+            recoverable=True,
+        )
+    return replace(
+        run,
+        previous_learner_snapshot_id=previous_learner_snapshot_id,
+        previous_learner_state_version=previous_learner_state_version,
+        previous_class_snapshot_id=previous_class_snapshot_id,
+        previous_class_state_version=None,
+        version=run.version + 1,
+        updated_at=now,
+    )
+
+
 def next_checkpoint(run: AssessmentRun) -> str | None:
     """Return the only legal next checkpoint."""
 

@@ -168,6 +168,19 @@ class M0Repository(Protocol):
     ) -> AssessmentRun:
         """Advance one claimed workflow row by exactly one legal checkpoint."""
 
+    def rebase_review_state_inputs(
+        self,
+        operation_id: str,
+        *,
+        expected_version: int,
+        worker_id: str,
+        now: datetime,
+        previous_learner_snapshot_id: str | None,
+        previous_learner_state_version: int | None,
+        previous_class_snapshot_id: str | None,
+    ) -> AssessmentRun:
+        """CAS-replace an unapplied failed-review baseline with the latest state."""
+
     def reclaim_assessment_run(
         self,
         operation_id: str,

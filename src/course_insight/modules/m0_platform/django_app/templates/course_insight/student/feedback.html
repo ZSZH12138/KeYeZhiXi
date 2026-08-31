@@ -3,7 +3,7 @@
 {% block content %}
   {% include "course_insight/student/_nav.html" with current_label="学习反馈" %}
   <h1>学习反馈</h1>
-  <p>{{ feedback.message }}</p>
+  {% if feedback.message %}<p>{{ feedback.message }}</p>{% endif %}
   <h2>逐题反馈</h2>
   {% for item in question_details %}
     <section class="card" id="feedback-{{ item.item_instance_id }}">
@@ -51,10 +51,12 @@
       <li>暂无量规分项。</li>
     {% endfor %}
   </ul>
-  <h2>缺失知识点</h2>
+  {% if feedback.missing_concept_names %}
+  <h2>建议重点复习</h2>
   <ul>
-    {% for concept_id in feedback.missing_concept_ids %}<li>{{ concept_id }}</li>{% empty %}<li>无</li>{% endfor %}
+    {% for concept_name in feedback.missing_concept_names %}<li>{{ concept_name }}</li>{% endfor %}
   </ul>
+  {% endif %}
   <h2>证据引用</h2>
   <ul>
     {% for citation in feedback.citations %}
@@ -72,8 +74,10 @@
     {% endfor %}
   </ul>
   {% endif %}
+  {% if feedback.next_practice_labels %}
   <h2>后续练习</h2>
   <ul>
-    {% for item_id in feedback.next_practice_item_ids %}<li>{{ item_id }}</li>{% empty %}<li>暂无</li>{% endfor %}
+    {% for label in feedback.next_practice_labels %}<li>{{ label }}</li>{% endfor %}
   </ul>
+  {% endif %}
 {% endblock %}

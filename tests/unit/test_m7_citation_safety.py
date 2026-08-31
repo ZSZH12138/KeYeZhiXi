@@ -92,6 +92,47 @@ def test_release_scoped_parser_citation_is_student_safe(locator: str) -> None:
 
 
 @pytest.mark.parametrize(
+    "message",
+    [
+        "本次练习已完成；结果仅供即时反馈，不计入学习画像。",
+        "本次订正已完成；结果只更新待订正状态，不计入学习画像。",
+    ],
+)
+def test_controlled_transient_feedback_is_student_safe(message: str) -> None:
+    package = StudentFeedbackPackage(
+        feedback_id="feedback_transient_task_1",
+        task_id="task_1",
+        learner_id="learner_1",
+        message=message,
+        rubric_feedback=[],
+        missing_concept_ids=[],
+        evidence_citations=[],
+        next_practice_item_ids=[],
+        confidence=1.0,
+        generated_at=NOW,
+    )
+
+    assert package.safe_for_student() is True
+
+
+def test_uncontrolled_citation_free_feedback_remains_blocked() -> None:
+    package = StudentFeedbackPackage(
+        feedback_id="feedback_transient_task_1",
+        task_id="task_1",
+        learner_id="learner_1",
+        message="任意无引用反馈",
+        rubric_feedback=[],
+        missing_concept_ids=[],
+        evidence_citations=[],
+        next_practice_item_ids=[],
+        confidence=1.0,
+        generated_at=NOW,
+    )
+
+    assert package.safe_for_student() is False
+
+
+@pytest.mark.parametrize(
     ("field", "unsafe_value"),
     [
         ("evidence_id", "证据一"),

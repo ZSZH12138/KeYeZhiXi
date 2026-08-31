@@ -66,7 +66,7 @@
     {% empty %}<p class="muted">当前没有可显示的逐题反馈。</p>{% endfor %}
     {% if result.feedback %}
     <h2>安全反馈</h2>
-    <p>{{ result.feedback.message }}</p>
+    {% if result.feedback.message %}<p>{{ result.feedback.message }}</p>{% endif %}
     <p>订正说明：{{ result.feedback.correction_note }}</p>
     {% if feedback_url %}<p><a href="{{ feedback_url }}">查看完整反馈与证据引用</a></p>{% endif %}
     {% endif %}

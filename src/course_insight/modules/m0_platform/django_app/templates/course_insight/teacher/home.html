@@ -17,7 +17,7 @@
   </div>
   <div class="card">
     <h2>班级分析</h2>
-    <p class="muted">输入已获授权的课程和班级，查看知识地图、误区、个体、订正率和教学建议。不必先填试卷号。</p>
+    <p class="muted">选择已获授权的课程和班级，查看知识地图、误区、个体、订正率和教学建议。不必先填试卷号。</p>
     <form method="get" action="{% url 'teacher-class-lookup' %}">
       {{ class_form.as_p }}
       <button type="submit">打开班级</button>
@@ -25,7 +25,7 @@
   </div>
   <div class="card">
     <h2>成绩复核</h2>
-    <p class="muted">输入已获授权的课程、班级和学生账号，查看该学生所有会影响画像的答卷。</p>
+    <p class="muted">选择已获授权的课程和班级，再输入学生账号，查看该学生所有会影响画像的答卷。</p>
     <form method="get" action="{% url 'teacher-review-lookup' %}">
       {{ lookup_form.as_p }}
       <button type="submit">查看复核</button>

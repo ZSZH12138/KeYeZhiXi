@@ -394,6 +394,31 @@ def test_scoped_adapter_uses_exact_course_class_credentials() -> None:
     assert transport.authorization_headers == ["Bearer sk-scoped-class-key"]
 
 
+def test_scoped_adapter_retries_malformed_provider_output() -> None:
+    transport = _Transport(
+        DeepSeekHTTPResponse(200, b"not-json", {}),
+        _response(_valid_score_json()),
+    )
+    adapter = build_scoped_deepseek_m7_adapter(
+        settings_resolver=lambda _course_id, _class_id: ScopedDeepSeekM7Settings(
+            api_key="sk-scoped-class-key",
+            model_name="deepseek-v4-flash",
+            thinking_enabled=False,
+            api_revision=7,
+        ),
+        privacy_reviewer=_ALLOW_PRIVACY_REVIEWER,
+        transport=transport,
+        sleep=lambda _: None,
+        monotonic=lambda: 1.0,
+        clock=lambda: NOW,
+    )
+
+    outcome = adapter.score_governed(_scoring_task(), _evidence())
+
+    assert outcome.result.total_score == 2.0
+    assert transport.calls == 2
+
+
 def test_scoped_adapter_fails_closed_when_task_scope_is_missing() -> None:
     adapter = build_scoped_deepseek_m7_adapter(
         settings_resolver=lambda _course_id, _class_id: None,
@@ -712,12 +737,12 @@ def test_scoring_prompt_separates_untrusted_instructions_from_policy() -> None:
 @pytest.mark.parametrize(
     ("action_type", "expected_fragment"),
     [
-        ("diagnostic_probe", "Which condition is most important"),
-        ("minimal_hint", "Which part of your reasoning"),
-        ("evidence_hint", "Which part of your reasoning"),
-        ("guided_question", "what should you reconsider next"),
-        ("self_explanation_prompt", "in your own words"),
-        ("summary_and_transfer", "in a new case"),
+        ("diagnostic_probe", "最关键的条件"),
+        ("minimal_hint", "哪一步需要调整"),
+        ("evidence_hint", "哪一步需要调整"),
+        ("guided_question", "哪个条件应优先应用"),
+        ("self_explanation_prompt", "用自己的话说明"),
+        ("summary_and_transfer", "新的题目情境"),
     ],
 )
 def test_deterministic_feedback_template_follows_m6_action(
@@ -727,8 +752,7 @@ def test_deterministic_feedback_template_follows_m6_action(
     message = feedback_message(["concept_1"], action_type)
 
     assert expected_fragment in message
-    assert "concept_1" in message
-    assert "final answer" not in message.lower()
+    assert "concept_" not in message
 
 
 def test_governed_score_is_accepted_by_completed_m8_boundary(

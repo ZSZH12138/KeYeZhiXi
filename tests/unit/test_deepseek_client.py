@@ -309,7 +309,8 @@ def test_client_maps_timeouts_and_malformed_json_to_safe_errors(
         messages=({"role": "user", "content": "Return json."},),
     )
     malformed = _client(
-        _FakeTransport(DeepSeekHTTPResponse(200, b"not-json", {}))
+        _FakeTransport(DeepSeekHTTPResponse(200, b"not-json", {})),
+        max_attempts=1,
     ).invoke_json(
         request=_request(),
         messages=({"role": "user", "content": "Return json."},),
@@ -365,6 +366,24 @@ def test_client_retries_documented_empty_json_output(monkeypatch) -> None:
     assert sleeps == [0.25]
 
 
+def test_client_retries_malformed_200_json_output(monkeypatch) -> None:
+    monkeypatch.setenv("DEEPSEEK_API_KEY", "private-test-key")
+    sleeps: list[float] = []
+    transport = _FakeTransport(
+        DeepSeekHTTPResponse(200, b"not-json", {}),
+        _response(),
+    )
+
+    invocation = _client(transport, sleep=sleeps.append).invoke_json(
+        request=_request(),
+        messages=({"role": "user", "content": "Return json."},),
+    )
+
+    assert invocation.result.status == "succeeded"
+    assert len(transport.calls) == 2
+    assert sleeps == [0.25]
+
+
 def test_client_rejects_duplicate_json_keys(monkeypatch) -> None:
     monkeypatch.setenv("DEEPSEEK_API_KEY", "private-test-key")
     response = DeepSeekHTTPResponse(
@@ -387,7 +406,7 @@ def test_client_rejects_duplicate_json_keys(monkeypatch) -> None:
         headers={},
     )
 
-    invocation = _client(_FakeTransport(response)).invoke_json(
+    invocation = _client(_FakeTransport(response), max_attempts=1).invoke_json(
         request=_request(),
         messages=({"role": "user", "content": "Return json."},),
     )

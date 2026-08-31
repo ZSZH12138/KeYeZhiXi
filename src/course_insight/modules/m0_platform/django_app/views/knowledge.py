@@ -32,6 +32,9 @@ from course_insight.modules.m0_platform.django_app.forms.knowledge_files import 
     KnowledgeUploadForm,
     QuestionTextEditForm,
 )
+from course_insight.modules.m0_platform.django_app.views.health import (
+    ingestion_worker_status,
+)
 from course_insight.modules.m0_platform.django_app.models import (
     CourseClassWorkspace,
     CourseSource,
@@ -306,10 +309,18 @@ def job_status(
     except KnowledgeIngestionJob.DoesNotExist:
         raise Http404 from None
     checkpoint = job.checkpoint if isinstance(job.checkpoint, dict) else {}
-    waiting_for_worker = (
+    running_without_worker = (
         job.status == KnowledgeIngestionJob.Status.RUNNING
         and (job.lease_until is None or job.lease_until <= timezone.now())
     )
+    queued_without_worker = (
+        job.status == KnowledgeIngestionJob.Status.QUEUED
+        and ingestion_worker_status(
+            Path(settings.COURSE_INSIGHT_RUNTIME_DIR)
+        )
+        != "ok"
+    )
+    waiting_for_worker = running_without_worker or queued_without_worker
     detail_keys = (
         "completed_units",
         "total_units",
@@ -344,8 +355,11 @@ def job_status(
                 else job.status
             ),
             "status_message": (
+                "后台处理进程未启动，任务正在等待处理"
+                if queued_without_worker
+                else
                 "后台处理进程已停止，等待新的处理进程接管"
-                if waiting_for_worker
+                if running_without_worker
                 else "正在处理"
                 if job.status == KnowledgeIngestionJob.Status.RUNNING
                 else job.get_status_display()
